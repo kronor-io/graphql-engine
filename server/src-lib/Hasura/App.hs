@@ -102,7 +102,7 @@ import Hasura.GraphQL.Transport.HTTP
   ( CacheStoreSuccess (CacheStoreSkipped),
     MonadExecuteQuery (..),
   )
-import Hasura.GraphQL.Transport.HTTP.Protocol (toParsed)
+import Hasura.GraphQL.Transport.HTTP.Protocol qualified as Protocol
 import Hasura.GraphQL.Transport.WSServerApp qualified as WS
 import Hasura.GraphQL.Transport.WebSocket.Server qualified as WS
 import Hasura.Logging
@@ -168,8 +168,8 @@ import System.Metrics qualified as EKG
 import System.Metrics.Gauge qualified as EKG.Gauge
 import Text.Mustache.Compile qualified as M
 import Web.Spock.Core qualified as Spock
-import Hasura.RQL.Types.ApiLimit qualified as Limits
-import Data.HashMap.Strict.InsOrd qualified as OMap
+
+import Kronor.ApiLimitsEnforcer qualified as Kronor
 
 data ExitCode
   = -- these are used during server initialization:
@@ -1109,30 +1109,15 @@ instance (Monad m) => MonadVersionAPIWithExtraData (PGMetadataStorageAppT m) whe
 
 instance (Monad m) => MonadGQLExecutionCheck (PGMetadataStorageAppT m) where
   checkGQLExecution userInfo _ enableAL sc query _ = runExceptT $ do
-    req <- toParsed query
+    req <- Protocol.toParsed query
     checkQueryInAllowlist enableAL AllowlistModeGlobalOnly userInfo req sc
+    Kronor.checkGQLExecution userInfo sc req
     return req
 
   executeIntrospection _ introspectionQuery _ =
     pure $ Right $ ExecStepRaw introspectionQuery
 
-  checkGQLBatchedReqs userInfo _requestId reqs sc = runExceptT $ do
-    let Limits.ApiLimit _ _ _ _ mbatchLimit disabledLimits = sc.scApiLimits
-
-    unless disabledLimits $ do
-      case mbatchLimit of
-        Nothing -> pure ()
-        Just (Limits.Limit (Limits.MaxBatchSize globalMax) perRoleMax) -> do
-          let totalReqs = length reqs
-          
-          case OMap.lookup userInfo._uiRole perRoleMax of
-            Nothing -> do
-              when (globalMax < totalReqs) $
-                throw429 BadRequest "too many batched requests in a single request"
-            Just (Limits.MaxBatchSize roleMax) ->
-              when (roleMax < totalReqs) $
-                throw429 BadRequest "too many batched requests in a single request"
-
+  checkGQLBatchedReqs = Kronor.checkGQLBatchedReqs 
 
 instance (MonadIO m, MonadBaseControl IO m) => MonadConfigApiHandler (PGMetadataStorageAppT m) where
   runConfigApiHandler = configApiGetHandler

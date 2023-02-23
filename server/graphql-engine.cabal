@@ -1013,6 +1013,10 @@ library
                      , Net.IPv4
                      , Net.IPv6
 
+                     -- Kronor additions
+                     , Kronor.ApiLimitsEnforcer
+
+
 
 executable graphql-engine
   import: common-all, common-exe
