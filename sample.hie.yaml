@@ -2,28 +2,48 @@ cradle:
   cabal:
     - path: "./server/lib/dc-api/src"
       component: "dc-api:lib:dc-api"
+
     - path: "./server/lib/dc-api/test"
       component: "dc-api:test:tests-dc-api"
 
     - path: "./server/src-lib"
       component: "graphql-engine:lib:graphql-engine"
+
     - path: "./server/src-exec"
       component: "graphql-engine:exe:graphql-engine"
+
     - path: "./server/src-test"
       component: "graphql-engine:test:graphql-engine-tests"
 
     - path: "./server/test-mssql"
       component: "graphql-engine:test:graphql-engine-test-mssql"
+
     - path: "./server/test-postgres"
       component: "graphql-engine:test:graphql-engine-test-postgres"
 
     - path: "./server/src-bench-cache"
       component: "graphql-engine:bench:cache"
+
     - path: "server/lib/api-tests"
       component: "api-tests:exe:api-tests"
 
     - path: "server/src-emit-metadata-openapi"
       component: "graphql-engine:exe:emit-metadata-openapi"
+
+    - path: "server/lib/hasura-prelude/src"
+      component: "hasura-prelude:lib:hasura-prelude"
+
+    - path: "server/lib/resource-pool"
+      component: "resource-pool:lib:resource-pool"
+
+    - path: "server/lib/graphql-parser"
+      component: "graphql-parser:lib:graphql-parser"
+
+    - path: "server/lib/pg-client"
+      component: "pg-client:lib:pg-client"
+
+    - path: "server/lib/arrows-extra"
+      component: "arrows-extra:lib:arrows-extra"
 
     - path: "server/lib/aeson-ordered/src"
       component: "aeson-ordered:lib:aeson-ordered"
@@ -35,6 +55,7 @@ cradle:
 
     - path: "server/lib/schema-parsers/src"
       component: "schema-parsers:lib:schema-parsers"
+
     - path: "server/lib/schema-parsers/test"
       component: "schema-parsers:test:schema-parser-tests"
 

@@ -2,6 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
 -- | Defines the CE version of the engine.
 --
@@ -167,6 +168,8 @@ import System.Metrics qualified as EKG
 import System.Metrics.Gauge qualified as EKG.Gauge
 import Text.Mustache.Compile qualified as M
 import Web.Spock.Core qualified as Spock
+import Hasura.RQL.Types.ApiLimit qualified as Limits
+import Data.HashMap.Strict.InsOrd qualified as OMap
 
 data ExitCode
   = -- these are used during server initialization:
@@ -1113,7 +1116,23 @@ instance (Monad m) => MonadGQLExecutionCheck (PGMetadataStorageAppT m) where
   executeIntrospection _ introspectionQuery _ =
     pure $ Right $ ExecStepRaw introspectionQuery
 
-  checkGQLBatchedReqs _ _ _ _ = runExceptT $ pure ()
+  checkGQLBatchedReqs userInfo _requestId reqs sc = runExceptT $ do
+    let Limits.ApiLimit _ _ _ _ mbatchLimit disabledLimits = sc.scApiLimits
+
+    unless disabledLimits $ do
+      case mbatchLimit of
+        Nothing -> pure ()
+        Just (Limits.Limit (Limits.MaxBatchSize globalMax) perRoleMax) -> do
+          let totalReqs = length reqs
+          
+          case OMap.lookup userInfo._uiRole perRoleMax of
+            Nothing -> do
+              when (globalMax < totalReqs) $
+                throw429 BadRequest "too many batched requests in a single request"
+            Just (Limits.MaxBatchSize roleMax) ->
+              when (roleMax < totalReqs) $
+                throw429 BadRequest "too many batched requests in a single request"
+
 
 instance (MonadIO m, MonadBaseControl IO m) => MonadConfigApiHandler (PGMetadataStorageAppT m) where
   runConfigApiHandler = configApiGetHandler
