@@ -1110,7 +1110,7 @@ instance (Monad m) => MonadVersionAPIWithExtraData (PGMetadataStorageAppT m) whe
 instance (Monad m) => MonadGQLExecutionCheck (PGMetadataStorageAppT m) where
   checkGQLExecution userInfo _ enableAL sc query _ = runExceptT $ do
     req <- Protocol.toParsed query
-    checkQueryInAllowlist enableAL AllowlistModeGlobalOnly userInfo req sc
+    checkQueryInAllowlist enableAL AllowlistModeFull userInfo req sc
     Kronor.checkGQLExecution userInfo sc req
     return req
 
