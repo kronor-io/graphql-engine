@@ -1,15 +1,19 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Kronor.ApiLimitsEnforcer (checkGQLExecution, checkGQLBatchedReqs) where
+module Kronor.ApiLimitsEnforcer (checkGQLExecution, checkGQLBatchedReqs, askGraphqlOperationLimit) where
 
-import Data.HashMap.Strict.InsOrd qualified as OMap
+import Data.Map qualified as Map
+import Data.Time.Clock.Units qualified as Clock
 import GHC.Records qualified
 import Hasura.Base.Error
 import Hasura.GraphQL.Transport.HTTP.Protocol qualified as Protocol
 import Hasura.Prelude
 import Hasura.RQL.Types.ApiLimit qualified as Limits
+import Hasura.Server.Limits qualified as Limits
+import Hasura.Server.Types qualified as HGE
 import Hasura.Session (RoleName)
 import Language.GraphQL.Draft.Syntax qualified as G
+import System.Timeout.Lifted (timeout)
 
 checkGQLExecution ::
   ( MonadError QErr m,
@@ -45,7 +49,7 @@ checkGQLBatchedReqs userInfo _requestId reqs sc = runExceptT $ do
       Just (Limits.Limit (Limits.MaxBatchSize globalMax) perRoleMax) -> do
         let totalReqs = length reqs
 
-        case OMap.lookup userInfo._uiRole perRoleMax of
+        case Map.lookup userInfo._uiRole perRoleMax of
           Nothing -> do
             when (globalMax < totalReqs) $
               throw429 BadRequest "too many batched requests in a single request"
@@ -73,7 +77,7 @@ enforceNodeLimits userInfo sc query = do
     case mnodeLimit of
       Nothing -> pure ()
       Just (Limits.Limit (Limits.MaxNodes globalMax) perRoleMax) -> do
-        case OMap.lookup userInfo._uiRole perRoleMax of
+        case Map.lookup userInfo._uiRole perRoleMax of
           Nothing ->
             when (globalMax < totalNodes) $
               throw429 BadRequest "too many nodes in a single query"
@@ -84,6 +88,10 @@ enforceNodeLimits userInfo sc query = do
     countSelectionFields :: [G.Selection G.NoFragments G.Name] -> Int
     countSelectionFields = \case
       [] -> 0
+      (G.SelectionField (G.Field {_fName = n}) : xs)
+        | isIntrospectionFieldName n ->
+            -- instrospection queries are exempt from node limits
+            countSelectionFields xs
       (G.SelectionField (G.Field {_fSelectionSet = []}) : xs) ->
         countSelectionFields xs
       (G.SelectionField (G.Field {_fSelectionSet = nested}) : xs) ->
@@ -112,7 +120,7 @@ enforceDepthLimits userInfo sc query = do
     case mDepthLimit of
       Nothing -> pure ()
       Just (Limits.Limit (Limits.MaxDepth globalMax) perRoleMax) -> do
-        case OMap.lookup userInfo._uiRole perRoleMax of
+        case Map.lookup userInfo._uiRole perRoleMax of
           Nothing ->
             when (globalMax < totalNodes) $
               throw429 BadRequest "node depth limit exceeded"
@@ -123,6 +131,10 @@ enforceDepthLimits userInfo sc query = do
     countDepths :: [Int] -> [G.Selection G.NoFragments G.Name] -> [Int]
     countDepths acc = \case
       [] -> acc
+      (G.SelectionField (G.Field {_fName = n}) : xs)
+        | isIntrospectionFieldName n ->
+            -- instrospection queries are exempt from depth limits
+            countDepths acc xs
       (G.SelectionField (G.Field {_fSelectionSet = []}) : xs) ->
         countDepths acc xs
       (G.SelectionField (G.Field {_fSelectionSet = nested}) : xs) ->
@@ -131,3 +143,49 @@ enforceDepthLimits userInfo sc query = do
       (G.SelectionInlineFragment frag : xs) ->
         let innerDepth = 1 + (maximum (countDepths [0] (G._ifSelectionSet frag)))
          in countDepths (innerDepth : acc) xs
+
+askGraphqlOperationLimit ::
+  ( Monad m,
+    GHC.Records.HasField "_uiRole" userInfo RoleName
+  ) =>
+  HGE.RequestId ->
+  userInfo ->
+  Limits.ApiLimit ->
+  m Limits.ResourceLimits
+askGraphqlOperationLimit _requestId userInfo apiLimit = do
+  let Limits.ApiLimit _ _ _ mTimeLimit _ disabledLimits = apiLimit
+  if disabledLimits
+    then do
+      pure $ Limits.ResourceLimits id
+    else do
+      case mTimeLimit of
+        Nothing -> do
+          pure $ Limits.ResourceLimits id
+        Just (Limits.Limit (Limits.MaxTime globalMax) perRoleMax) -> do
+          case Map.lookup userInfo._uiRole perRoleMax of
+            Nothing -> do
+              pure $ Limits.ResourceLimits $ \action -> do
+                res <- timeout (fromInteger $ Clock.diffTimeToMicroSeconds (Clock.toDiffTime globalMax)) action
+                case res of
+                  Nothing -> do
+                    let err = err500 (CustomCode "time-limit-exceeded") "operation timed out"
+                    throwError err
+                  Just a -> do
+                    pure a
+            Just (Limits.MaxTime roleMax) -> do
+              pure $ Limits.ResourceLimits $ \action -> do
+                res <- timeout (fromInteger $ Clock.diffTimeToMicroSeconds (Clock.toDiffTime roleMax)) action
+                case res of
+                  Nothing -> do
+                    let err = err500 (CustomCode "time-limit-exceeded") "operation timed out"
+                    throwError err
+                  Just a -> do
+                    pure a
+
+isIntrospectionFieldName :: G.Name -> Bool
+isIntrospectionFieldName name =
+  name
+    `elem` [ G.unsafeMkName "__schema",
+             G.unsafeMkName "__type",
+             G.unsafeMkName "__typename"
+           ]

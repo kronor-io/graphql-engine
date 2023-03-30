@@ -1047,7 +1047,7 @@ mkHGEServer setupHook appStateRef ekgStore = do
 
 instance (Monad m) => HasResourceLimits (PGMetadataStorageAppT m) where
   askHTTPHandlerLimit = pure $ ResourceLimits id
-  askGraphqlOperationLimit _ _ _ = pure $ ResourceLimits id
+  askGraphqlOperationLimit = Kronor.askGraphqlOperationLimit
 
 instance (MonadIO m) => HttpLog (PGMetadataStorageAppT m) where
   type ExtraHttpLogMetadata (PGMetadataStorageAppT m) = ()
