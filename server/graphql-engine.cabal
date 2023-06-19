@@ -1015,6 +1015,7 @@ library
 
                      -- Kronor additions
                      , Kronor.ApiLimitsEnforcer
+                     , Kronor.TokenValidator
 
 
 

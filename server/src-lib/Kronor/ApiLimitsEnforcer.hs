@@ -2,6 +2,7 @@
 
 module Kronor.ApiLimitsEnforcer (checkGQLExecution, checkGQLBatchedReqs, askGraphqlOperationLimit) where
 
+import Control.Concurrent.STM qualified as STM
 import Data.Map qualified as Map
 import Data.Time.Clock.Units qualified as Clock
 import GHC.Records qualified
@@ -12,22 +13,37 @@ import Hasura.RQL.Types.ApiLimit qualified as Limits
 import Hasura.Server.Limits qualified as Limits
 import Hasura.Server.Types qualified as HGE
 import Hasura.Session (RoleName)
+import Hasura.Session qualified
+import Kronor.TokenValidator (HasInvalidTokens (..))
 import Language.GraphQL.Draft.Syntax qualified as G
 import System.Timeout.Lifted (timeout)
+import Data.Aeson qualified as Aeson
 
 checkGQLExecution ::
   ( MonadError QErr m,
-    GHC.Records.HasField "_uiRole" userInfo RoleName,
+    HasInvalidTokens m,
+    MonadIO m,
     GHC.Records.HasField "scApiLimits" schemaCache Limits.ApiLimit
   ) =>
-  userInfo ->
+  Hasura.Session.UserInfo ->
   schemaCache ->
   Protocol.GQLReq Protocol.GQLExecDoc ->
   m ()
-checkGQLExecution userInfo sc req = do
-  query <- Protocol.getSingleOperation req
-  enforceNodeLimits userInfo sc query
-  enforceDepthLimits userInfo sc query
+checkGQLExecution info sc req = do
+  invalidTokensRef <- askInvalidTokens
+  invalidTokens <- liftIO $ STM.atomically $ STM.readTVar invalidTokensRef
+  
+  case Hasura.Session.getSessionVariableValue "x-hasura-token-id" info._uiSession of
+    Just token -> do
+      when (token `elem` invalidTokens) $ do
+        throw400 InvalidParams "Invalid token"
+    _ -> pure ()
+
+  let Limits.ApiLimit _ _ _ _ _ disabledLimits = sc.scApiLimits
+  unless disabledLimits $ do
+    query <- Protocol.getSingleOperation req
+    enforceNodeLimits info sc query
+    enforceDepthLimits info sc query
 
 checkGQLBatchedReqs ::
   ( GHC.Records.HasField "_uiRole" userSession RoleName,

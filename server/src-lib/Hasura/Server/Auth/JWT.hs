@@ -601,8 +601,13 @@ processHeaderSimple jwtCtx jwt = do
   claims <- liftJWTError invalidJWTError $ verifyJwt jwtCtx $ RawJWT jwt
 
   let expTimeM = fmap (\(Jose.NumericDate t) -> t) $ claims ^. Jose.claimExp
-
-  claimsObject <- parseClaimsMap claims claimsConfig
+  let tokenId = fmap J.String (claims ^. Jose.claimJti) <|> claims ^. Jose.unregisteredClaims . at "tid"
+ 
+  claimsObject <- do
+    cl <- parseClaimsMap claims claimsConfig
+    case tokenId of
+      Nothing -> pure cl
+      Just i -> pure $ HM.insert "x-hasura-jwt-id" i cl
 
   pure (claimsObject, expTimeM)
   where

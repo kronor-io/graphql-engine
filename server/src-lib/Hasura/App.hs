@@ -169,7 +169,9 @@ import System.Metrics.Gauge qualified as EKG.Gauge
 import Text.Mustache.Compile qualified as M
 import Web.Spock.Core qualified as Spock
 
+-- Kronor imports
 import Kronor.ApiLimitsEnforcer qualified as Kronor
+import Kronor.TokenValidator qualified as Kronor
 
 data ExitCode
   = -- these are used during server initialization:
@@ -444,10 +446,15 @@ initialiseContext env GlobalCtx {..} serveOptions@ServeOptions {..} liveQueryHoo
     Interval interval -> do
       unLogger logger $ mkGenericLog @String LevelInfo "schema-sync" ("Schema sync enabled. Polling at " <> show interval)
       void $ startSchemaSyncListenerThread logger metadataDbPool instanceId interval metaVersionRef
+      
 
   subscriptionsState <- liftIO $ initSubscriptionsState logger liveQueryHook
 
   lockedEventsCtx <- liftIO $ initLockedEventsCtx
+  
+  -- Kronor Stuff
+  invalidTokensRef <- liftIO $ STM.newTVarIO mempty
+  void $ Kronor.startInvalidTokensListenerThread logger metadataDbPool 5000 invalidTokensRef
 
   let appEnv =
         AppEnv
@@ -478,7 +485,8 @@ initialiseContext env GlobalCtx {..} serveOptions@ServeOptions {..} liveQueryHoo
             appEnvWebSocketConnectionInitTimeout = soWebSocketConnectionInitTimeout,
             appEnvGracefulShutdownTimeout = soGracefulShutdownTimeout,
             appEnvCheckFeatureFlag = checkFeatureFlag',
-            appEnvSchemaPollInterval = soSchemaPollInterval
+            appEnvSchemaPollInterval = soSchemaPollInterval,
+            appEnvInvalidTokens = invalidTokensRef
           }
   pure (appStateRef, appEnv)
 
@@ -761,7 +769,7 @@ mkHGEServer setupHook appStateRef ekgStore = do
 
   -- Start a background thread for processing schema sync event present in the '_sscSyncEventRef'
   _ <- startSchemaSyncProcessorThread appStateRef newLogTVar
-
+  
   case appEnvEventingMode of
     EventingEnabled -> do
       startEventTriggerPollerThread logger appEnvLockedEventsCtx
@@ -1145,6 +1153,9 @@ instance (Monad m) => MonadEventLogCleanup (PGMetadataStorageAppT m) where
 
 instance (Monad m) => MonadGetApiTimeLimit (PGMetadataStorageAppT m) where
   runGetApiTimeLimit = pure $ Nothing
+  
+instance (Monad m) => Kronor.HasInvalidTokens (PGMetadataStorageAppT m) where
+  askInvalidTokens = asks appEnvInvalidTokens
 
 runInSeparateTx ::
   (MonadIO m) =>

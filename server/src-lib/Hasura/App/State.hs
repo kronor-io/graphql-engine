@@ -21,6 +21,7 @@ import Control.Concurrent.STM qualified as STM
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Environment qualified as E
 import Data.HashSet qualified as Set
+import Data.UUID (UUID)
 import Database.PG.Query qualified as PG
 import Hasura.Base.Error
 import Hasura.Eventing.Common (LockedEventsCtx)
@@ -124,7 +125,9 @@ data AppEnv = AppEnv
     -- as this thread is initialised there before creating the `AppStateRef`. But eventually we need
     -- to do it for the Enterprise version.
     appEnvSchemaPollInterval :: OptionalInterval,
-    appEnvCheckFeatureFlag :: CheckFeatureFlag
+    appEnvCheckFeatureFlag :: CheckFeatureFlag,
+    -- Kronor Stuff
+    appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID)
   }
 
 -- | Represents the Dynamic Hasura State, these field are mutable and can be changed
