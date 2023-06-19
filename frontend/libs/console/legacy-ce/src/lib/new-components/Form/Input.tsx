@@ -63,11 +63,11 @@ export type InputProps = FieldWrapperPassThroughProps & {
   /**
    * The input field prepend label
    */
-  prependLabel?: string;
+  prependLabel?: string | React.ReactNode;
   /**
    * The input field append label
    */
-  appendLabel?: string;
+  appendLabel?: string | React.ReactNode;
   /**
    * Renders a button to clear the input onClick
    */
@@ -103,6 +103,11 @@ export type InputProps = FieldWrapperPassThroughProps & {
    * Optional right button
    */
   rightButton?: React.ReactElement;
+
+  /**
+   * Custom props to be passed to the HTML input element
+   */
+  fieldProps?: React.HTMLProps<HTMLInputElement>;
 };
 
 export const Input = ({
@@ -115,6 +120,7 @@ export const Input = ({
   prependLabel = '',
   appendLabel = '',
   dataTest,
+  dataTestId,
   clearButton,
   inputClassName,
   maybeError,
@@ -174,7 +180,8 @@ export const Input = ({
           onChange={onChange}
           onInput={onInput}
           disabled={disabled}
-          data-testid={name}
+          data-testid={dataTestId || name}
+          onWheelCapture={fieldProps?.onWheelCapture || undefined}
           {...fieldProps}
         />
         {showInputEndContainer && (

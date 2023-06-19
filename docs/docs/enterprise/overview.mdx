@@ -1,6 +1,6 @@
 ---
 description: Documentation for Hasura Enterprise Edition
-title: 'EE: Hasura Enterprise'
+title: 'Enterprise Edition: Hasura Enterprise'
 keywords:
   - hasura
   - docs
@@ -12,38 +12,36 @@ sidebar_label: Overview
 
 import Thumbnail from '@site/src/components/Thumbnail';
 import VersionedLink from '@site/src/components/VersionedLink';
+import ProductBadge from '@site/src/components/ProductBadge';
 import Enterprise from '@site/static/icons/features/enterprise.svg';
 
 # <Enterprise /> Hasura Enterprise
 
-<div className="badge badge--primary heading-badge" style={{ marginBottom: `1rem` }}>
-  Available on: Self-hosted Enterprise
-</div>
+<ProductBadge self />
 
 <div className="overview-header">
   <div className="overview-text">
     <p>
-    The open-source version of Hasura is highly capable, but Hasura Enterprise Edition (EE) has additional built-in 
-    features for running Hasura in production on your own infrastructure. These features have key capabilities for observability, security, 
-    and performance.
+    The open-source version of Hasura is great, but to take your deployment to the next level, upgrade to Hasura Enterprise Edition. With additional built-in features, you can run Hasura in production on your own infrastructure with ease.
     </p>
     <p>
-    Hasura Enterprise Edition is available as a self-hosted product with support from the Hasura team. You can deploy 
-    the Hasura Enterprise Edition on your own infrastructure, or on a cloud provider of your choice.
+    Hasura Enterprise Edition comes with key capabilities for observability, security, and performance, making it the perfect choice for any organization running business-critical APIs. With the support of the Hasura team, you can deploy the Enterprise Edition on your own infrastructure or on a cloud provider of your choice.
     </p>
     <p>
-        If you'd like to learn more, please <a href="mailto:sales@hasura.io">contact us</a>.
+    Upgrade now and take advantage of our <b>30-day free <VersionedLink to="/enterprise/try-hasura-enterprise-edition/">
+          Enterprise Edition Trial
+        </VersionedLink></b> to evaluate the features right away. Don't miss out on the opportunity to streamline your deployment with Hasura Enterprise Edition. If you have any questions, please don't hesitate to <a href="mailto:sales@hasura.io">contact us</a>.
     </p>
     <h4>Quick Links</h4>
     <ul>
       <li>
-        <VersionedLink to="/enterprise/getting-started/quickstart-docker">
-          Quickstart with Docker.
+        <VersionedLink to="/enterprise/try-hasura-enterprise-edition/">
+          Free 30 days Trial for Hasura Enterprise Edition.
         </VersionedLink>
       </li>
       <li>
-        <VersionedLink to="/enterprise/upgrade-ce-to-ee/">
-          Upgrade from Hasura CE to Hasura Enterprise.
+        <VersionedLink to="/enterprise/getting-started/quickstart-docker">
+          Quickstart with Docker.
         </VersionedLink>
       </li>
     </ul>
@@ -51,7 +49,7 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
   </div>
  <iframe
         src="https://www.youtube.com/embed/QE3mTzE9a3o"
-        frameborder="0"
+        frameBorder="0"
         allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
         allowFullScreen
       />
@@ -59,7 +57,7 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
 
 ## Hasura Enterprise Edition Features
 
-<p>Hasura EE capabilities include all the features of the Hasura Open Source Community Edition plus:</p>
+<p>Hasura Enterprise Edition capabilities include all the features of the Hasura Open Source Community Edition plus:</p>
 <div className="overview-gallery">
   <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Databases</h2>
   <VersionedLink to="/databases/snowflake/index/">
@@ -86,8 +84,20 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
       <p>Learn how to connect Hasura to Oracle using Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>
+  <VersionedLink to="/databases/mariadb/index/">
+    <div className="card">
+      <h3>MariaDB</h3>
+      <p>Learn how to connect Hasura to MariaDB using Hasura Enterprise Edition.</p>
+    </div>
+  </VersionedLink>
+  <VersionedLink to="/databases/mongodb/index/">
+    <div className="card">
+      <h3>MongoDB</h3>
+      <p>Learn how to connect Hasura to MongoDB using Hasura Enterprise Edition.</p>
+    </div>
+  </VersionedLink>
   <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Performance</h2>
-  <VersionedLink to="/queries/response-caching/">
+  <VersionedLink to="/enterprise/caching/">
     <div className="card">
       <h3>Caching</h3>
       <p>Learn how to configure caching in Hasura Enterprise Edition to improve the performance of your GraphQL API.</p>
@@ -99,6 +109,12 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
       <p>
         Learn how to configure read replicas in Hasura Enterprise Edition to load balance your database queries and subscriptions.
       </p>
+    </div>
+  </VersionedLink>
+  <VersionedLink to="/auth/authentication/webhook/#webhook-auth-caching">
+    <div className="card">
+      <h3>Webhook Auth Caching</h3>
+      <p>Authentication webhook session variables can be cached to improve the performance of a request with Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>
   <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Security</h2>
@@ -131,12 +147,6 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
     <div className="card">
       <h3>Multiple JWT Secrets</h3>
       <p>Configure multiple JWT secrets in Hasura Enterprise Edition to support multiple authentication providers.</p>
-    </div>
-  </VersionedLink>
-  <VersionedLink to="/auth/authentication/webhook/#caching-webhook-session-variables">
-    <div className="card">
-      <h3>Caching Auth-Hook Session Variables</h3>
-      <p>Authentication webhook session variables can be cached to improve the performance of a request with Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>
   <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Event Triggers</h2>

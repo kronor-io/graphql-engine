@@ -12,7 +12,12 @@ module Hasura.App.State
 
     -- * init functions
     buildRebuildableAppContext,
+    rebuildRebuildableAppContext,
+
+    -- * subsets
     initSQLGenCtx,
+    buildCacheStaticConfig,
+    buildCacheDynamicConfig,
   )
 where
 
@@ -23,18 +28,23 @@ import Data.Environment qualified as E
 import Data.HashSet qualified as Set
 import Data.UUID (UUID)
 import Database.PG.Query qualified as PG
+import Hasura.Backends.DataConnector.Agent.Client (AgentLicenseKey)
 import Hasura.Base.Error
+import Hasura.CredentialCache
 import Hasura.Eventing.Common (LockedEventsCtx)
 import Hasura.Eventing.EventTrigger
 import Hasura.GraphQL.Execute.Subscription.Options
 import Hasura.GraphQL.Execute.Subscription.State qualified as ES
-import Hasura.GraphQL.Schema.NamingCase
-import Hasura.GraphQL.Schema.Options qualified as Options
 import Hasura.Incremental qualified as Inc
 import Hasura.Logging qualified as L
 import Hasura.Prelude
+import Hasura.RQL.DDL.Schema.Cache.Config
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Metadata
+import Hasura.RQL.Types.NamingCase
+import Hasura.RQL.Types.Roles (RoleName)
+import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache (MetadataResourceVersion)
 import Hasura.Server.Auth
 import Hasura.Server.Cors qualified as Cors
@@ -43,7 +53,6 @@ import Hasura.Server.Logging
 import Hasura.Server.Metrics
 import Hasura.Server.Prometheus
 import Hasura.Server.Types
-import Hasura.Session
 import Hasura.ShutdownLatch
 import Hasura.Tracing qualified as Tracing
 import Network.HTTP.Client qualified as HTTP
@@ -97,6 +106,7 @@ data AppEnv = AppEnv
   { appEnvPort :: Port,
     appEnvHost :: HostPreference,
     appEnvMetadataDbPool :: PG.PGPool,
+    appEnvIntrospectionDbPool :: Maybe PG.PGPool,
     appEnvManager :: HTTP.Manager,
     appEnvLoggers :: Loggers,
     appEnvMetadataVersionRef :: STM.TMVar MetadataResourceVersion,
@@ -120,12 +130,13 @@ data AppEnv = AppEnv
     appEnvWebSocketKeepAlive :: KeepAliveDelay,
     appEnvWebSocketConnectionInitTimeout :: WSConnectionInitTimeout,
     appEnvGracefulShutdownTimeout :: Refined NonNegative Seconds,
-    -- TODO: Move this to `ServerContext`. We are leaving this for now as this cannot be changed directly
+    -- TODO: Move this to `AppContext`. We are leaving this for now as this cannot be changed directly
     -- by the user on the cloud dashboard and will also require a refactor in HasuraPro/App.hs
     -- as this thread is initialised there before creating the `AppStateRef`. But eventually we need
     -- to do it for the Enterprise version.
     appEnvSchemaPollInterval :: OptionalInterval,
     appEnvCheckFeatureFlag :: CheckFeatureFlag,
+    appEnvLicenseKeyCache :: Maybe (CredentialCache AgentLicenseKey),
     -- Kronor Stuff
     appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID)
   }
@@ -151,7 +162,8 @@ data AppContext = AppContext
     acEnableTelemetry :: TelemetryStatus,
     acEventEngineCtx :: EventEngineCtx,
     acAsyncActionsFetchInterval :: OptionalInterval,
-    acApolloFederationStatus :: ApolloFederationStatus
+    acApolloFederationStatus :: ApolloFederationStatus,
+    acCloseWebsocketsOnMetadataChangeStatus :: CloseWebsocketsOnMetadataChangeStatus
   }
 
 -- | Collection of the LoggerCtx, the regular Logger and the PGLogger
@@ -180,7 +192,7 @@ data InvalidationKeys = InvalidationKeys
 -- subset of the environment, exposed by small, local typeclasses. For instance,
 -- at time of writing, this can be used to implement 'HasServerConfigCtx', as a
 -- first step towards breaking it down.
-class Monad m => HasAppEnv m where
+class (Monad m) => HasAppEnv m where
   askAppEnv :: m AppEnv
 
 instance (HasAppEnv m) => HasAppEnv (ReaderT r m) where
@@ -203,6 +215,27 @@ buildRebuildableAppContext readerContext serveOptions env = do
   let !appContext = Inc.result result
   let !rebuildableAppContext = RebuildableAppContext appContext initInvalidationKeys (Inc.rebuildRule result)
   pure rebuildableAppContext
+
+-- | Function to rebuild the 'AppContext' from a given 'RebuildableAppContext'
+-- and a new 'ServeOptions'
+rebuildRebuildableAppContext ::
+  (MonadIO m, MonadError QErr m) =>
+  (L.Logger L.Hasura, HTTP.Manager) ->
+  RebuildableAppContext impl ->
+  ServeOptions impl ->
+  E.Environment ->
+  m (RebuildableAppContext impl)
+rebuildRebuildableAppContext readerCtx (RebuildableAppContext _ _ rule) serveOptions env = do
+  let newInvalidationKeys = InvalidationKeys
+  result <-
+    liftEitherM
+      $ liftIO
+      $ runExceptT
+      $ flip runReaderT readerCtx
+      $ Inc.build rule (serveOptions, env, newInvalidationKeys)
+  let appContext = Inc.result result
+      !newCtx = RebuildableAppContext appContext newInvalidationKeys (Inc.rebuildRule result)
+  pure newCtx
 
 buildAppContextRule ::
   forall arr m impl.
@@ -240,7 +273,8 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys) -> do
           acEnableTelemetry = soEnableTelemetry,
           acEventEngineCtx = eventEngineCtx,
           acAsyncActionsFetchInterval = soAsyncActionsFetchInterval,
-          acApolloFederationStatus = soApolloFederationStatus
+          acApolloFederationStatus = soApolloFederationStatus,
+          acCloseWebsocketsOnMetadataChangeStatus = soCloseWebsocketsOnMetadataChangeStatus
         }
   where
     buildSqlGenCtx = Inc.cache proc (experimentalFeatures, stringifyNum, dangerousBooleanCollapse) -> do
@@ -258,8 +292,8 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys) -> do
           -< do
             (logger, httpManager) <- ask
             authModeRes <-
-              runExceptT $
-                setupAuthMode
+              runExceptT
+                $ setupAuthMode
                   adminSecretHashSet
                   webHook
                   jwtSecrets
@@ -273,10 +307,13 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys) -> do
     buildResponseInternalErrorsConfig = Inc.cache proc (adminInternalErrors, devMode) -> do
       let responseInternalErrorsConfig =
             if
-                | isDevModeEnabled devMode -> InternalErrorsAllRequests
-                | isAdminInternalErrorsEnabled adminInternalErrors -> InternalErrorsAdminOnly
-                | otherwise -> InternalErrorsDisabled
+              | isDevModeEnabled devMode -> InternalErrorsAllRequests
+              | isAdminInternalErrorsEnabled adminInternalErrors -> InternalErrorsAdminOnly
+              | otherwise -> InternalErrorsDisabled
       returnA -< responseInternalErrorsConfig
+
+--------------------------------------------------------------------------------
+-- subsets
 
 initSQLGenCtx :: HashSet ExperimentalFeature -> Options.StringifyNumbers -> Options.DangerouslyCollapseBooleans -> SQLGenCtx
 initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse =
@@ -288,3 +325,30 @@ initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse =
         | EFBigQueryStringNumericInput `elem` experimentalFeatures = Options.EnableBigQueryStringNumericInput
         | otherwise = Options.DisableBigQueryStringNumericInput
    in SQLGenCtx stringifyNum dangerousBooleanCollapse optimizePermissionFilters bigqueryStringNumericInput
+
+buildCacheStaticConfig :: AppEnv -> CacheStaticConfig
+buildCacheStaticConfig AppEnv {..} =
+  CacheStaticConfig
+    { _cscMaintenanceMode = appEnvEnableMaintenanceMode,
+      _cscEventingMode = appEnvEventingMode,
+      _cscReadOnlyMode = appEnvEnableReadOnlyMode,
+      _cscLogger = _lsLogger appEnvLoggers,
+      -- Native Queries are always enabled for Postgres in the OSS edition.
+      _cscAreNativeQueriesEnabled = \case
+        Postgres Vanilla -> True
+        _ -> False,
+      _cscAreStoredProceduresEnabled = False
+    }
+
+buildCacheDynamicConfig :: AppContext -> CacheDynamicConfig
+buildCacheDynamicConfig AppContext {..} = do
+  CacheDynamicConfig
+    { _cdcFunctionPermsCtx = acFunctionPermsCtx,
+      _cdcRemoteSchemaPermsCtx = acRemoteSchemaPermsCtx,
+      _cdcSQLGenCtx = acSQLGenCtx,
+      _cdcExperimentalFeatures = acExperimentalFeatures,
+      _cdcDefaultNamingConvention = acDefaultNamingConvention,
+      _cdcMetadataDefaults = acMetadataDefaults,
+      _cdcApolloFederationStatus = acApolloFederationStatus,
+      _cdcCloseWebsocketsOnMetadataChangeStatus = acCloseWebsocketsOnMetadataChangeStatus
+    }

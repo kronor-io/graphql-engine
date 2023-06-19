@@ -13,11 +13,11 @@ import Harness.Permissions (SelectPermissionDetails (..))
 import Harness.Permissions qualified as Permissions
 import Harness.Quoter.Graphql (graphql)
 import Harness.Quoter.Yaml (interpolateYaml, yaml)
+import Harness.Schema (Table (..))
+import Harness.Schema qualified as Schema
 import Harness.Test.BackendType qualified as BackendType
 import Harness.Test.Fixture qualified as Fixture
 import Harness.Test.FixtureName (FixtureName (..))
-import Harness.Test.Schema (Table (..))
-import Harness.Test.Schema qualified as Schema
 import Harness.Test.SetupAction qualified as SetupAction
 import Harness.TestEnvironment (GlobalTestEnvironment, Server, TestEnvironment (..), getBackendTypeConfig, stopServer)
 import Harness.Yaml (shouldReturnYaml)
@@ -30,11 +30,11 @@ import Test.Schema.RemoteRelationships.MetadataAPI.Common qualified as Common
 
 spec :: SpecWith GlobalTestEnvironment
 spec = do
-  Fixture.hgeWithEnv [("HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES", "true")] $
-    Fixture.runWithLocalTestEnvironment contexts testsWithFeatureOn
+  Fixture.hgeWithEnv [("HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES", "true")]
+    $ Fixture.runWithLocalTestEnvironment contexts testsWithFeatureOn
 
-  Fixture.hgeWithEnv [("HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES", "false")] $
-    Fixture.runWithLocalTestEnvironment contexts testsWithFeatureOff
+  Fixture.hgeWithEnv [("HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES", "false")]
+    $ Fixture.runWithLocalTestEnvironment contexts testsWithFeatureOff
   where
     lhsFixtures = [lhsPostgres, lhsRemoteServer]
     rhsFixtures = [rhsPostgres]
@@ -80,8 +80,8 @@ rhsPostgres =
               [ SetupAction.noTeardown (rhsPostgresSetup testEnv)
               ],
             Fixture.customOptions =
-              Just $
-                Fixture.defaultOptions
+              Just
+                $ Fixture.defaultOptions
                   { Fixture.stringifyNumbers = True
                   }
           }
@@ -124,29 +124,29 @@ album =
 
 floatType :: Schema.ScalarType
 floatType =
-  Schema.TCustomType $
-    Schema.defaultBackendScalarType
+  Schema.TCustomType
+    $ Schema.defaultBackendScalarType
       { Schema.bstPostgres = Just "NUMERIC"
       }
 
 mkFloatValue :: Text -> Schema.ScalarValue
 mkFloatValue int =
-  Schema.VCustomValue $
-    Schema.defaultBackendScalarValue
+  Schema.VCustomValue
+    $ Schema.defaultBackendScalarValue
       { Schema.bsvPostgres = Just (Schema.Unquoted int)
       }
 
 bigIntType :: Schema.ScalarType
 bigIntType =
-  Schema.TCustomType $
-    Schema.defaultBackendScalarType
+  Schema.TCustomType
+    $ Schema.defaultBackendScalarType
       { Schema.bstPostgres = Just "BIGINT"
       }
 
 mkBigIntValue :: Text -> Schema.ScalarValue
 mkBigIntValue int =
-  Schema.VCustomValue $
-    Schema.defaultBackendScalarValue
+  Schema.VCustomValue
+    $ Schema.defaultBackendScalarValue
       { Schema.bsvPostgres = Just (Schema.Unquoted int)
       }
 
@@ -330,8 +330,8 @@ rhsPostgresSetup (testEnvironment, _) = do
 -- Tests
 
 -- | Basic queries using *-to-DB joins
-testsWithFeatureOn :: Fixture.Options -> SpecWith (TestEnvironment, Maybe Server)
-testsWithFeatureOn opts = describe "object-relationship (stringified numeric types)" $ do
+testsWithFeatureOn :: SpecWith (TestEnvironment, Maybe Server)
+testsWithFeatureOn = describe "object-relationship (stringified numeric types)" $ do
   -- fetches the relationship data
   it "related-data" $ \(testEnvironment, _) -> do
     let query =
@@ -356,13 +356,13 @@ testsWithFeatureOn opts = describe "object-relationship (stringified numeric typ
                     version: "1.075"
             |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphql testEnvironment query)
       expectedResponse
 
 -- | Expected behaviour when HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES is false
-testsWithFeatureOff :: Fixture.Options -> SpecWith (TestEnvironment, Maybe Server)
-testsWithFeatureOff opts = describe "object-relationship (no stringified numeric types)" $ do
+testsWithFeatureOff :: SpecWith (TestEnvironment, Maybe Server)
+testsWithFeatureOff = describe "object-relationship (no stringified numeric types)" $ do
   -- fetches the relationship data
   it "related-data" $ \(testEnvironment, _) -> do
     let query =
@@ -387,6 +387,6 @@ testsWithFeatureOff opts = describe "object-relationship (no stringified numeric
                     version: 1.075
             |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphql testEnvironment query)
       expectedResponse

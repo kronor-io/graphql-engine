@@ -7,8 +7,9 @@ module Test.DataConnector.MockAgent.CustomScalarsSpec (spec) where
 --------------------------------------------------------------------------------
 
 import Control.Lens ((?~))
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.List.NonEmpty qualified as NE
+import Data.Set qualified as Set
 import Harness.Backend.DataConnector.Mock (AgentRequest (..), MockRequestResults (..), mockAgentGraphqlTest, mockQueryResponse)
 import Harness.Backend.DataConnector.Mock qualified as Mock
 import Harness.Quoter.Graphql (graphql)
@@ -39,7 +40,7 @@ spec =
     )
     tests
 
-sourceMetadata :: Aeson.Value
+sourceMetadata :: J.Value
 sourceMetadata =
   let source = BackendType.backendSourceName Mock.backendTypeMetadata
       backendType = BackendType.backendTypeString Mock.backendTypeMetadata
@@ -51,8 +52,8 @@ sourceMetadata =
         configuration: {}
       |]
 
-tests :: Fixture.Options -> SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
-tests _opts = describe "Custom scalar parsing tests" $ do
+tests :: SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
+tests = describe "Custom scalar parsing tests" $ do
   mockAgentGraphqlTest "works with simple object query" $ \_testEnv performGraphqlRequest -> do
     let headers = []
     let graphqlRequest =
@@ -68,7 +69,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse customScalarsTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse customScalarsTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -86,20 +87,21 @@ tests _opts = describe "Custom scalar parsing tests" $ do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "MyCustomScalarsTable")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("MyIntColumn", API.ColumnField (API.ColumnName "MyIntColumn") $ API.ScalarType "MyInt"),
-                        ("MyFloatColumn", API.ColumnField (API.ColumnName "MyFloatColumn") $ API.ScalarType "MyFloat"),
-                        ("MyStringColumn", API.ColumnField (API.ColumnName "MyStringColumn") $ API.ScalarType "MyString"),
-                        ("MyBooleanColumn", API.ColumnField (API.ColumnName "MyBooleanColumn") $ API.ScalarType "MyBoolean"),
-                        ("MyIDColumn", API.ColumnField (API.ColumnName "MyIDColumn") $ API.ScalarType "MyID"),
-                        ("MyAnythingColumn", API.ColumnField (API.ColumnName "MyAnythingColumn") $ API.ScalarType "MyAnything")
-                      ]
-                  & API.qLimit ?~ 1
+                  ?~ mkFieldsMap
+                    [ ("MyIntColumn", API.ColumnField (API.ColumnName "MyIntColumn") $ API.ScalarType "MyInt"),
+                      ("MyFloatColumn", API.ColumnField (API.ColumnName "MyFloatColumn") $ API.ScalarType "MyFloat"),
+                      ("MyStringColumn", API.ColumnField (API.ColumnName "MyStringColumn") $ API.ScalarType "MyString"),
+                      ("MyBooleanColumn", API.ColumnField (API.ColumnName "MyBooleanColumn") $ API.ScalarType "MyBoolean"),
+                      ("MyIDColumn", API.ColumnField (API.ColumnName "MyIDColumn") $ API.ScalarType "MyID"),
+                      ("MyAnythingColumn", API.ColumnField (API.ColumnName "MyAnythingColumn") $ API.ScalarType "MyAnything")
+                    ]
+                    & API.qLimit
+                  ?~ 1
               )
         )
 
@@ -125,7 +127,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse customScalarsTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse customScalarsTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -143,47 +145,50 @@ tests _opts = describe "Custom scalar parsing tests" $ do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "MyCustomScalarsTable")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("MyIntColumn", API.ColumnField (API.ColumnName "MyIntColumn") $ API.ScalarType "MyInt"),
-                        ("MyFloatColumn", API.ColumnField (API.ColumnName "MyFloatColumn") $ API.ScalarType "MyFloat"),
-                        ("MyStringColumn", API.ColumnField (API.ColumnName "MyStringColumn") $ API.ScalarType "MyString"),
-                        ("MyBooleanColumn", API.ColumnField (API.ColumnName "MyBooleanColumn") $ API.ScalarType "MyBoolean"),
-                        ("MyIDColumn", API.ColumnField (API.ColumnName "MyIDColumn") $ API.ScalarType "MyID"),
-                        ("MyAnythingColumn", API.ColumnField (API.ColumnName "MyAnythingColumn") $ API.ScalarType "MyAnything")
-                      ]
-                  & API.qLimit ?~ 1
-                  & API.qWhere
-                    ?~ And
-                      [ ApplyBinaryComparisonOperator
-                          Equal
-                          (ComparisonColumn CurrentTable (ColumnName "MyBooleanColumn") (ScalarType "MyBoolean"))
-                          (ScalarValueComparison $ ScalarValue (Aeson.Bool True) (ScalarType "MyBoolean")),
-                        ApplyBinaryComparisonOperator
-                          Equal
-                          (ComparisonColumn CurrentTable (ColumnName "MyFloatColumn") (ScalarType "MyFloat"))
-                          (ScalarValueComparison $ ScalarValue (Aeson.Number 3.14) (ScalarType "MyFloat")),
-                        ApplyBinaryComparisonOperator
-                          Equal
-                          (ComparisonColumn CurrentTable (ColumnName "MyStringColumn") (ScalarType "MyString"))
-                          (ScalarValueComparison $ ScalarValue (Aeson.String "foo") (ScalarType "MyString")),
-                        ApplyBinaryComparisonOperator
-                          Equal
-                          (ComparisonColumn CurrentTable (ColumnName "MyIDColumn") (ScalarType "MyID"))
-                          (ScalarValueComparison $ ScalarValue (Aeson.String "x") (ScalarType "MyID")),
-                        ApplyBinaryComparisonOperator
-                          Equal
-                          (ComparisonColumn CurrentTable (ColumnName "MyIntColumn") (ScalarType "MyInt"))
-                          (ScalarValueComparison $ ScalarValue (Aeson.Number 42.0) (ScalarType "MyInt")),
-                        ApplyBinaryComparisonOperator
-                          Equal
-                          (ComparisonColumn CurrentTable (ColumnName "MyAnythingColumn") (ScalarType "MyAnything"))
-                          (ScalarValueComparison $ ScalarValue (Aeson.Object mempty) (ScalarType "MyAnything"))
-                      ]
+                  ?~ mkFieldsMap
+                    [ ("MyIntColumn", API.ColumnField (API.ColumnName "MyIntColumn") $ API.ScalarType "MyInt"),
+                      ("MyFloatColumn", API.ColumnField (API.ColumnName "MyFloatColumn") $ API.ScalarType "MyFloat"),
+                      ("MyStringColumn", API.ColumnField (API.ColumnName "MyStringColumn") $ API.ScalarType "MyString"),
+                      ("MyBooleanColumn", API.ColumnField (API.ColumnName "MyBooleanColumn") $ API.ScalarType "MyBoolean"),
+                      ("MyIDColumn", API.ColumnField (API.ColumnName "MyIDColumn") $ API.ScalarType "MyID"),
+                      ("MyAnythingColumn", API.ColumnField (API.ColumnName "MyAnythingColumn") $ API.ScalarType "MyAnything")
+                    ]
+                    & API.qLimit
+                  ?~ 1
+                    & API.qWhere
+                  ?~ And
+                    ( Set.fromList
+                        [ ApplyBinaryComparisonOperator
+                            Equal
+                            (ComparisonColumn CurrentTable (ColumnName "MyBooleanColumn") (ScalarType "MyBoolean"))
+                            (ScalarValueComparison $ ScalarValue (J.Bool True) (ScalarType "MyBoolean")),
+                          ApplyBinaryComparisonOperator
+                            Equal
+                            (ComparisonColumn CurrentTable (ColumnName "MyFloatColumn") (ScalarType "MyFloat"))
+                            (ScalarValueComparison $ ScalarValue (J.Number 3.14) (ScalarType "MyFloat")),
+                          ApplyBinaryComparisonOperator
+                            Equal
+                            (ComparisonColumn CurrentTable (ColumnName "MyStringColumn") (ScalarType "MyString"))
+                            (ScalarValueComparison $ ScalarValue (J.String "foo") (ScalarType "MyString")),
+                          ApplyBinaryComparisonOperator
+                            Equal
+                            (ComparisonColumn CurrentTable (ColumnName "MyIDColumn") (ScalarType "MyID"))
+                            (ScalarValueComparison $ ScalarValue (J.String "x") (ScalarType "MyID")),
+                          ApplyBinaryComparisonOperator
+                            Equal
+                            (ComparisonColumn CurrentTable (ColumnName "MyIntColumn") (ScalarType "MyInt"))
+                            (ScalarValueComparison $ ScalarValue (J.Number 42.0) (ScalarType "MyInt")),
+                          ApplyBinaryComparisonOperator
+                            Equal
+                            (ComparisonColumn CurrentTable (ColumnName "MyAnythingColumn") (ScalarType "MyAnything"))
+                            (ScalarValueComparison $ ScalarValue (J.Object mempty) (ScalarType "MyAnything"))
+                        ]
+                    )
               )
         )
 
@@ -199,7 +204,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -226,7 +231,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -253,7 +258,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -280,7 +285,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -303,7 +308,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -330,7 +335,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -357,7 +362,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -384,7 +389,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -411,7 +416,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -438,7 +443,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -465,7 +470,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -492,7 +497,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -519,7 +524,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -542,7 +547,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -569,7 +574,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -596,7 +601,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -619,7 +624,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -642,7 +647,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -665,7 +670,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -688,7 +693,7 @@ tests _opts = describe "Custom scalar parsing tests" $ do
               }
             }
           |]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkRowsQueryResponse myIntTable)
+    let mockConfig = mockQueryResponse (mkRowsQueryResponse myIntTable)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -700,15 +705,15 @@ tests _opts = describe "Custom scalar parsing tests" $ do
       |]
   where
     customScalarsTable =
-      [ [ ("MyIntColumn", API.mkColumnFieldValue $ Aeson.Number 42),
-          ("MyFloatColumn", API.mkColumnFieldValue $ Aeson.Number 3.14),
-          ("MyStringColumn", API.mkColumnFieldValue $ Aeson.String "foo"),
-          ("MyBooleanColumn", API.mkColumnFieldValue $ Aeson.Bool True),
-          ("MyIDColumn", API.mkColumnFieldValue $ Aeson.String "x"),
-          ("MyAnythingColumn", API.mkColumnFieldValue $ Aeson.Object mempty)
+      [ [ ("MyIntColumn", API.mkColumnFieldValue $ J.Number 42),
+          ("MyFloatColumn", API.mkColumnFieldValue $ J.Number 3.14),
+          ("MyStringColumn", API.mkColumnFieldValue $ J.String "foo"),
+          ("MyBooleanColumn", API.mkColumnFieldValue $ J.Bool True),
+          ("MyIDColumn", API.mkColumnFieldValue $ J.String "x"),
+          ("MyAnythingColumn", API.mkColumnFieldValue $ J.Object mempty)
         ]
       ]
     myIntTable =
-      [ [ ("MyIntColumn", API.mkColumnFieldValue $ Aeson.Number 42)
+      [ [ ("MyIntColumn", API.mkColumnFieldValue $ J.Number 42)
         ]
       ]

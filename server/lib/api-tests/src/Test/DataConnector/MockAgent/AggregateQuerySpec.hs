@@ -5,9 +5,10 @@ module Test.DataConnector.MockAgent.AggregateQuerySpec (spec) where
 --------------------------------------------------------------------------------
 
 import Control.Lens ((.~), (?~))
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
+import Data.Set qualified as Set
 import Harness.Backend.DataConnector.Mock (AgentRequest (..), MockRequestResults (..), mockAgentGraphqlTest, mockQueryResponse)
 import Harness.Backend.DataConnector.Mock qualified as Mock
 import Harness.Quoter.Graphql (graphql)
@@ -40,7 +41,7 @@ spec =
 
 --------------------------------------------------------------------------------
 
-sourceMetadata :: Aeson.Value
+sourceMetadata :: J.Value
 sourceMetadata =
   let source = BackendType.backendSourceName Mock.backendTypeMetadata
       backendType = BackendType.backendTypeString Mock.backendTypeMetadata
@@ -85,8 +86,8 @@ sourceMetadata =
 
 --------------------------------------------------------------------------------
 
-tests :: Fixture.Options -> SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
-tests _opts = describe "Aggregate Query Tests" $ do
+tests :: SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
+tests = describe "Aggregate Query Tests" $ do
   mockAgentGraphqlTest "works with multiple nodes fields and through array relations" $ \_testEnv performGraphqlRequest -> do
     let headers = []
     let graphqlRequest =
@@ -111,18 +112,18 @@ tests _opts = describe "Aggregate Query Tests" $ do
           |]
     let queryResponse =
           mkRowsQueryResponse
-            [ [ ("ArtistIds_Id", API.mkColumnFieldValue $ Aeson.Number 1),
-                ("ArtistNames_Name", API.mkColumnFieldValue $ Aeson.String "AC/DC"),
+            [ [ ("ArtistIds_Id", API.mkColumnFieldValue $ J.Number 1),
+                ("ArtistNames_Name", API.mkColumnFieldValue $ J.String "AC/DC"),
                 ( "nodes_Albums",
-                  API.mkRelationshipFieldValue $
-                    mkRowsQueryResponse
-                      [ [("nodes_Title", API.mkColumnFieldValue $ Aeson.String "For Those About To Rock We Salute You")],
-                        [("nodes_Title", API.mkColumnFieldValue $ Aeson.String "Let There Be Rock")]
+                  API.mkRelationshipFieldValue
+                    $ mkRowsQueryResponse
+                      [ [("nodes_Title", API.mkColumnFieldValue $ J.String "For Those About To Rock We Salute You")],
+                        [("nodes_Title", API.mkColumnFieldValue $ J.String "Let There Be Rock")]
                       ]
                 )
               ]
             ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse queryResponse
+    let mockConfig = mockQueryResponse queryResponse
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -143,41 +144,45 @@ tests _opts = describe "Aggregate Query Tests" $ do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Artist")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("ArtistIds_Id", API.ColumnField (API.ColumnName "ArtistId") (API.ScalarType "number")),
-                        ("ArtistNames_Name", API.ColumnField (API.ColumnName "Name") (API.ScalarType "string")),
-                        ( "nodes_Albums",
-                          API.RelField
-                            ( API.RelationshipField
-                                (API.RelationshipName "Albums")
-                                ( emptyQuery
-                                    & API.qFields ?~ mkFieldsMap [("nodes_Title", API.ColumnField (API.ColumnName "Title") (API.ScalarType "string"))]
-                                )
-                            )
-                        )
-                      ]
-                  & API.qLimit ?~ 1
+                  ?~ mkFieldsMap
+                    [ ("ArtistIds_Id", API.ColumnField (API.ColumnName "ArtistId") (API.ScalarType "number")),
+                      ("ArtistNames_Name", API.ColumnField (API.ColumnName "Name") (API.ScalarType "string")),
+                      ( "nodes_Albums",
+                        API.RelField
+                          ( API.RelationshipField
+                              (API.RelationshipName "Albums")
+                              ( emptyQuery
+                                  & API.qFields
+                                  ?~ mkFieldsMap [("nodes_Title", API.ColumnField (API.ColumnName "Title") (API.ScalarType "string"))]
+                              )
+                          )
+                      )
+                    ]
+                    & API.qLimit
+                  ?~ 1
               )
-              & API.qrTableRelationships
-                .~ [ API.TableRelationships
-                       { _trSourceTable = mkTableName "Artist",
-                         _trRelationships =
-                           HashMap.fromList
-                             [ ( API.RelationshipName "Albums",
-                                 API.Relationship
-                                   { _rTargetTable = mkTableName "Album",
-                                     _rRelationshipType = API.ArrayRelationship,
-                                     _rColumnMapping = HashMap.fromList [(API.ColumnName "ArtistId", API.ColumnName "ArtistId")]
-                                   }
-                               )
-                             ]
-                       }
-                   ]
+            & API.qrRelationships
+            .~ Set.fromList
+              [ API.RTable
+                  API.TableRelationships
+                    { _trelSourceTable = mkTableName "Artist",
+                      _trelRelationships =
+                        HashMap.fromList
+                          [ ( API.RelationshipName "Albums",
+                              API.Relationship
+                                { _rTargetTable = mkTableName "Album",
+                                  _rRelationshipType = API.ArrayRelationship,
+                                  _rColumnMapping = HashMap.fromList [(API.ColumnName "ArtistId", API.ColumnName "ArtistId")]
+                                }
+                            )
+                          ]
+                    }
+              ]
         )
 
   mockAgentGraphqlTest "works with multiple aggregate fields and through array relations" $ \_testEnv performGraphqlRequest -> do
@@ -209,28 +214,28 @@ tests _opts = describe "Aggregate Query Tests" $ do
             }
           |]
     let aggregates =
-          [ ("counts_count", Aeson.Number 2),
-            ("counts_uniqueBillingCountries", Aeson.Number 2),
-            ("ids_minimum_Id", Aeson.Number 1),
-            ("ids_max_InvoiceId", Aeson.Number 2)
+          [ ("counts_count", J.Number 2),
+            ("counts_uniqueBillingCountries", J.Number 2),
+            ("ids_minimum_Id", J.Number 1),
+            ("ids_max_InvoiceId", J.Number 2)
           ]
         rows =
           [ [ ( "nodes_Lines",
-                API.mkRelationshipFieldValue $
-                  mkAggregatesQueryResponse
-                    [ ("aggregate_count", Aeson.Number 2)
+                API.mkRelationshipFieldValue
+                  $ mkAggregatesQueryResponse
+                    [ ("aggregate_count", J.Number 2)
                     ]
               )
             ],
             [ ( "nodes_Lines",
-                API.mkRelationshipFieldValue $
-                  mkAggregatesQueryResponse
-                    [ ("aggregate_count", Aeson.Number 4)
+                API.mkRelationshipFieldValue
+                  $ mkAggregatesQueryResponse
+                    [ ("aggregate_count", J.Number 4)
                     ]
               )
             ]
           ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse (mkQueryResponse rows aggregates)
+    let mockConfig = mockQueryResponse (mkQueryResponse rows aggregates)
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -257,46 +262,50 @@ tests _opts = describe "Aggregate Query Tests" $ do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Invoice")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ( "nodes_Lines",
-                          API.RelField
-                            ( API.RelationshipField
-                                (API.RelationshipName "InvoiceLines")
-                                ( emptyQuery & API.qAggregates ?~ mkFieldsMap [("aggregate_count", API.StarCount)]
-                                )
-                            )
-                        )
-                      ]
-                  & API.qAggregates
-                    ?~ mkFieldsMap
-                      [ ("counts_count", API.StarCount),
-                        ("counts_uniqueBillingCountries", API.ColumnCount (API.ColumnCountAggregate (API.ColumnName "BillingCountry") True)),
-                        ("ids_minimum_Id", API.SingleColumn (singleColumnAggregateMin (API.ColumnName "InvoiceId") (API.ScalarType "number"))),
-                        ("ids_max_InvoiceId", API.SingleColumn (singleColumnAggregateMax (API.ColumnName "InvoiceId") (API.ScalarType "number")))
-                      ]
-                  & API.qLimit ?~ 2
-                  & API.qAggregatesLimit ?~ 2
+                  ?~ mkFieldsMap
+                    [ ( "nodes_Lines",
+                        API.RelField
+                          ( API.RelationshipField
+                              (API.RelationshipName "InvoiceLines")
+                              ( emptyQuery & API.qAggregates ?~ mkFieldsMap [("aggregate_count", API.StarCount)]
+                              )
+                          )
+                      )
+                    ]
+                    & API.qAggregates
+                  ?~ mkFieldsMap
+                    [ ("counts_count", API.StarCount),
+                      ("counts_uniqueBillingCountries", API.ColumnCount (API.ColumnCountAggregate (API.ColumnName "BillingCountry") True)),
+                      ("ids_minimum_Id", API.SingleColumn (singleColumnAggregateMin (API.ColumnName "InvoiceId") (API.ScalarType "number"))),
+                      ("ids_max_InvoiceId", API.SingleColumn (singleColumnAggregateMax (API.ColumnName "InvoiceId") (API.ScalarType "number")))
+                    ]
+                    & API.qLimit
+                  ?~ 2
+                    & API.qAggregatesLimit
+                  ?~ 2
               )
-              & API.qrTableRelationships
-                .~ [ API.TableRelationships
-                       { _trSourceTable = mkTableName "Invoice",
-                         _trRelationships =
-                           HashMap.fromList
-                             [ ( API.RelationshipName "InvoiceLines",
-                                 API.Relationship
-                                   { _rTargetTable = mkTableName "InvoiceLine",
-                                     _rRelationshipType = API.ArrayRelationship,
-                                     _rColumnMapping = HashMap.fromList [(API.ColumnName "InvoiceId", API.ColumnName "InvoiceId")]
-                                   }
-                               )
-                             ]
-                       }
-                   ]
+            & API.qrRelationships
+            .~ Set.fromList
+              [ API.RTable
+                  API.TableRelationships
+                    { _trelSourceTable = mkTableName "Invoice",
+                      _trelRelationships =
+                        HashMap.fromList
+                          [ ( API.RelationshipName "InvoiceLines",
+                              API.Relationship
+                                { _rTargetTable = mkTableName "InvoiceLine",
+                                  _rRelationshipType = API.ArrayRelationship,
+                                  _rColumnMapping = HashMap.fromList [(API.ColumnName "InvoiceId", API.ColumnName "InvoiceId")]
+                                }
+                            )
+                          ]
+                    }
+              ]
         )
 
 singleColumnAggregateMax :: API.ColumnName -> API.ScalarType -> API.SingleColumnAggregate

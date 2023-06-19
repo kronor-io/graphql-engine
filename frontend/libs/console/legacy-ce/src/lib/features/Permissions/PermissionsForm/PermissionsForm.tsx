@@ -27,6 +27,7 @@ import { useListAllTableColumns } from '../../Data';
 import { useMetadataSource } from '../../MetadataAPI';
 import useScrollIntoView from './hooks/useScrollIntoView';
 import { getAllowedFilterKeys } from './hooks/dataFetchingHooks/useFormData/createFormData/index';
+import Skeleton from 'react-loading-skeleton';
 
 export interface ComponentProps {
   dataSourceName: string;
@@ -71,8 +72,14 @@ const Component = (props: ComponentProps) => {
   });
 
   const onSubmit = async (formData: PermissionsSchema) => {
-    await updatePermissions.submit(formData);
-    handleClose();
+    const newValues = getValues();
+    try {
+      await updatePermissions.submit(formData);
+      handleClose();
+    } catch (e) {
+      reset();
+      reset(newValues);
+    }
   };
 
   const handleDelete = async () => {
@@ -134,7 +141,7 @@ const Component = (props: ComponentProps) => {
               table={table}
               roleName={roleName}
               queryType={queryType}
-              subQueryType={queryType === 'update' ? 'pre' : undefined}
+              subQueryType={queryType === 'update' ? 'pre_update' : undefined}
               permissionsKey={filterKeys[0]}
               dataSourceName={dataSourceName}
               supportedOperators={data?.defaultValues?.supportedOperators ?? []}
@@ -151,7 +158,9 @@ const Component = (props: ComponentProps) => {
                   table={table}
                   roleName={roleName}
                   queryType={queryType}
-                  subQueryType={queryType === 'update' ? 'post' : undefined}
+                  subQueryType={
+                    queryType === 'update' ? 'post_update' : undefined
+                  }
                   permissionsKey={filterKeys[1]}
                   dataSourceName={dataSourceName}
                   supportedOperators={
@@ -277,7 +286,7 @@ export const PermissionsForm = (props: PermissionsFormProps) => {
     !metadataSource ||
     !data.defaultValues
   ) {
-    return <IndicatorCard status="info">Loading...</IndicatorCard>;
+    return <Skeleton width={'100%'} height={300} />;
   }
 
   return <Component data={data} {...props} />;

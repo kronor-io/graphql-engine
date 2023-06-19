@@ -6,9 +6,10 @@ module Test.DataConnector.MockAgent.OrderBySpec (spec) where
 --------------------------------------------------------------------------------
 
 import Control.Lens ((.~), (?~))
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
+import Data.Set qualified as Set
 import Harness.Backend.DataConnector.Mock (AgentRequest (..), MockRequestResults (..), mockAgentGraphqlTest, mockQueryResponse)
 import Harness.Backend.DataConnector.Mock qualified as Mock
 import Harness.Quoter.Graphql (graphql)
@@ -40,7 +41,7 @@ spec =
 
 --------------------------------------------------------------------------------
 
-sourceMetadata :: Aeson.Value
+sourceMetadata :: J.Value
 sourceMetadata =
   let source = BackendType.backendSourceName Mock.backendTypeMetadata
       backendType = BackendType.backendTypeString Mock.backendTypeMetadata
@@ -69,8 +70,8 @@ sourceMetadata =
 
 --------------------------------------------------------------------------------
 
-tests :: Fixture.Options -> SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
-tests _opts = describe "Order By Tests" $ do
+tests :: SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
+tests = describe "Order By Tests" $ do
   mockAgentGraphqlTest "can order by column" $ \_testEnv performGraphqlRequest -> do
     let headers = []
     let graphqlRequest =
@@ -84,17 +85,17 @@ tests _opts = describe "Order By Tests" $ do
           |]
     let queryResponse =
           rowsResponse
-            [ [ (API.FieldName "AlbumId", API.mkColumnFieldValue $ Aeson.Number 1),
-                (API.FieldName "Title", API.mkColumnFieldValue $ Aeson.String "For Those About To Rock We Salute You")
+            [ [ (API.FieldName "AlbumId", API.mkColumnFieldValue $ J.Number 1),
+                (API.FieldName "Title", API.mkColumnFieldValue $ J.String "For Those About To Rock We Salute You")
               ],
-              [ (API.FieldName "AlbumId", API.mkColumnFieldValue $ Aeson.Number 2),
-                (API.FieldName "Title", API.mkColumnFieldValue $ Aeson.String "Balls to the Wall")
+              [ (API.FieldName "AlbumId", API.mkColumnFieldValue $ J.Number 2),
+                (API.FieldName "Title", API.mkColumnFieldValue $ J.String "Balls to the Wall")
               ],
-              [ (API.FieldName "AlbumId", API.mkColumnFieldValue $ Aeson.Number 3),
-                (API.FieldName "Title", API.mkColumnFieldValue $ Aeson.String "Restless and Wild")
+              [ (API.FieldName "AlbumId", API.mkColumnFieldValue $ J.Number 3),
+                (API.FieldName "Title", API.mkColumnFieldValue $ J.String "Restless and Wild")
               ]
             ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse queryResponse
+    let mockConfig = mockQueryResponse queryResponse
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -112,17 +113,19 @@ tests _opts = describe "Order By Tests" $ do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Album")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
-                        ("Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
-                      ]
-                  & API.qLimit ?~ 3
-                  & API.qOrderBy ?~ API.OrderBy mempty (API.OrderByElement [] (API.OrderByColumn (API.ColumnName "AlbumId")) API.Ascending :| [])
+                  ?~ mkFieldsMap
+                    [ ("AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
+                      ("Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
+                    ]
+                    & API.qLimit
+                  ?~ 3
+                    & API.qOrderBy
+                  ?~ API.OrderBy mempty (API.OrderByElement [] (API.OrderByColumn (API.ColumnName "AlbumId")) API.Ascending :| [])
               )
         )
 
@@ -138,10 +141,10 @@ tests _opts = describe "Order By Tests" $ do
           |]
     let queryResponse =
           rowsResponse
-            [ [(API.FieldName "Name", API.mkColumnFieldValue $ Aeson.String "Milton Nascimento & Bebeto")],
-              [(API.FieldName "Name", API.mkColumnFieldValue $ Aeson.String "Azymuth")]
+            [ [(API.FieldName "Name", API.mkColumnFieldValue $ J.String "Milton Nascimento & Bebeto")],
+              [(API.FieldName "Name", API.mkColumnFieldValue $ J.String "Azymuth")]
             ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse queryResponse
+    let mockConfig = mockQueryResponse queryResponse
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -155,49 +158,53 @@ tests _opts = describe "Order By Tests" $ do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Artist")
               ( emptyQuery
-                  & API.qFields ?~ mkFieldsMap [("Name", API.ColumnField (API.ColumnName "Name") (API.ScalarType "string"))]
-                  & API.qLimit ?~ 2
-                  & API.qOrderBy
-                    ?~ API.OrderBy
-                      ( HashMap.fromList
+                  & API.qFields
+                  ?~ mkFieldsMap [("Name", API.ColumnField (API.ColumnName "Name") (API.ScalarType "string"))]
+                    & API.qLimit
+                  ?~ 2
+                    & API.qOrderBy
+                  ?~ API.OrderBy
+                    ( HashMap.fromList
+                        [ ( API.RelationshipName "Albums",
+                            API.OrderByRelation Nothing mempty
+                          )
+                        ]
+                    )
+                    ( NE.fromList
+                        [ API.OrderByElement [API.RelationshipName "Albums"] API.OrderByStarCountAggregate API.Ascending,
+                          API.OrderByElement
+                            [API.RelationshipName "Albums"]
+                            ( API.OrderBySingleColumnAggregate
+                                $ API.SingleColumnAggregate
+                                  (API.SingleColumnAggregateFunction [G.name|max|])
+                                  (API.ColumnName "AlbumId")
+                                  (API.ScalarType "number")
+                            )
+                            API.Ascending
+                        ]
+                    )
+              )
+            & API.qrRelationships
+            .~ Set.fromList
+              [ API.RTable
+                  API.TableRelationships
+                    { _trelSourceTable = mkTableName "Artist",
+                      _trelRelationships =
+                        HashMap.fromList
                           [ ( API.RelationshipName "Albums",
-                              API.OrderByRelation Nothing mempty
+                              API.Relationship
+                                { _rTargetTable = mkTableName "Album",
+                                  _rRelationshipType = API.ArrayRelationship,
+                                  _rColumnMapping = HashMap.fromList [(API.ColumnName "ArtistId", API.ColumnName "ArtistId")]
+                                }
                             )
                           ]
-                      )
-                      ( NE.fromList
-                          [ API.OrderByElement [API.RelationshipName "Albums"] API.OrderByStarCountAggregate API.Ascending,
-                            API.OrderByElement
-                              [API.RelationshipName "Albums"]
-                              ( API.OrderBySingleColumnAggregate $
-                                  API.SingleColumnAggregate
-                                    (API.SingleColumnAggregateFunction [G.name|max|])
-                                    (API.ColumnName "AlbumId")
-                                    (API.ScalarType "number")
-                              )
-                              API.Ascending
-                          ]
-                      )
-              )
-              & API.qrTableRelationships
-                .~ [ API.TableRelationships
-                       { _trSourceTable = mkTableName "Artist",
-                         _trRelationships =
-                           HashMap.fromList
-                             [ ( API.RelationshipName "Albums",
-                                 API.Relationship
-                                   { _rTargetTable = mkTableName "Album",
-                                     _rRelationshipType = API.ArrayRelationship,
-                                     _rColumnMapping = HashMap.fromList [(API.ColumnName "ArtistId", API.ColumnName "ArtistId")]
-                                   }
-                               )
-                             ]
-                       }
-                   ]
+                    }
+              ]
         )
 
 rowsResponse :: [[(API.FieldName, API.FieldValue)]] -> API.QueryResponse

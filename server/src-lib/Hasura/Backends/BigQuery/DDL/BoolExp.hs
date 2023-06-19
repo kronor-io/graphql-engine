@@ -10,9 +10,9 @@ import Data.Text.Extended
 import Hasura.Base.Error
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.SchemaCache
-import Hasura.SQL.Backend
 import Hasura.SQL.Types
 
 parseBoolExpOperations ::
@@ -35,8 +35,8 @@ parseBoolExpOperations rhsParser _rootTableFieldInfoMap _fields columnRef value 
       v -> pure . AEQ False <$> parseWithTy columnType v
 
     parseOperation :: ColumnType 'BigQuery -> (Text, J.Value) -> m (OpExpG 'BigQuery v)
-    parseOperation columnType (opStr, val) = withPathK opStr $
-      case opStr of
+    parseOperation columnType (opStr, val) = withPathK opStr
+      $ case opStr of
         "_eq" -> parseEq
         "$eq" -> parseEq
         "_neq" -> parseNeq

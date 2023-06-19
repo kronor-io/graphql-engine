@@ -17,6 +17,7 @@ module Harness.Backend.Cockroach
     dropTableIfExists,
     untrackTable,
     setupTablesAction,
+    createUntrackedTablesAction,
   )
 where
 
@@ -43,10 +44,10 @@ import Harness.Exceptions
 import Harness.GraphqlEngine qualified as GraphqlEngine
 import Harness.Logging
 import Harness.Quoter.Yaml (interpolateYaml)
+import Harness.Schema (BackendScalarType (..), BackendScalarValue (..), ScalarValue (..), SchemaName (..))
+import Harness.Schema qualified as Schema
 import Harness.Test.BackendType (BackendTypeConfig)
 import Harness.Test.BackendType qualified as BackendType
-import Harness.Test.Schema (BackendScalarType (..), BackendScalarValue (..), ScalarValue (..), SchemaName (..))
-import Harness.Test.Schema qualified as Schema
 import Harness.Test.SetupAction (SetupAction (..))
 import Harness.TestEnvironment (TestEnvironment (..))
 import Hasura.Prelude
@@ -71,7 +72,7 @@ backendTypeMetadata =
 --------------------------------------------------------------------------------
 
 -- | Check the cockroach server is live and ready to accept connections.
-livenessCheck :: HasCallStack => IO ()
+livenessCheck :: (HasCallStack) => IO ()
 livenessCheck = loop Constants.postgresLivenessCheckAttempts
   where
     loop 0 = error ("Liveness check failed for CockroachDB.")
@@ -91,19 +92,19 @@ livenessCheck = loop Constants.postgresLivenessCheckAttempts
 
 -- | when we are creating databases, we want to connect with the 'original' DB
 -- we started with
-runWithInitialDb_ :: HasCallStack => TestEnvironment -> Text -> IO ()
+runWithInitialDb_ :: (HasCallStack) => TestEnvironment -> Text -> IO ()
 runWithInitialDb_ testEnvironment =
   runInternal testEnvironment Constants.defaultCockroachConnectionString
 
 -- | Run a plain SQL query.
 -- On error, print something useful for debugging.
-run_ :: HasCallStack => TestEnvironment -> Text -> IO ()
+run_ :: (HasCallStack) => TestEnvironment -> Text -> IO ()
 run_ testEnvironment =
   runInternal testEnvironment (Constants.cockroachConnectionString (uniqueTestId testEnvironment))
 
 --- | Run a plain SQL query.
 -- On error, print something useful for debugging.
-runInternal :: HasCallStack => TestEnvironment -> Text -> Text -> IO ()
+runInternal :: (HasCallStack) => TestEnvironment -> Text -> Text -> IO ()
 runInternal testEnvironment connectionString query = do
   startTime <- getCurrentTime
   catch
@@ -150,11 +151,10 @@ defaultSourceConfiguration testEnvironment =
 createTable :: TestEnvironment -> Schema.Table -> IO ()
 createTable testEnv Schema.Table {tableName, tableColumns, tablePrimaryKey = pk, tableReferences, tableConstraints, tableUniqueIndexes} = do
   let schemaName = Schema.getSchemaName testEnv
-
   run_
     testEnv
     [i|
-      CREATE TABLE #{ Constants.cockroachDb }."#{ tableName }"
+      CREATE TABLE #{ schemaName }."#{ tableName }"
         (#{
           commaSeparated $
             (mkColumnSql <$> tableColumns)
@@ -166,10 +166,10 @@ createTable testEnv Schema.Table {tableName, tableColumns, tablePrimaryKey = pk,
 
   for_ tableUniqueIndexes (run_ testEnv . Postgres.createUniqueIndexSql schemaName tableName)
 
-scalarType :: HasCallStack => Schema.ScalarType -> Text
+scalarType :: (HasCallStack) => Schema.ScalarType -> Text
 scalarType = \case
   Schema.TInt -> "integer"
-  Schema.TStr -> "varchar"
+  Schema.TStr -> "text"
   Schema.TUTCTime -> "timestamp"
   Schema.TBool -> "boolean"
   Schema.TGeography -> "geography"
@@ -189,10 +189,11 @@ insertTable :: TestEnvironment -> Schema.Table -> IO ()
 insertTable testEnvironment Schema.Table {tableName, tableColumns, tableData}
   | null tableData = pure ()
   | otherwise = do
-      run_ testEnvironment $
-        T.unwords
+      let schemaName = Schema.getSchemaName testEnvironment
+      run_ testEnvironment
+        $ T.unwords
           [ "INSERT INTO",
-            Constants.cockroachDb <> "." <> wrapIdentifier tableName,
+            Schema.unSchemaName schemaName <> "." <> wrapIdentifier tableName,
             "(",
             commaSeparated (wrapIdentifier . Schema.columnName <$> tableColumns),
             ")",
@@ -230,8 +231,8 @@ mkRow row =
 -- | Serialize Table into a PL-SQL DROP statement and execute it
 dropTable :: TestEnvironment -> Schema.Table -> IO ()
 dropTable testEnvironment Schema.Table {tableName} = do
-  run_ testEnvironment $
-    T.unwords
+  run_ testEnvironment
+    $ T.unwords
       [ "DROP TABLE", -- we don't want @IF EXISTS@ here, because we don't want this to fail silently
         Constants.cockroachDb <> "." <> tableName,
         ";"
@@ -239,8 +240,8 @@ dropTable testEnvironment Schema.Table {tableName} = do
 
 dropTableIfExists :: TestEnvironment -> Schema.Table -> IO ()
 dropTableIfExists testEnvironment Schema.Table {tableName} = do
-  run_ testEnvironment $
-    T.unwords
+  run_ testEnvironment
+    $ T.unwords
       [ "DROP TABLE IF EXISTS",
         Constants.cockroachDb <> "." <> tableName
       ]
@@ -263,7 +264,8 @@ createDatabase testEnvironment = do
   runWithInitialDb_
     testEnvironment
     ("CREATE DATABASE " <> uniqueDbName (uniqueTestId testEnvironment) <> ";")
-  createSchema testEnvironment
+  let schemaName = Schema.getSchemaName testEnvironment
+  createSchema testEnvironment schemaName
 
 -- | we drop databases at the end of test runs so we don't need to do DB clean
 -- up.
@@ -277,9 +279,8 @@ dropDatabase testEnvironment = do
 
 -- Because the test harness sets the schema name we use for testing, we need
 -- to make sure it exists before we run the tests.
-createSchema :: TestEnvironment -> IO ()
-createSchema testEnvironment = do
-  let schemaName = Schema.getSchemaName testEnvironment
+createSchema :: TestEnvironment -> SchemaName -> IO ()
+createSchema testEnvironment schemaName = do
   run_
     testEnvironment
     [i|
@@ -296,6 +297,9 @@ setup tables (testEnvironment, _) = do
   -- Clear and reconfigure the metadata
   GraphqlEngine.setSource testEnvironment (defaultSourceMetadata testEnvironment) Nothing
 
+  -- enable open telemetry output in tests
+  GraphqlEngine.postMetadata_ testEnvironment Schema.enableOpenTelemetryCommand
+
   -- Setup and track tables
   for_ tables $ \table -> do
     createTable testEnvironment table
@@ -310,7 +314,7 @@ setup tables (testEnvironment, _) = do
 -- NOTE: Certain test modules may warrant having their own version.
 -- Because the Fixture takes care of dropping the DB, all we do here is
 -- clear the metadata with `replace_metadata`.
-teardown :: HasCallStack => [Schema.Table] -> (TestEnvironment, ()) -> IO ()
+teardown :: (HasCallStack) => [Schema.Table] -> (TestEnvironment, ()) -> IO ()
 teardown _ (testEnvironment, _) =
   GraphqlEngine.setSources testEnvironment mempty Nothing
 
@@ -319,3 +323,16 @@ setupTablesAction ts env =
   SetupAction
     (setup ts (env, ()))
     (const $ teardown ts (env, ()))
+
+createUntrackedTables :: [Schema.Table] -> (TestEnvironment, ()) -> IO ()
+createUntrackedTables tables (testEnvironment, _) = do
+  -- Setup tables
+  for_ tables $ \table -> do
+    createTable testEnvironment table
+    insertTable testEnvironment table
+
+createUntrackedTablesAction :: [Schema.Table] -> TestEnvironment -> SetupAction
+createUntrackedTablesAction ts env =
+  SetupAction
+    (createUntrackedTables ts (env, ()))
+    (const $ pure ())

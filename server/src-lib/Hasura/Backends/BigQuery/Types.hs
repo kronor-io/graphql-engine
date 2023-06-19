@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 
--- | Types for Transact-SQL aka T-SQL; the language of SQL Server.
+-- | Types for BigQuery
 module Hasura.Backends.BigQuery.Types
   ( Aggregate (..),
     Aliased (..),
@@ -29,6 +29,7 @@ module Hasura.Backends.BigQuery.Types
     Join (..),
     JoinProvenance (ArrayAggregateJoinProvenance, ArrayJoinProvenance, ObjectJoinProvenance, OrderByJoinProvenance),
     JoinSource (..),
+    JoinType (..),
     JsonPath (..),
     NullsOrder (..),
     Op (..),
@@ -48,8 +49,10 @@ module Hasura.Backends.BigQuery.Types
     Time (..),
     Timestamp (..),
     Top (..),
+    TypedValue (..),
     Value (..),
     Where (..),
+    With (..),
     WindowFunction (..),
     aggregateProjectionsFieldOrigin,
     doubleToBigDecimal,
@@ -74,6 +77,7 @@ where
 
 import Autodocodec (HasCodec (codec), dimapCodec, object, optionalField', requiredField', (.=))
 import Autodocodec qualified as AC
+import Autodocodec.Extended (boundedEnumCodec)
 import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey)
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
@@ -96,16 +100,17 @@ import Data.Vector.Instances ()
 import Hasura.Base.Error
 import Hasura.Base.ErrorValue qualified as ErrorValue
 import Hasura.Base.ToErrorValue
-import Hasura.Metadata.DTO.Utils (boundedEnumCodec)
+import Hasura.Function.Cache (FunctionArgName)
+import Hasura.NativeQuery.Metadata (InterpolatedQuery, NativeQueryName)
 import Hasura.Prelude hiding (state)
 import Hasura.RQL.IR.BoolExp
-import Hasura.RQL.Types.Function (FunctionArgName)
 import Language.GraphQL.Draft.Syntax qualified as G
 import Language.Haskell.TH.Syntax hiding (location)
 import Text.ParserCombinators.ReadP (eof, readP_to_S)
 
 data Select = Select
-  { selectTop :: Top,
+  { selectWith :: Maybe With,
+    selectTop :: Top,
     selectAsStruct :: AsStruct,
     selectProjections :: NonEmpty Projection,
     selectFrom :: From,
@@ -118,7 +123,7 @@ data Select = Select
     selectCardinality :: Cardinality
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 -- | Helper type allowing addition of extra fields used
 -- in PARTITION BY.
@@ -149,14 +154,14 @@ data ArrayAgg = ArrayAgg
     arrayAggTop :: Top
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data Reselect = Reselect
   { reselectProjections :: NonEmpty Projection,
     reselectWhere :: Where
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data OrderBy = OrderBy
   { orderByFieldName :: FieldName,
@@ -183,7 +188,7 @@ data FieldOrigin
   = NoOrigin
   | AggregateOrigin [Aliased Aggregate]
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 aggregateProjectionsFieldOrigin :: Projection -> FieldOrigin
 aggregateProjectionsFieldOrigin = \case
@@ -202,11 +207,15 @@ data Projection
   | ArrayEntityProjection EntityAlias (Aliased [FieldName])
   | WindowProjection (Aliased WindowFunction)
   deriving stock (Eq, Show, Generic, Data, Lift, Ord)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data WindowFunction
   = -- | ROW_NUMBER() OVER(PARTITION BY field)
     RowNumberOverPartitionBy (NonEmpty FieldName) (Maybe (NonEmpty OrderBy))
+  deriving stock (Eq, Show, Generic, Data, Lift, Ord)
+  deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
+
+data JoinType = LeftOuter | Inner
   deriving stock (Eq, Show, Generic, Data, Lift, Ord)
   deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
 
@@ -217,10 +226,11 @@ data Join = Join
     joinProvenance :: JoinProvenance,
     joinFieldName :: Text,
     joinExtractPath :: Maybe Text,
-    joinRightTable :: EntityAlias
+    joinRightTable :: EntityAlias,
+    joinType :: JoinType
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data JoinProvenance
   = OrderByJoinProvenance
@@ -229,19 +239,19 @@ data JoinProvenance
   | ArrayJoinProvenance [Text]
   | MultiplexProvenance
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data JoinSource
   = JoinSelect Select
   -- We're not using existingJoins at the moment, which was used to
   -- avoid re-joining on the same table twice.
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 newtype Where
   = Where [Expression]
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving newtype (FromJSON, Hashable, Monoid, NFData, Semigroup)
+  deriving newtype (Hashable, Monoid, NFData, Semigroup)
 
 data Cardinality
   = Many
@@ -254,6 +264,11 @@ data AsStruct
   | AsStruct
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
   deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
+
+-- | A Common Table Expression clause.
+newtype With = With (NonEmpty (Aliased (InterpolatedQuery Expression)))
+  deriving stock (Data, Generic, Lift)
+  deriving newtype (Eq, Hashable, NFData, Ord, Semigroup, Show)
 
 data Top
   = NoTop
@@ -271,8 +286,8 @@ instance Semigroup Top where
   (<>) (Top x) (Top y) = Top (min x y)
 
 data Expression
-  = ValueExpression Value
-  | InExpression Expression Value
+  = ValueExpression TypedValue
+  | InExpression Expression TypedValue
   | AndExpression [Expression]
   | OrExpression [Expression]
   | NotExpression Expression
@@ -300,7 +315,7 @@ data Expression
     -- `argument_name` => 'argument_value'
     FunctionNamedArgument Text Expression
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data JsonPath
   = RootPath
@@ -315,7 +330,7 @@ data Aggregate
   | OpAggregate Text Expression
   | TextAggregate Text
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data Countable fieldname
   = StarCountable
@@ -323,42 +338,43 @@ data Countable fieldname
   | DistinctCountable (NonEmpty fieldname)
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
 
-deriving anyclass instance FromJSON a => FromJSON (Countable a)
+deriving anyclass instance (FromJSON a) => FromJSON (Countable a)
 
-deriving anyclass instance Hashable a => Hashable (Countable a)
+deriving anyclass instance (Hashable a) => Hashable (Countable a)
 
-deriving anyclass instance ToJSON a => ToJSON (Countable a)
+deriving anyclass instance (ToJSON a) => ToJSON (Countable a)
 
-deriving anyclass instance NFData a => NFData (Countable a)
+deriving anyclass instance (NFData a) => NFData (Countable a)
 
 data From
   = FromQualifiedTable (Aliased TableName)
   | FromSelect (Aliased Select)
   | FromSelectJson (Aliased SelectJson)
   | FromFunction (Aliased SelectFromFunction)
+  | FromNativeQuery (Aliased NativeQueryName)
   deriving stock (Eq, Show, Generic, Data, Lift, Ord)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data SelectJson = SelectJson
   { selectJsonBody :: Expression,
     selectJsonFields :: [(ColumnName, ScalarType)]
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data SelectFromFunction = SelectFromFunction
   { sffFunctionName :: FunctionName,
     sffArguments :: [Expression]
   }
   deriving stock (Eq, Show, Generic, Data, Lift, Ord)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data OpenJson = OpenJson
   { openJsonExpression :: Expression,
     openJsonWith :: NonEmpty JsonFieldSpec
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData)
+  deriving anyclass (Hashable, NFData)
 
 data JsonFieldSpec
   = IntField Text
@@ -372,13 +388,13 @@ data Aliased a = Aliased
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift, Functor)
 
-deriving anyclass instance FromJSON a => FromJSON (Aliased a)
+deriving anyclass instance (FromJSON a) => FromJSON (Aliased a)
 
-deriving anyclass instance Hashable a => Hashable (Aliased a)
+deriving anyclass instance (Hashable a) => Hashable (Aliased a)
 
-deriving anyclass instance ToJSON a => ToJSON (Aliased a)
+deriving anyclass instance (ToJSON a) => ToJSON (Aliased a)
 
-deriving anyclass instance NFData a => NFData (Aliased a)
+deriving anyclass instance (NFData a) => NFData (Aliased a)
 
 data TableName = TableName
   { tableName :: Text,
@@ -389,10 +405,12 @@ data TableName = TableName
 
 instance HasCodec TableName where
   codec =
-    object "BigQueryTableName" $
-      TableName
-        <$> requiredField' "name" .= tableName
-        <*> requiredField' "dataset" .= tableNameSchema
+    object "BigQueryTableName"
+      $ TableName
+      <$> requiredField' "name"
+      .= tableName
+        <*> requiredField' "dataset"
+      .= tableNameSchema
 
 instance FromJSON TableName where
   parseJSON =
@@ -491,6 +509,7 @@ data Value
   | TimestampValue Timestamp
   | DateValue Date
   | TimeValue Time
+  | JsonValue J.Value
   | DatetimeValue Datetime
   deriving stock (Show, Eq, Ord, Generic, Data, Lift)
   deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
@@ -524,11 +543,18 @@ instance FromJSON Int64 where parseJSON = liberalInt64Parser Int64
 
 instance ToJSON Int64 where toJSON = liberalIntegralPrinter
 
+data TypedValue = TypedValue
+  { tvType :: ScalarType,
+    tvValue :: Value
+  }
+  deriving stock (Eq, Ord, Show, Generic, Data, Lift)
+  deriving anyclass (Hashable, NFData)
+
 intToInt64 :: Int.Int64 -> Int64
 intToInt64 = Int64 . tshow
 
 int64Expr :: Int.Int64 -> Expression
-int64Expr = ValueExpression . IntegerValue . intToInt64
+int64Expr i = ValueExpression (TypedValue IntegerScalarType (IntegerValue (intToInt64 i)))
 
 -- | BigQuery's conception of a fixed precision decimal.
 newtype Decimal = Decimal Text
@@ -609,13 +635,15 @@ data ScalarType
   | GeographyScalarType
   | DecimalScalarType
   | BigDecimalScalarType
+  | JsonScalarType
   | StructScalarType
   deriving stock (Show, Eq, Ord, Bounded, Enum, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData, ToJSON, ToJSONKey)
+  deriving anyclass (Hashable, NFData, ToJSONKey)
+  deriving (FromJSON, ToJSON) via AC.Autodocodec ScalarType
 
 instance HasCodec ScalarType where
-  codec = AC.named "ScalarType" $
-    boundedEnumCodec \case
+  codec = AC.named "ScalarType"
+    $ boundedEnumCodec \case
       StringScalarType -> "STRING"
       BytesScalarType -> "BYTES"
       IntegerScalarType -> "INT64"
@@ -628,6 +656,7 @@ instance HasCodec ScalarType where
       GeographyScalarType -> "GEOGRAPHY"
       DecimalScalarType -> "DECIMAL"
       BigDecimalScalarType -> "BIGDECIMAL"
+      JsonScalarType -> "JSON"
       StructScalarType -> "STRUCT"
 
 instance ToTxt ScalarType where toTxt = tshow
@@ -695,11 +724,11 @@ data BooleanOperators a
   | ASTDWithin (DWithinGeogOp a)
   deriving stock (Eq, Generic, Foldable, Functor, Traversable, Show)
 
-instance NFData a => NFData (BooleanOperators a)
+instance (NFData a) => NFData (BooleanOperators a)
 
-instance Hashable a => Hashable (BooleanOperators a)
+instance (Hashable a) => Hashable (BooleanOperators a)
 
-instance ToJSON a => J.ToJSONKeyValue (BooleanOperators a) where
+instance (ToJSON a) => J.ToJSONKeyValue (BooleanOperators a) where
   toJSONKeyValue = \case
     ASTContains a -> ("_st_contains", J.toJSON a)
     ASTEquals a -> ("_st_equals", J.toJSON a)
@@ -718,10 +747,12 @@ data FunctionName = FunctionName
 
 instance HasCodec FunctionName where
   codec =
-    object "BigQueryFunctionName" $
-      FunctionName
-        <$> requiredField' "name" .= functionName
-        <*> optionalField' "dataset" .= functionNameSchema
+    object "BigQueryFunctionName"
+      $ FunctionName
+      <$> requiredField' "name"
+      .= functionName
+        <*> optionalField' "dataset"
+      .= functionNameSchema
 
 instance FromJSON FunctionName where
   parseJSON =
@@ -756,11 +787,14 @@ data ComputedFieldDefinition = ComputedFieldDefinition
 
 instance HasCodec ComputedFieldDefinition where
   codec =
-    AC.object "BigQueryComputedFieldDefinition" $
-      ComputedFieldDefinition
-        <$> requiredField' "function" AC..= _bqcfdFunction
-        <*> optionalField' "return_table" AC..= _bqcfdReturnTable
-        <*> requiredField' "argument_mapping" AC..= _bqcfdArgumentMapping
+    AC.object "BigQueryComputedFieldDefinition"
+      $ ComputedFieldDefinition
+      <$> requiredField' "function"
+      AC..= _bqcfdFunction
+        <*> optionalField' "return_table"
+      AC..= _bqcfdReturnTable
+        <*> requiredField' "argument_mapping"
+      AC..= _bqcfdArgumentMapping
 
 instance ToJSON ComputedFieldDefinition where
   toJSON = J.genericToJSON hasuraJSON {J.omitNothingFields = True}
@@ -786,13 +820,13 @@ data ComputedFieldReturn
     ReturnExistingTable TableName
   | -- | An arbitrary table schema specified by column name and type pairs
     ReturnTableSchema [(ColumnName, G.Name, ScalarType)]
-  deriving stock (Show, Eq, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
   deriving anyclass (Hashable, NFData)
 
 instance ToJSON ComputedFieldReturn where
   toJSON =
-    J.genericToJSON $
-      J.defaultOptions
+    J.genericToJSON
+      $ J.defaultOptions
         { J.constructorTagModifier = J.snakeCase,
           J.sumEncoding = J.TaggedObject "type" "info"
         }
@@ -805,7 +839,7 @@ data FunctionArgument = FunctionArgument
     -- | The data type of the argument
     _faType :: ScalarType
   }
-  deriving stock (Show, Eq, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
   deriving anyclass (Hashable, NFData)
 
 instance ToJSON FunctionArgument where
@@ -829,6 +863,7 @@ parseScalarValue scalarType jValue = case scalarType of
   TimeScalarType -> TimeValue <$> parseJValue jValue
   DatetimeScalarType -> DatetimeValue <$> parseJValue jValue
   GeographyScalarType -> GeographyValue <$> parseJValue jValue
+  JsonScalarType -> pure (JsonValue jValue)
   _ -> Left (internalError (T.pack ("Unsupported scalar type: " <> show scalarType <> ": " <> show jValue)))
   -- TODO: These types:
   -- RecordScalarType -> RecordValue <$> parseJValue jValue
@@ -855,6 +890,7 @@ isComparableType = \case
   GeographyScalarType -> False
   DecimalScalarType -> True
   BigDecimalScalarType -> True
+  JsonScalarType -> False
   StructScalarType -> True
 isNumType =
   \case
@@ -870,14 +906,17 @@ isNumType =
     GeographyScalarType -> False
     DecimalScalarType -> True
     BigDecimalScalarType -> True
+    JsonScalarType -> False
     StructScalarType -> False
 
 getGQLTableName :: TableName -> Either QErr G.Name
 getGQLTableName (TableName table schema) = do
   let textName = schema <> "_" <> table
-  onNothing (G.mkName textName) $
-    throw400 ValidationFailed $
-      "cannot include " <> textName <> " in the GraphQL schema because it is not a valid GraphQL identifier"
+  onNothing (G.mkName textName)
+    $ throw400 ValidationFailed
+    $ "cannot include "
+    <> textName
+    <> " in the GraphQL schema because it is not a valid GraphQL identifier"
 
 --------------------------------------------------------------------------------
 -- Liberal numeric parsers/printers (via JSON)
@@ -888,10 +927,10 @@ getGQLTableName (TableName table schema) = do
 
 -- These printers may do something more clever later. See PG backend's
 -- equivalent functions.
-liberalIntegralPrinter :: Coercible Text a => a -> J.Value
+liberalIntegralPrinter :: (Coercible Text a) => a -> J.Value
 liberalIntegralPrinter a = J.toJSON (coerce a :: Text)
 
-liberalDecimalPrinter :: Coercible a Text => a -> J.Value
+liberalDecimalPrinter :: (Coercible a Text) => a -> J.Value
 liberalDecimalPrinter a = J.toJSON (coerce a :: Text)
 
 -- | Parse from text by simply validating it contains digits;

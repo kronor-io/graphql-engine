@@ -19,9 +19,9 @@ import Hasura.GraphQL.Execute.Backend (ActionResult (..))
 import Hasura.Logging qualified as L
 import Hasura.Prelude
 import Hasura.RQL.Types.Backend (Backend (ExecutionStatistics))
+import Hasura.RQL.Types.BackendTag (HasTag)
+import Hasura.RQL.Types.BackendType (BackendType)
 import Hasura.SQL.AnyBackend (AnyBackend, dispatchAnyBackend', mkAnyBackend)
-import Hasura.SQL.Backend (BackendType)
-import Hasura.SQL.Tag (HasTag)
 import Hasura.Server.Types (RequestId)
 import Hasura.Tracing (TraceT)
 
@@ -45,31 +45,31 @@ statsToAnyBackend :: forall b. (HasTag b) => ActionResult b -> (Maybe (AnyBacken
 statsToAnyBackend ActionResult {..} =
   (fmap (mkAnyBackend @b . ExecutionStats) arStatistics, arResult)
 
-deriving newtype instance Backend b => J.ToJSON (ExecutionStats b)
+deriving newtype instance (Backend b) => J.ToJSON (ExecutionStats b)
 
 instance J.ToJSON ExecutionLog where
   toJSON (ExecutionLog reqId mstatistics) =
-    J.object $
-      [ "request_id" J..= reqId,
-        "statistics" J..= case mstatistics of
-          Just statistics -> dispatchAnyBackend' @J.ToJSON statistics J.toJSON
-          Nothing -> J.toJSON ()
-      ]
+    J.object
+      $ [ "request_id" J..= reqId,
+          "statistics" J..= case mstatistics of
+            Just statistics -> dispatchAnyBackend' @J.ToJSON statistics J.toJSON
+            Nothing -> J.toJSON ()
+        ]
 
 instance L.ToEngineLog ExecutionLog L.Hasura where
   toEngineLog ql = (L.LevelInfo, L.ELTExecutionLog, J.toJSON ql)
 
-class Monad m => MonadExecutionLog m where
+class (Monad m) => MonadExecutionLog m where
   logExecutionLog ::
     L.Logger L.Hasura ->
     ExecutionLog ->
     m ()
 
-instance MonadExecutionLog m => MonadExecutionLog (ExceptT e m) where
+instance (MonadExecutionLog m) => MonadExecutionLog (ExceptT e m) where
   logExecutionLog logger l = lift $ logExecutionLog logger l
 
-instance MonadExecutionLog m => MonadExecutionLog (ReaderT r m) where
+instance (MonadExecutionLog m) => MonadExecutionLog (ReaderT r m) where
   logExecutionLog logger l = lift $ logExecutionLog logger l
 
-instance MonadExecutionLog m => MonadExecutionLog (TraceT m) where
+instance (MonadExecutionLog m) => MonadExecutionLog (TraceT m) where
   logExecutionLog logger l = lift $ logExecutionLog logger l

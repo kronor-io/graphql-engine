@@ -1,4 +1,7 @@
 {
   "label": "Security Tools",
-  "position": 160
+  "position": 62,
+  "customProps": {
+    "sidebar_pathname": "security"
+  }
 }

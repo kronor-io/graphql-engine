@@ -1,5 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_GHC -Wno-error=deprecations #-}
 
 -- | Tests for object remote relationships to databases. Remote relationships
 -- are relationships that are not local to a given source or remote schema, and
@@ -12,7 +13,7 @@
 module Test.Schema.RemoteRelationships.XToDBObjectRelationshipSpec (spec) where
 
 import Data.Aeson (Value)
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.Char (isUpper, toLower)
 import Data.List.NonEmpty qualified as NE
 import Data.List.Split (dropBlanks, keepDelimsL, split, whenElt)
@@ -30,9 +31,9 @@ import Harness.Quoter.Graphql (graphql)
 import Harness.Quoter.Yaml (yaml)
 import Harness.Quoter.Yaml.InterpolateYaml (interpolateYaml)
 import Harness.RemoteServer qualified as RemoteServer
+import Harness.Schema (Table (..))
+import Harness.Schema qualified as Schema
 import Harness.Test.Fixture qualified as Fixture
-import Harness.Test.Schema (Table (..))
-import Harness.Test.Schema qualified as Schema
 import Harness.Test.SetupAction as SetupAction
 import Harness.Test.TestResource (Managed)
 import Harness.TestEnvironment
@@ -199,7 +200,7 @@ rhsSQLServer =
 
 rhsSqlite :: RHSFixture
 rhsSqlite =
-  let sqliteRhsTableName = Aeson.toJSON ["main" :: Text, "album"]
+  let sqliteRhsTableName = J.toJSON ["main" :: Text, "album"]
       context =
         (Fixture.fixture $ Fixture.Backend Sqlite.backendTypeMetadata)
           { Fixture.mkLocalTestEnvironment = Fixture.noLocalTestEnvironment,
@@ -257,7 +258,7 @@ album =
 lhsPostgresMkLocalTestEnvironment :: TestEnvironment -> Managed (Maybe Server)
 lhsPostgresMkLocalTestEnvironment _ = pure Nothing
 
-lhsPostgresSetup :: HasCallStack => Value -> (TestEnvironment, Maybe Server) -> IO ()
+lhsPostgresSetup :: (HasCallStack) => Value -> (TestEnvironment, Maybe Server) -> IO ()
 lhsPostgresSetup rhsTableName (wholeTestEnvironment, _) = do
   let testEnvironment = focusFixtureLeft wholeTestEnvironment
       sourceName = "source"
@@ -323,7 +324,7 @@ args:
 lhsCitusMkLocalTestEnvironment :: TestEnvironment -> Managed (Maybe Server)
 lhsCitusMkLocalTestEnvironment _ = pure Nothing
 
-lhsCitusSetup :: HasCallStack => Value -> (TestEnvironment, Maybe Server) -> IO ()
+lhsCitusSetup :: (HasCallStack) => Value -> (TestEnvironment, Maybe Server) -> IO ()
 lhsCitusSetup rhsTableName (wholeTestEnvironment, _) = do
   let testEnvironment = focusFixtureLeft wholeTestEnvironment
       sourceName = "source"
@@ -389,7 +390,7 @@ args:
 lhsCockroachMkLocalTestEnvironment :: TestEnvironment -> Managed (Maybe Server)
 lhsCockroachMkLocalTestEnvironment _ = pure Nothing
 
-lhsCockroachSetup :: HasCallStack => Value -> (TestEnvironment, Maybe Server) -> IO ()
+lhsCockroachSetup :: (HasCallStack) => Value -> (TestEnvironment, Maybe Server) -> IO ()
 lhsCockroachSetup rhsTableName (wholeTestEnvironment, _) = do
   let testEnvironment = focusFixtureLeft wholeTestEnvironment
       sourceName = "source"
@@ -455,7 +456,7 @@ lhsCockroachSetup rhsTableName (wholeTestEnvironment, _) = do
 lhsSQLServerMkLocalTestEnvironment :: TestEnvironment -> Managed (Maybe Server)
 lhsSQLServerMkLocalTestEnvironment _ = pure Nothing
 
-lhsSQLServerSetup :: HasCallStack => Value -> (TestEnvironment, Maybe Server) -> IO ()
+lhsSQLServerSetup :: (HasCallStack) => Value -> (TestEnvironment, Maybe Server) -> IO ()
 lhsSQLServerSetup rhsTableName (wholeTestEnvironment, _) = do
   let testEnvironment = focusFixtureLeft wholeTestEnvironment
       sourceName = "source"
@@ -519,18 +520,18 @@ args:
 --------------------------------------------------------------------------------
 -- LHS SQLite
 
-lhsSqliteSetup :: HasCallStack => Value -> (TestEnvironment, Maybe Server) -> IO API.DatasetCloneName
+lhsSqliteSetup :: (HasCallStack) => Value -> (TestEnvironment, Maybe Server) -> IO API.DatasetCloneName
 lhsSqliteSetup rhsTableName (wholeTestEnvironment, _) = do
   let testEnvironment = focusFixtureLeft wholeTestEnvironment
   let cloneName = API.DatasetCloneName $ tshow (uniqueTestId testEnvironment) <> "-lhs"
   let lhsSourceName_ = "source"
   let sourceName = Text.unpack lhsSourceName_
-  let sqliteLhsTableName = Aeson.toJSON ["main" :: Text, "track"]
+  let sqliteLhsTableName = J.toJSON ["main" :: Text, "track"]
 
   (API.Config sourceConfig) <- Sqlite.createEmptyDatasetCloneSourceConfig cloneName
 
   -- Add remote source
-  Schema.addSource lhsSourceName_ (Aeson.Object sourceConfig) testEnvironment
+  Schema.addSource lhsSourceName_ (J.Object sourceConfig) testEnvironment
 
   -- Setup tables
   Sqlite.createTable sourceName testEnvironment track
@@ -611,7 +612,7 @@ data Query m = Query
   }
   deriving (Generic)
 
-instance Typeable m => Morpheus.GQLType (Query m)
+instance (Typeable m) => Morpheus.GQLType (Query m)
 
 data HasuraTrackArgs = HasuraTrackArgs
   { ta_where :: Maybe HasuraTrackBoolExp,
@@ -630,7 +631,7 @@ data HasuraTrack m = HasuraTrack
   }
   deriving (Generic)
 
-instance Typeable m => Morpheus.GQLType (HasuraTrack m) where
+instance (Typeable m) => Morpheus.GQLType (HasuraTrack m) where
   typeOptions _ _ = hasuraTypeOptions
 
 data HasuraTrackOrderBy = HasuraTrackOrderBy
@@ -687,12 +688,12 @@ lhsRemoteServerMkLocalTestEnvironment _ =
             Nothing -> \_ _ -> EQ
             Just orderByArg -> orderTrack orderByArg
           limitFunction = maybe Hasura.Prelude.id take ta_limit
-      pure $
-        tracks
-          & filter filterFunction
-          & sortBy orderByFunction
-          & limitFunction
-          & map mkTrack
+      pure
+        $ tracks
+        & filter filterFunction
+        & sortBy orderByFunction
+        & limitFunction
+        & map mkTrack
     -- Returns True iif the given track matches the given boolean expression.
     matchTrack trackInfo@(trackId, trackTitle, maybeAlbumId) (HasuraTrackBoolExp {..}) =
       and
@@ -713,16 +714,16 @@ lhsRemoteServerMkLocalTestEnvironment _ =
       (trackId2, trackTitle2, trackAlbumId2) =
         flip foldMap orderByList \HasuraTrackOrderBy {..} ->
           if
-              | Just idOrder <- tob_id -> case idOrder of
-                  Asc -> compare trackId1 trackId2
-                  Desc -> compare trackId2 trackId1
-              | Just titleOrder <- tob_title -> case titleOrder of
-                  Asc -> compare trackTitle1 trackTitle2
-                  Desc -> compare trackTitle2 trackTitle1
-              | Just albumIdOrder <- tob_album_id ->
-                  compareWithNullLast albumIdOrder trackAlbumId1 trackAlbumId2
-              | otherwise ->
-                  error "empty track_order object"
+            | Just idOrder <- tob_id -> case idOrder of
+                Asc -> compare trackId1 trackId2
+                Desc -> compare trackId2 trackId1
+            | Just titleOrder <- tob_title -> case titleOrder of
+                Asc -> compare trackTitle1 trackTitle2
+                Desc -> compare trackTitle2 trackTitle1
+            | Just albumIdOrder <- tob_album_id ->
+                compareWithNullLast albumIdOrder trackAlbumId1 trackAlbumId2
+            | otherwise ->
+                error "empty track_order object"
     compareWithNullLast Desc x1 x2 = compareWithNullLast Asc x2 x1
     compareWithNullLast Asc Nothing Nothing = EQ
     compareWithNullLast Asc (Just _) Nothing = LT
@@ -745,7 +746,7 @@ lhsRemoteServerMkLocalTestEnvironment _ =
           t_album_id = pure albumId
         }
 
-lhsRemoteServerSetup :: HasCallStack => Value -> (TestEnvironment, Maybe Server) -> IO ()
+lhsRemoteServerSetup :: (HasCallStack) => Value -> (TestEnvironment, Maybe Server) -> IO ()
 lhsRemoteServerSetup tableName (testEnvironment, maybeRemoteServer) = case maybeRemoteServer of
   Nothing -> error "XToDBObjectRelationshipSpec: remote server local testEnvironment did not succesfully create a server"
   Just remoteServer -> do
@@ -1022,12 +1023,12 @@ rhsSqliteSetup (wholeTestEnvironment, _) = do
   let cloneName = API.DatasetCloneName $ tshow (uniqueTestId testEnvironment) <> "-rhs"
   let rhsSourceName_ = "target"
   let sourceName = Text.unpack rhsSourceName_
-  let sqliteRhsTableName = Aeson.toJSON ["main" :: Text, "album"]
+  let sqliteRhsTableName = J.toJSON ["main" :: Text, "album"]
 
   (API.Config sourceConfig) <- Sqlite.createEmptyDatasetCloneSourceConfig cloneName
 
   -- Add remote source
-  Schema.addSource rhsSourceName_ (Aeson.Object sourceConfig) testEnvironment
+  Schema.addSource rhsSourceName_ (J.Object sourceConfig) testEnvironment
 
   -- Setup tables
   Sqlite.createTable sourceName testEnvironment album
@@ -1071,15 +1072,15 @@ rhsSqliteSetup (wholeTestEnvironment, _) = do
 --------------------------------------------------------------------------------
 -- Tests
 
-tests :: Fixture.Options -> SpecWith (TestEnvironment, Maybe Server)
-tests opts = describe "object-relationship" $ do
-  schemaTests opts
-  executionTests opts
-  permissionTests opts
+tests :: SpecWith (TestEnvironment, Maybe Server)
+tests = describe "object-relationship" $ do
+  schemaTests
+  executionTests
+  permissionTests
 
 -- | Basic queries using *-to-DB joins
-executionTests :: Fixture.Options -> SpecWith (TestEnvironment, Maybe Server)
-executionTests opts = describe "execution" $ do
+executionTests :: SpecWith (TestEnvironment, Maybe Server)
+executionTests = describe "execution" $ do
   -- fetches the relationship data
   it "related-data" $ \(testEnvironment, _) -> do
     let lhsSchema = Schema.getSchemaName $ focusFixtureLeft testEnvironment
@@ -1103,7 +1104,7 @@ executionTests opts = describe "execution" $ do
                  title: album1_artist1
           |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphql testEnvironment query)
       expectedResponse
 
@@ -1129,7 +1130,7 @@ executionTests opts = describe "execution" $ do
                album: null
           |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphql testEnvironment query)
       expectedResponse
 
@@ -1166,14 +1167,14 @@ executionTests opts = describe "execution" $ do
                album: null
           |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphql testEnvironment query)
       expectedResponse
 
 -- | Spec that describe an object relationship's data in the presence of
 -- permisisons.
-permissionTests :: Fixture.Options -> SpecWith (TestEnvironment, Maybe Server)
-permissionTests opts = describe "permission" $ do
+permissionTests :: SpecWith (TestEnvironment, Maybe Server)
+permissionTests = describe "permission" $ do
   let userHeaders = [("x-hasura-role", "role1"), ("x-hasura-artist-id", "1")]
 
   -- only the allowed rows on the target table are queryable
@@ -1219,7 +1220,7 @@ permissionTests opts = describe "permission" $ do
                album: null
           |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphqlWithHeaders testEnvironment userHeaders query)
       expectedResponse
 
@@ -1258,12 +1259,12 @@ permissionTests opts = describe "permission" $ do
                 __typename: #{rhsSchema}_album
           |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphqlWithHeaders testEnvironment userHeaders query)
       expectedResponse
 
-schemaTests :: Fixture.Options -> SpecWith (TestEnvironment, Maybe Server)
-schemaTests opts =
+schemaTests :: SpecWith (TestEnvironment, Maybe Server)
+schemaTests =
   -- we use an introspection query to check:
   -- 1. a field 'album' is added to the track table
   -- 1. track's where clause does not have 'album' field
@@ -1314,6 +1315,6 @@ schemaTests opts =
               - name: title
           |]
     shouldReturnYaml
-      opts
+      testEnvironment
       (GraphqlEngine.postGraphql testEnvironment query)
       expectedResponse

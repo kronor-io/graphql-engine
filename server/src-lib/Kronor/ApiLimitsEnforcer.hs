@@ -12,12 +12,12 @@ import Hasura.Prelude
 import Hasura.RQL.Types.ApiLimit qualified as Limits
 import Hasura.Server.Limits qualified as Limits
 import Hasura.Server.Types qualified as HGE
-import Hasura.Session (RoleName)
+import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.Session qualified
 import Kronor.TokenValidator (HasInvalidTokens (..))
 import Language.GraphQL.Draft.Syntax qualified as G
 import System.Timeout.Lifted (timeout)
-import Data.Aeson qualified as Aeson
+import Data.UUID qualified as UUID
 
 checkGQLExecution ::
   ( MonadError QErr m,
@@ -34,9 +34,13 @@ checkGQLExecution info sc req = do
   invalidTokens <- liftIO $ STM.atomically $ STM.readTVar invalidTokensRef
   
   case Hasura.Session.getSessionVariableValue "x-hasura-token-id" info._uiSession of
-    Just token -> do
-      when (token `elem` invalidTokens) $ do
-        throw400 InvalidParams "Invalid token"
+    Just token ->
+      case UUID.fromText token of
+        Nothing -> do
+          throw400 InvalidParams "Invalid token"
+        Just uuidToken -> do
+          when (uuidToken `elem` invalidTokens) $ do
+            throw400 InvalidParams "Invalid token"
     _ -> pure ()
 
   let Limits.ApiLimit _ _ _ _ _ disabledLimits = sc.scApiLimits

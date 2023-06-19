@@ -1,8 +1,5 @@
 import { GraphQLSchema, isInputObjectType } from 'graphql';
-import {
-  columnOperatorsInfo,
-  boolOperatorsInfo,
-} from '../../../../../../../components/Services/Data/TablePermissions/PermissionBuilder/utils';
+import { columnOperatorsInfo } from '../../../../../../../components/Services/Data/TablePermissions/PermissionBuilder/utils';
 import lowerCase from 'lodash/lowerCase';
 import { tableContext } from '../TableProvider';
 import { Columns, Comparators, Tables, Operator } from '../types';
@@ -10,6 +7,8 @@ import { areTablesEqual } from '../../../../../../hasura-metadata-api';
 import { Table } from '../../../../../../hasura-metadata-types';
 import { useContext } from 'react';
 import { rowPermissionsContext } from '../RowPermissionsProvider';
+import { sourceDataTypes, SourceDataTypes } from './sourceDataTypes';
+import { rootTableContext } from '../RootTableProvider';
 
 function columnOperators(): Array<Operator> {
   return Object.keys(columnOperatorsInfo).reduce((acc, key) => {
@@ -28,31 +27,7 @@ function columnOperators(): Array<Operator> {
   }, [] as Array<Operator>);
 }
 
-function boolOperators(): Array<Operator> {
-  return Object.keys(boolOperatorsInfo).reduce((acc, key) => {
-    const operator = (
-      boolOperatorsInfo as Record<string, Omit<Operator, 'name'>>
-    )[key];
-    return [
-      ...acc,
-      {
-        name: key,
-        inputStructure: operator.inputStructure,
-        inputType: operator.inputType,
-        type: operator.type,
-      },
-    ];
-  }, [] as Array<Operator>);
-}
-
-export const allOperators: Array<Operator> = [
-  ...columnOperators(),
-  ...boolOperators(),
-  {
-    name: '_exists',
-    type: 'comparision',
-  },
-];
+export const allOperators: Array<Operator> = [...columnOperators()];
 
 const columnComparators = [
   {
@@ -127,14 +102,53 @@ const whitelist: Record<string, string[]> = {
     '_has_keys_any',
     '_has_keys_all',
   ],
+  // JSON does not seem to come with any operators
+  // To match the old implementation, which does not provide any operators, we do not whitelist any for now
+  json: [],
+  geography: ['_st_d_within', '_is_null', '_st_intersects'],
+  geometry: [
+    '_is_null',
+    '_st_d_within',
+    '_st_within',
+    '_st_3d_d_within',
+    '_st_contains',
+    '_st_intersects',
+    '_st_touches',
+    '_st_overlaps',
+    '_st_crosses',
+  ],
+};
+
+type Sources =
+  | 'postgres'
+  | 'bigquery'
+  | 'mssql'
+  | 'citus'
+  | 'cockroach'
+  | 'alloy';
+
+export const mapScalarDataType = (
+  dataSource: string | undefined,
+  dataType: SourceDataTypes
+) => {
+  if (!dataSource) return dataType;
+  const dataTypes = sourceDataTypes[dataSource as Sources];
+  return dataTypes?.[dataType] || dataType;
 };
 
 export function useOperators({ path }: { path: string[] }) {
-  const { comparators, tables } = useContext(rowPermissionsContext);
+  const { comparators } = useContext(rowPermissionsContext);
+  const { tables } = useContext(rootTableContext);
   const { columns, table } = useContext(tableContext);
+
   const columnName = path[path.length - 2];
   const column = columns.find(c => c.name === columnName);
-  const dataType = column?.dataType || '';
+  let dataType = column?.dataType;
+  if (dataType === 'USER-DEFINED') {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    dataType = column?.graphQLProperties?.scalarType;
+  }
   const operators = getDataTypeOperators({
     comparators,
     path,
@@ -142,27 +156,27 @@ export function useOperators({ path }: { path: string[] }) {
     tables,
     table,
   });
-  if (hasWhitelistedOperators(dataType)) {
-    return operators.filter(o =>
-      whitelist[column?.dataType || ''].includes(o.name)
-    );
+  if (dataType && hasWhitelistedOperators(dataType)) {
+    return operators.filter(o => whitelist[dataType || '']?.includes(o.name));
   }
   return operators;
 }
 
-function getDataTypeOperators({
-  comparators,
-  path,
-  columns,
-  tables,
-  table,
-}: {
+export type GetDataTypeOperatorsProps = {
   comparators: Comparators;
   path: string[];
   columns: Columns;
   tables: Tables;
   table: Table;
-}) {
+};
+
+export const getDataTypeOperators = ({
+  comparators,
+  path,
+  columns,
+  tables,
+  table,
+}: GetDataTypeOperatorsProps) => {
   const columnName = path[path.length - 2];
   const column = columns.find(c => c.name === columnName);
   const dataSourceKind = tables.find(t => areTablesEqual(t.table, table))
@@ -173,10 +187,24 @@ function getDataTypeOperators({
   const comparatorKey = column ? `${column.dataType}${comparatorSuffix}` : '';
   const operators = comparators[comparatorKey]?.operators;
   if (!operators) {
-    return allOperators;
+    const dataSource = tables?.[0]?.dataSource?.name;
+    const dataType = mapScalarDataType(
+      dataSource,
+      column?.dataType as SourceDataTypes
+    );
+    const fallbackComparatorKey = column
+      ? `${dataType}${comparatorSuffix}`
+      : '';
+    const lowerCaseComparators = Object.fromEntries(
+      Object.entries(comparators).map(([k, v]) => [k.toLowerCase(), v])
+    );
+    const backupOperators =
+      lowerCaseComparators[fallbackComparatorKey]?.operators;
+    return backupOperators || allOperators;
   }
+
   return operators;
-}
+};
 
 function hasWhitelistedOperators(dataType: string) {
   return whitelist[dataType];

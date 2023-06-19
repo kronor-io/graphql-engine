@@ -17,6 +17,7 @@ module Harness.Backend.Citus
     dropTable,
     untrackTable,
     setupTablesAction,
+    createUntrackedTablesAction,
   )
 where
 
@@ -44,10 +45,10 @@ import Harness.Exceptions
 import Harness.GraphqlEngine qualified as GraphqlEngine
 import Harness.Logging
 import Harness.Quoter.Yaml (interpolateYaml)
+import Harness.Schema (BackendScalarType (..), BackendScalarValue (..), ScalarValue (..), SchemaName (..))
+import Harness.Schema qualified as Schema
 import Harness.Test.BackendType (BackendTypeConfig)
 import Harness.Test.BackendType qualified as BackendType
-import Harness.Test.Schema (BackendScalarType (..), BackendScalarValue (..), ScalarValue (..), SchemaName (..))
-import Harness.Test.Schema qualified as Schema
 import Harness.Test.SetupAction (SetupAction (..))
 import Harness.TestEnvironment (TestEnvironment (..))
 import Hasura.Prelude
@@ -72,7 +73,7 @@ backendTypeMetadata =
 --------------------------------------------------------------------------------
 
 -- | Check the citus server is live and ready to accept connections.
-livenessCheck :: HasCallStack => IO ()
+livenessCheck :: (HasCallStack) => IO ()
 livenessCheck = loop Constants.postgresLivenessCheckAttempts
   where
     loop 0 = error ("Liveness check failed for Citus.")
@@ -92,18 +93,18 @@ livenessCheck = loop Constants.postgresLivenessCheckAttempts
 
 -- | when we are creating databases, we want to connect with the 'original' DB
 -- we started with
-runWithInitialDb_ :: HasCallStack => TestEnvironment -> Text -> IO ()
+runWithInitialDb_ :: (HasCallStack) => TestEnvironment -> Text -> IO ()
 runWithInitialDb_ testEnvironment =
   runInternal testEnvironment Constants.defaultCitusConnectionString
 
 -- | Run a plain SQL query.
-run_ :: HasCallStack => TestEnvironment -> Text -> IO ()
+run_ :: (HasCallStack) => TestEnvironment -> Text -> IO ()
 run_ testEnvironment =
   runInternal testEnvironment (Constants.citusConnectionString (uniqueTestId testEnvironment))
 
 --- | Run a plain SQL query.
 -- On error, print something useful for debugging.
-runInternal :: HasCallStack => TestEnvironment -> Text -> Text -> IO ()
+runInternal :: (HasCallStack) => TestEnvironment -> Text -> Text -> IO ()
 runInternal testEnvironment connectionString query = do
   startTime <- getCurrentTime
   catch
@@ -147,12 +148,12 @@ defaultSourceConfiguration testEnvironment =
   |]
 
 -- | Serialize Table into a Citus-SQL statement, as needed, and execute it on the Citus backend
-createTable :: HasCallStack => TestEnvironment -> Schema.Table -> IO ()
+createTable :: (HasCallStack) => TestEnvironment -> Schema.Table -> IO ()
 createTable testEnv Schema.Table {tableName, tableColumns, tablePrimaryKey = pk, tableReferences, tableConstraints, tableUniqueIndexes} = do
   let schemaName = Schema.getSchemaName testEnv
 
-  run_ testEnv $
-    [i|
+  run_ testEnv
+    $ [i|
       CREATE TABLE #{ unSchemaName schemaName }."#{ tableName }"
         ( #{ commaSeparated $
               (mkColumnSql <$> tableColumns)
@@ -165,10 +166,10 @@ createTable testEnv Schema.Table {tableName, tableColumns, tablePrimaryKey = pk,
 
   for_ tableUniqueIndexes (run_ testEnv . Postgres.createUniqueIndexSql schemaName tableName)
 
-scalarType :: HasCallStack => Schema.ScalarType -> Text
+scalarType :: (HasCallStack) => Schema.ScalarType -> Text
 scalarType = \case
   Schema.TInt -> "integer"
-  Schema.TStr -> "varchar"
+  Schema.TStr -> "text"
   Schema.TUTCTime -> "timestamp"
   Schema.TBool -> "boolean"
   Schema.TGeography -> "geography"
@@ -184,13 +185,13 @@ mkColumnSql Schema.Column {columnName, columnType, columnNullable, columnDefault
     ]
 
 -- | Serialize tableData into a Citus-SQL insert statement and execute it.
-insertTable :: HasCallStack => TestEnvironment -> Schema.Table -> IO ()
+insertTable :: (HasCallStack) => TestEnvironment -> Schema.Table -> IO ()
 insertTable testEnv Schema.Table {tableName, tableColumns, tableData}
   | null tableData = pure ()
   | otherwise = do
       let schemaName = Schema.unSchemaName $ Schema.getSchemaName testEnv
-      run_ testEnv $
-        [i|
+      run_ testEnv
+        $ [i|
           INSERT INTO "#{ schemaName }"."#{ tableName }"
             (#{ commaSeparated (Postgres.wrapIdentifier . Schema.columnName <$> tableColumns) })
             VALUES #{ commaSeparated $ mkRow <$> tableData };
@@ -216,28 +217,27 @@ mkRow row =
     ]
 
 -- | Serialize Table into a Citus-SQL DROP statement and execute it
-dropTable :: HasCallStack => TestEnvironment -> Schema.Table -> IO ()
+dropTable :: (HasCallStack) => TestEnvironment -> Schema.Table -> IO ()
 dropTable testEnvironment Schema.Table {tableName} = do
   let schemaName = Schema.unSchemaName $ Schema.getSchemaName testEnvironment
   -- We don't want @IF EXISTS@ here, because we don't want this to fail silently.
   run_ testEnvironment $ [i| DROP TABLE #{ schemaName }.#{ tableName }; |]
 
 -- | Post an http request to start tracking the table
-trackTable :: HasCallStack => TestEnvironment -> Schema.Table -> IO ()
+trackTable :: (HasCallStack) => TestEnvironment -> Schema.Table -> IO ()
 trackTable testEnvironment table =
   Schema.trackTable (BackendType.backendSourceName backendTypeMetadata) table testEnvironment
 
 -- | Post an http request to stop tracking the table
-untrackTable :: HasCallStack => TestEnvironment -> Schema.Table -> IO ()
+untrackTable :: (HasCallStack) => TestEnvironment -> Schema.Table -> IO ()
 untrackTable testEnvironment table =
   Schema.untrackTable (BackendType.backendSourceName backendTypeMetadata) table testEnvironment
 
 -- Because the test harness sets the schema name we use for testing, we need
 -- to make sure it exists before we run the tests.
 -- we also need to add the `citus` extension: https://docs.citusdata.com/en/v11.1/admin_guide/cluster_management.html
-createSchema :: TestEnvironment -> IO ()
-createSchema testEnvironment = do
-  let schemaName = Schema.getSchemaName testEnvironment
+createSchema :: TestEnvironment -> SchemaName -> IO ()
+createSchema testEnvironment schemaName = do
   run_
     testEnvironment
     [i|
@@ -245,7 +245,6 @@ createSchema testEnvironment = do
         SET client_min_messages = error;
         SET log_min_messages = panic;
         CREATE SCHEMA IF NOT EXISTS #{unSchemaName schemaName};
-        CREATE EXTENSION citus;
         COMMIT;
       |]
 
@@ -263,8 +262,13 @@ createDatabase testEnvironment = do
     [i|
         CREATE DATABASE #{dbName};
       |]
+  run_
+    testEnvironment
+    [i|
+        CREATE EXTENSION citus;
+    |]
 
-  createSchema testEnvironment
+  createSchema testEnvironment (Schema.getSchemaName testEnvironment)
 
 -- | we drop databases at the end of test runs so we don't need to do DB clean
 -- up.
@@ -278,10 +282,13 @@ dropDatabase testEnvironment = do
 
 -- | Setup the schema in the most expected way.
 -- NOTE: Certain test modules may warrant having their own local version.
-setup :: HasCallStack => [Schema.Table] -> (TestEnvironment, ()) -> IO ()
+setup :: (HasCallStack) => [Schema.Table] -> (TestEnvironment, ()) -> IO ()
 setup tables (testEnvironment, _) = do
   -- Clear and reconfigure the metadata
   GraphqlEngine.setSource testEnvironment (defaultSourceMetadata testEnvironment) Nothing
+
+  -- enable open telemetry output in tests
+  GraphqlEngine.postMetadata_ testEnvironment Schema.enableOpenTelemetryCommand
 
   let schemaName = Schema.getSchemaName testEnvironment
   -- Because the test harness sets the schema name we use for testing, we need
@@ -313,6 +320,19 @@ setupTablesAction ts env =
 
 -- | Teardown the schema and tracking in the most expected way.
 -- NOTE: Certain test modules may warrant having their own version.
-teardown :: HasCallStack => [Schema.Table] -> (TestEnvironment, ()) -> IO ()
+teardown :: (HasCallStack) => [Schema.Table] -> (TestEnvironment, ()) -> IO ()
 teardown _ (testEnvironment, _) =
   GraphqlEngine.setSources testEnvironment mempty Nothing
+
+createUntrackedTables :: [Schema.Table] -> (TestEnvironment, ()) -> IO ()
+createUntrackedTables tables (testEnvironment, _) = do
+  -- Setup tables
+  for_ tables $ \table -> do
+    createTable testEnvironment table
+    insertTable testEnvironment table
+
+createUntrackedTablesAction :: [Schema.Table] -> TestEnvironment -> SetupAction
+createUntrackedTablesAction ts env =
+  SetupAction
+    (createUntrackedTables ts (env, ()))
+    (const $ pure ())

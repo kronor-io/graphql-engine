@@ -1,8 +1,10 @@
 # Hasura Frontend Docker Setup
 
-The `docker-compose.yml` file in this directory is intended to create several local dbs, and relevant services for local Hasura frontend development. In addition, the aim for this will be to automatically populate db's with demo data as part of the initialization process.
+The `docker-compose.template.yml` file in this directory is a starter template `docker-compose.yml` file to create several local dbs, and relevant services for local Hasura frontend development. In addition, the aim for this will be to automatically populate db's with demo data as part of the initialization process.
 
-There are a few basic steps:
+### There are a few basic steps:
+
+Before beginning, create a `docker-compose.yml` file in this directory and copy and paste the contents of `docker-compose.template.yml` into this file. Since the `docker-compose.yml` is not part of source control, you may freely alter it to fit your needs.
 
 1. Run `docker compose up -d` from this directory.
 2. Enter the BigQuery service account private key for the BigQuery source. Property is, `configuration.service_account.private_key` in the `default_metadata.json` file. Alternatively, you can remove this section of the json file.
@@ -26,6 +28,34 @@ This scripting is done in `docker/DataSources/mssql/run-initialization.sh`.
 After `run-initialization.sh` attempts to execute `docker/DataSources/mssql/mssql-setup.sql`, it creates the file `docker/DataSources/mssql/REMOVE_ME_TO_RERUN_SETUP.txt`. The presence of this `.txt` file will prevent the `mssql-setup.sql` script from executing again if the container is started again.
 
 To force it to re-run, just delete `/DataSources/mssql/REMOVE_ME_TO_RERUN_SETUP.txt` and restart your container. Because `/DataSources/mssql` is mounted as a volume, it uses the local filesystem.
+
+## MongoDB
+
+The Docker compose file starts a Mongo database with a single collection called `mycollection`. This collection is defined with a json schema file, since for the moment the Mongo agent can only track collections with a schema.
+
+### Database
+
+The docker-compose file will start a Mongo database. You can connect to it with the following command:
+
+```bash
+mongosh "mongodb://host.docker.internal:27017"
+```
+
+For now the agent only works with databases without authentication, so keep that in mind if you're planning to use a different Mongo database than the one provided in `docker-compose.yml`
+
+### Agent
+
+For the moment we don't have a docker image for the Mongo agent, but you can start it locally with the following steps:
+
+- Install cabal (Haskell build tools)
+- Go to the `pro/dc-agents/mongodb` directory
+- `cabal build`
+- `cabal update`
+- `cabal run`
+- Add an agent. Set URL to `http://host.docker.internal:8888`. Replace with `localhost` if your OS does not support `host.docker.internal`
+- Add a Mongo database
+  - Set URL to `host.docker.internal:27017`
+  - Set DB to `sample`
 
 ## Using Different HGE Images
 

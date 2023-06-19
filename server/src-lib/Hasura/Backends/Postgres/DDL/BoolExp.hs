@@ -2,7 +2,7 @@
 --
 -- How to parse the boolean expressions, specifically for Postgres.
 --
--- See 'Hasura.RQL.DDL.Schema.Cache' and 'Hasura.RQL.Types.Eventing.Backend'.
+-- See 'Hasura.Eventing.Backend'.
 module Hasura.Backends.Postgres.DDL.BoolExp
   ( parseBoolExpOperations,
     buildComputedFieldBooleanExp,
@@ -12,24 +12,24 @@ where
 import Data.Aeson
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.HashMap.Strict qualified as Map
+import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as T
 import Data.Text.Extended
 import Hasura.Backends.Postgres.SQL.Types hiding (TableName)
 import Hasura.Backends.Postgres.Types.BoolExp
 import Hasura.Backends.Postgres.Types.ComputedField as PG
 import Hasura.Base.Error
+import Hasura.Function.Cache
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.BoolExp
 import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.ComputedField
-import Hasura.RQL.Types.Function
 import Hasura.RQL.Types.SchemaCache
-import Hasura.RQL.Types.Table
-import Hasura.SQL.Backend
 import Hasura.SQL.Types
+import Hasura.Table.Cache
 
 parseBoolExpOperations ::
   forall pgKind m v.
@@ -60,8 +60,8 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
         columnType = CollectableTypeScalar $ columnReferenceType column
 
     parseOperation :: ColumnReference ('Postgres pgKind) -> (Text, Value) -> m (OpExpG ('Postgres pgKind) v)
-    parseOperation column (opStr, val) = withPathK opStr $
-      case opStr of
+    parseOperation column (opStr, val) = withPathK opStr
+      $ case opStr of
         "$cast" -> parseCast
         "_cast" -> parseCast
         "$eq" -> parseEq
@@ -201,23 +201,26 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
         parseCast = do
           castOperations <- parseVal
           parsedCastOperations <-
-            forM (Map.toList castOperations) $ \(targetTypeName, castedComparisons) -> do
+            forM (HashMap.toList castOperations) $ \(targetTypeName, castedComparisons) -> do
               let targetType = textToPGScalarType targetTypeName
                   castedColumn = ColumnReferenceCast column (ColumnScalar targetType)
               checkValidCast targetType
               parsedCastedComparisons <-
-                withPathK targetTypeName $
-                  parseOperations castedColumn castedComparisons
+                withPathK targetTypeName
+                  $ parseOperations castedColumn castedComparisons
               return (targetType, parsedCastedComparisons)
-          return . ACast $ Map.fromList parsedCastOperations
+          return . ACast $ HashMap.fromList parsedCastOperations
 
         checkValidCast targetType = case (colTy, targetType) of
           (ColumnScalar PGGeometry, PGGeography) -> return ()
           (ColumnScalar PGGeography, PGGeometry) -> return ()
           (ColumnScalar PGJSONB, PGText) -> return ()
           _ ->
-            throw400 UnexpectedPayload $
-              "cannot cast column of type " <> colTy <<> " to type " <>> targetType
+            throw400 UnexpectedPayload
+              $ "cannot cast column of type "
+              <> colTy
+              <<> " to type "
+              <>> targetType
 
         parseGeometryOp f =
           guardType [PGGeometry] >> ABackendSpecific . f <$> parseOneNoSess colTy val
@@ -265,12 +268,16 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
 
         validateRhsCol fieldInfoMap rhsCol = do
           rhsType <- askColumnType fieldInfoMap rhsCol "column operators can only compare postgres columns"
-          when (colTy /= rhsType) $
-            throw400 UnexpectedPayload $
-              "incompatible column types: "
-                <> column <<> " has type "
-                <> colTy <<> ", but "
-                <> rhsCol <<> " has type " <>> rhsType
+          when (colTy /= rhsType)
+            $ throw400 UnexpectedPayload
+            $ "incompatible column types: "
+            <> column
+            <<> " has type "
+            <> colTy
+            <<> ", but "
+            <> rhsCol
+            <<> " has type "
+            <>> rhsType
           pure rhsCol
 
         parseWithTy ty = rhsParser (CollectableTypeScalar ty) val
@@ -282,14 +289,15 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
         parseManyWithType ty = rhsParser (CollectableTypeArray ty) val
 
         guardType validTys =
-          unless (isScalarColumnWhere (`elem` validTys) colTy) $
-            throwError $
-              buildMsg colTy validTys
+          unless (isScalarColumnWhere (`elem` validTys) colTy)
+            $ throwError
+            $ buildMsg colTy validTys
         buildMsg ty expTys =
-          err400 UnexpectedPayload $
-            " is of type "
-              <> ty <<> "; this operator works only on columns of type "
-              <> T.intercalate "/" (map dquote expTys)
+          err400 UnexpectedPayload
+            $ " is of type "
+            <> ty
+            <<> "; this operator works only on columns of type "
+            <> T.intercalate "/" (map dquote expTys)
 
         parseVal :: (FromJSON a) => m a
         parseVal = decodeValue val

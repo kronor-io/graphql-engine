@@ -1,10 +1,13 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 module Hasura.RQL.Types.Roles
   ( DropInheritedRole (..),
     InheritedRole,
     ParentRoles (..),
     Role (..),
+    RoleName,
+    mkRoleName,
+    mkRoleNameSafe,
+    adminRoleName,
+    roleNameToTxt,
   )
 where
 
@@ -13,9 +16,44 @@ import Autodocodec qualified as AC
 import Autodocodec.Extended (hashSetCodec)
 import Data.Aeson
 import Data.Aeson.Casing
-import Data.Aeson.TH
+import Data.Text.Extended (ToTxt (toTxt))
+import Data.Text.NonEmpty (NonEmptyText, mkNonEmptyText, mkNonEmptyTextUnsafe, nonEmptyTextCodec, unNonEmptyText)
+import Database.PG.Query qualified as PG
 import Hasura.Prelude
-import Hasura.Session
+
+newtype RoleName = RoleName {getRoleTxt :: NonEmptyText}
+  deriving
+    ( Show,
+      Eq,
+      Ord,
+      Hashable,
+      FromJSONKey,
+      ToJSONKey,
+      FromJSON,
+      ToJSON,
+      PG.FromCol,
+      PG.ToPrepArg,
+      Generic,
+      NFData
+    )
+
+instance HasCodec RoleName where
+  codec = dimapCodec RoleName getRoleTxt nonEmptyTextCodec
+
+roleNameToTxt :: RoleName -> Text
+roleNameToTxt = unNonEmptyText . getRoleTxt
+
+instance ToTxt RoleName where
+  toTxt = roleNameToTxt
+
+mkRoleName :: Text -> Maybe RoleName
+mkRoleName = fmap RoleName . mkNonEmptyText
+
+mkRoleNameSafe :: NonEmptyText -> RoleName
+mkRoleNameSafe = RoleName
+
+adminRoleName :: RoleName
+adminRoleName = RoleName $ mkNonEmptyTextUnsafe "admin"
 
 newtype ParentRoles = ParentRoles {_unParentRoles :: HashSet RoleName}
   deriving (Show, Eq, ToJSON, FromJSON, Generic)
@@ -43,10 +81,12 @@ instance Hashable Role
 
 instance HasCodec Role where
   codec =
-    AC.object "Role" $
-      Role
-        <$> requiredField' "role_name" AC..= _rRoleName
-        <*> requiredField' "role_set" AC..= _rParentRoles
+    AC.object "Role"
+      $ Role
+      <$> requiredField' "role_name"
+      AC..= _rRoleName
+        <*> requiredField' "role_set"
+      AC..= _rParentRoles
 
 instance ToJSON Role where
   toJSON (Role roleName parentRoles) =
@@ -68,6 +108,11 @@ type InheritedRole = Role
 newtype DropInheritedRole = DropInheritedRole
   { _ddrRoleName :: RoleName
   }
-  deriving (Show, Eq)
+  deriving stock (Show, Eq, Generic)
 
-$(deriveJSON (aesonDrop 4 snakeCase) ''DropInheritedRole)
+instance FromJSON DropInheritedRole where
+  parseJSON = genericParseJSON (aesonDrop 4 snakeCase)
+
+instance ToJSON DropInheritedRole where
+  toJSON = genericToJSON (aesonDrop 4 snakeCase)
+  toEncoding = genericToEncoding (aesonDrop 4 snakeCase)

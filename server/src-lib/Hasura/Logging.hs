@@ -17,6 +17,7 @@ module Hasura.Logging
     UnstructuredLog (..),
     Logger (..),
     LogLevel (..),
+    UnhandledInternalErrorLog (..),
     mkLogger,
     nullLogger,
     LoggerCtx (..),
@@ -38,11 +39,15 @@ module Hasura.Logging
     createStatsLogger,
     closeStatsLogger,
     logStats,
+
+    -- * Other internal logs
+    StoredIntrospectionLog (..),
+    StoredIntrospectionStorageLog (..),
   )
 where
 
 import Control.AutoUpdate qualified as Auto
-import Control.Exception (catch)
+import Control.Exception (ErrorCall (ErrorCallWithLocation), catch)
 import Control.FoldDebounce qualified as FDebounce
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Managed (ManagedT (..), allocate)
@@ -56,10 +61,12 @@ import Data.HashSet qualified as Set
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.SerializableBlob qualified as SB
+import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Time.Clock qualified as Time
 import Data.Time.Format qualified as Format
 import Data.Time.LocalTime qualified as Time
+import Hasura.Base.Error (QErr)
 import Hasura.Prelude
 import System.Log.FastLogger qualified as FL
 import Witch qualified
@@ -130,6 +137,7 @@ instance J.FromJSON (EngineLogType Hasura) where
 data InternalLogTypes
   = -- | mostly for debug logs - see @debugT@, @debugBS@ and @debugLBS@ functions
     ILTUnstructured
+  | ILTUnhandledInternalError
   | ILTEventTrigger
   | ILTEventTriggerProcess
   | ILTScheduledTrigger
@@ -143,6 +151,8 @@ data InternalLogTypes
   | ILTTelemetry
   | ILTSchemaSync
   | ILTSourceCatalogMigration
+  | ILTStoredIntrospection
+  | ILTStoredIntrospectionStorage
   deriving (Show, Eq, Generic)
 
 instance Hashable InternalLogTypes
@@ -150,6 +160,7 @@ instance Hashable InternalLogTypes
 instance Witch.From InternalLogTypes Text where
   from = \case
     ILTUnstructured -> "unstructured"
+    ILTUnhandledInternalError -> "unhandled-internal-error"
     ILTEventTrigger -> "event-trigger"
     ILTEventTriggerProcess -> "event-trigger-process"
     ILTScheduledTrigger -> "scheduled-trigger"
@@ -161,6 +172,8 @@ instance Witch.From InternalLogTypes Text where
     ILTTelemetry -> "telemetry-log"
     ILTSchemaSync -> "schema-sync"
     ILTSourceCatalogMigration -> "source-catalog-migration"
+    ILTStoredIntrospection -> "stored-introspection"
+    ILTStoredIntrospectionStorage -> "stored-introspection-storage"
 
 instance J.ToJSON InternalLogTypes where
   toJSON = J.String . Witch.into @Text
@@ -224,21 +237,21 @@ data EngineLog impl = EngineLog
     _elDetail :: !J.Value
   }
 
-deriving instance Show (EngineLogType impl) => Show (EngineLog impl)
+deriving instance (Show (EngineLogType impl)) => Show (EngineLog impl)
 
-deriving instance Eq (EngineLogType impl) => Eq (EngineLog impl)
+deriving instance (Eq (EngineLogType impl)) => Eq (EngineLog impl)
 
 -- Empty splice to bring all the above definitions in scope.
 --
 -- TODO: Restructure the code so that we can avoid this.
 $(pure [])
 
-instance J.ToJSON (EngineLogType impl) => J.ToJSON (EngineLog impl) where
+instance (J.ToJSON (EngineLogType impl)) => J.ToJSON (EngineLog impl) where
   toJSON = $(J.mkToJSON hasuraJSON ''EngineLog)
 
 -- | Typeclass representing any data type that can be converted to @EngineLog@ for the purpose of
 -- logging
-class EnabledLogTypes impl => ToEngineLog a impl where
+class (EnabledLogTypes impl) => ToEngineLog a impl where
   toEngineLog :: a -> (LogLevel, EngineLogType impl, J.Value)
 
 data UnstructuredLog = UnstructuredLog {_ulLevel :: !LogLevel, _ulPayload :: !SB.SerializableBlob}
@@ -264,6 +277,22 @@ data LoggerCtx impl = LoggerCtx
     _lcEnabledLogTypes :: !(Set.HashSet (EngineLogType impl))
   }
 
+-- * Unhandled Internal Errors
+
+-- | We expect situations where there are code paths that should not occur and we throw
+--   an 'error' on this code paths. If our assumptions are incorrect and infact
+--   these errors do occur, we want to log them.
+newtype UnhandledInternalErrorLog = UnhandledInternalErrorLog ErrorCall
+
+instance ToEngineLog UnhandledInternalErrorLog Hasura where
+  toEngineLog (UnhandledInternalErrorLog (ErrorCallWithLocation err loc)) =
+    ( LevelError,
+      ELTInternal ILTUnhandledInternalError,
+      J.object [("error", fromString err), ("location", fromString loc)]
+    )
+
+-- * LoggerSettings
+
 data LoggerSettings = LoggerSettings
   { -- | should current time be cached (refreshed every sec)
     _lsCachedTimestamp :: !Bool,
@@ -288,19 +317,28 @@ getFormattedTime tzM = do
 
 -- format = Format.iso8601DateFormat (Just "%H:%M:%S")
 
+-- | Creates a new 'LoggerCtx'.
+--
+-- The underlying 'LoggerSet' is bound to the 'ManagedT' context: when it exits,
+-- the log will be flushed and cleared regardless of whether it was exited
+-- properly or not ('ManagedT' uses 'bracket' underneath). This guarantees that
+-- the logs will always be flushed, even in case of error, avoiding a repeat of
+-- https://github.com/hasura/graphql-engine/issues/4772.
 mkLoggerCtx ::
   (MonadIO io, MonadBaseControl IO io) =>
   LoggerSettings ->
   Set.HashSet (EngineLogType impl) ->
   ManagedT io (LoggerCtx impl)
 mkLoggerCtx (LoggerSettings cacheTime tzM logLevel) enabledLogs = do
-  loggerSet <-
-    allocate
-      (liftIO $ FL.newStdoutLoggerSet FL.defaultBufSize)
-      (liftIO . FL.rmLoggerSet)
-  timeGetter <- liftIO $ bool (return $ getFormattedTime tzM) cachedTimeGetter cacheTime
-  return $ LoggerCtx loggerSet logLevel timeGetter enabledLogs
+  loggerSet <- allocate acquire release
+  timeGetter <- liftIO $ bool (pure $ getFormattedTime tzM) cachedTimeGetter cacheTime
+  pure $ LoggerCtx loggerSet logLevel timeGetter enabledLogs
   where
+    acquire = liftIO do
+      FL.newStdoutLoggerSet FL.defaultBufSize
+    release loggerSet = liftIO do
+      FL.flushLogStr loggerSet
+      FL.rmLoggerSet loggerSet
     cachedTimeGetter =
       Auto.mkAutoUpdate
         Auto.defaultUpdateSettings
@@ -318,10 +356,10 @@ mkLogger :: (J.ToJSON (EngineLogType impl)) => LoggerCtx impl -> Logger impl
 mkLogger (LoggerCtx loggerSet serverLogLevel timeGetter enabledLogTypes) = Logger $ \l -> do
   localTime <- liftIO timeGetter
   let (logLevel, logTy, logDet) = toEngineLog l
-  when (logLevel >= serverLogLevel && isLogTypeEnabled enabledLogTypes logTy) $
-    liftIO $
-      FL.pushLogStrLn loggerSet $
-        FL.toLogStr (J.encode $ EngineLog localTime logLevel logTy logDet)
+  when (logLevel >= serverLogLevel && isLogTypeEnabled enabledLogTypes logTy)
+    $ liftIO
+    $ FL.pushLogStrLn loggerSet
+    $ FL.toLogStr (J.encode $ EngineLog localTime logLevel logTy logDet)
 
 nullLogger :: Logger Hasura
 nullLogger = Logger \_ -> pure ()
@@ -343,6 +381,36 @@ cronEventGeneratorProcessType = ELTInternal ILTCronEventGeneratorProcess
 
 sourceCatalogMigrationLogType :: EngineLogType Hasura
 sourceCatalogMigrationLogType = ELTInternal ILTSourceCatalogMigration
+
+-- | Emit when stored introspection is used
+data StoredIntrospectionLog = StoredIntrospectionLog
+  { silMessage :: Text,
+    -- | upstream data source errors
+    silSourceError :: QErr
+  }
+  deriving stock (Generic)
+
+instance J.ToJSON StoredIntrospectionLog where
+  toJSON = J.genericToJSON hasuraJSON
+
+instance ToEngineLog StoredIntrospectionLog Hasura where
+  toEngineLog siLog =
+    (LevelInfo, ELTInternal ILTStoredIntrospection, J.toJSON siLog)
+
+-- | Logs related to errors while interacting with the stored introspection
+-- storage
+data StoredIntrospectionStorageLog = StoredIntrospectionStorageLog
+  { sislMessage :: Text,
+    sislError :: QErr
+  }
+  deriving stock (Generic)
+
+instance J.ToJSON StoredIntrospectionStorageLog where
+  toJSON = J.genericToJSON hasuraJSON
+
+instance ToEngineLog StoredIntrospectionStorageLog Hasura where
+  toEngineLog sisLog =
+    (LevelInfo, ELTInternal ILTStoredIntrospectionStorage, J.toJSON sisLog)
 
 -- | A logger useful for accumulating  and logging stats, in tight polling loops. It also
 -- debounces to not flood with excessive logs. Use @'logStats' to record statistics for logging.

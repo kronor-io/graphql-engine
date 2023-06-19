@@ -13,7 +13,7 @@ where
 --------------------------------------------------------------------------------
 
 import Control.Monad.Managed (Managed)
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Harness.Backend.DataConnector.Chinook (ChinookTestEnv, NameFormatting (..), ScalarTypes (..))
 import Harness.Backend.DataConnector.Chinook qualified as Chinook
 import Harness.Quoter.Yaml (yaml)
@@ -41,6 +41,7 @@ backendTypeConfig =
             comparisons:
               subquery:
                 supports_relations: true
+            user_defined_functions: {}
             scalar_types:
               DateTime:
                 comparison_operators:
@@ -98,7 +99,7 @@ scalarTypes =
     }
 
 -- | Reference Agent specific @sources@ entry @configuration@ field.
-sourceConfiguration :: Aeson.Value
+sourceConfiguration :: J.Value
 sourceConfiguration =
   [yaml|
     value: {}

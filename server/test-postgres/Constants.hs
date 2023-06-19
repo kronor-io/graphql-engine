@@ -13,10 +13,10 @@ import Data.HashSet qualified as Set
 import Database.PG.Query qualified as PG
 import Hasura.Backends.Postgres.Connection.MonadTx (ExtensionsSchema (..))
 import Hasura.GraphQL.Execute.Subscription.Options qualified as ES
-import Hasura.GraphQL.Schema.Options qualified as Options
 import Hasura.Logging qualified as L
 import Hasura.Prelude
 import Hasura.RQL.Types.Metadata (emptyMetadataDefaults)
+import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.Server.Cors (CorsConfig (CCAllowAll))
 import Hasura.Server.Init
   ( API (CONFIG, DEVELOPER, GRAPHQL, METADATA),
@@ -90,7 +90,8 @@ serveOptions =
       soDefaultNamingConvention = Init._default Init.defaultNamingConventionOption,
       soExtensionsSchema = ExtensionsSchema "public",
       soMetadataDefaults = emptyMetadataDefaults,
-      soApolloFederationStatus = ApolloFederationDisabled
+      soApolloFederationStatus = ApolloFederationDisabled,
+      soCloseWebsocketsOnMetadataChangeStatus = Init._default Init.closeWebsocketsOnMetadataChangeOption
     }
 
 -- | What log level should be used by the engine; this is not exported, and

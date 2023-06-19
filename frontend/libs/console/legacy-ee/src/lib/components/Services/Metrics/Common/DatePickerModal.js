@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
-import BootstrapModal from 'react-bootstrap/lib/Modal';
-// import BootstrapModalButton from 'react-bootstrap/lib/Button';
+import { useState } from 'react';
+import { Dialog } from '@hasura/console-legacy-ce';
 // import DatePicker from 'react-datepicker';
 // import 'react-datepicker/dist/react-datepicker.css';
 import { DateRangePicker } from 'react-date-range';
@@ -40,19 +39,23 @@ const DatePickerModal = props => {
   };
   }
   */
+  if (!show) return null;
+
   return (
-    <BootstrapModal
+    <Dialog
+      hasBackdrop
       id="dateModal"
-      onHide={onHide}
-      show={show}
-      className={clsx(styles.datePickerModalWrapper, '!pointer-events-auto')}
+      onClose={onHide}
+      title="Custom Date"
+      portal
     >
-      <BootstrapModal.Header className={styles.modalHeader} closeButton>
-        <BootstrapModal.Title className={styles.title}>
-          Custom Date
-        </BootstrapModal.Title>
-      </BootstrapModal.Header>
-      <BootstrapModal.Body>
+      <div
+        className={clsx(
+          styles.datePickerModalWrapper,
+          '!pointer-events-auto',
+          'p-sm'
+        )}
+      >
         <div className={styles.datePickerContainer}>
           <div className={styles.datePickerWrapper}>
             {/*
@@ -69,6 +72,7 @@ const DatePickerModal = props => {
               ranges={[rangeState]}
               onChange={date => setRangeState(date.selection)}
               dateFormat="MMMM d, yyyy h:mm aa"
+              rangeColors={['var(--tw-color-amber-500-hex)']}
             />
           </div>
           {/*
@@ -97,8 +101,8 @@ const DatePickerModal = props => {
             Cancel
           </Button>
         </div>
-      </BootstrapModal.Body>
-    </BootstrapModal>
+      </div>
+    </Dialog>
   );
 };
 

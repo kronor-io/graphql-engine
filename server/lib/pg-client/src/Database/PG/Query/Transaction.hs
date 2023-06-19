@@ -29,13 +29,16 @@ module Database.PG.Query.Transaction
     fromText,
     fromBuilder,
     getQueryText,
+    describePreparedStatement,
+    PreparedDescription (..),
+    transformerJoinTxET,
   )
 where
 
 -------------------------------------------------------------------------------
 
 import Control.Monad.Base (MonadBase)
-import Control.Monad.Except (MonadError)
+import Control.Monad.Except (MonadError, runExceptT, throwError)
 import Control.Monad.Fix (MonadFix)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Morph (MFunctor (..), MonadTrans (..))
@@ -45,6 +48,7 @@ import Control.Monad.Trans.Except (ExceptT, withExceptT)
 import Control.Monad.Trans.Reader (ReaderT (..))
 import Data.Aeson (ToJSON (toJSON), object, (.=))
 import Data.Aeson.Text (encodeToLazyText)
+import Data.ByteString (ByteString)
 import Data.Hashable (Hashable)
 import Data.String (IsString)
 import Data.Text (Text)
@@ -92,15 +96,25 @@ newtype TxET e m a = TxET
       MonadFix
     )
 
+transformerJoinTxET :: (Monad m) => TxET e (TxET e m) a -> TxET e m a
+transformerJoinTxET x =
+  TxET $ ReaderT $ \pgConn -> do
+    result <- runReaderT (txHandler $ runExceptT (runReaderT (txHandler x) pgConn)) pgConn
+    case result of
+      Left err -> throwError err
+      Right r -> pure r
+
+{- HLINT ignore "Use onLeft" -}
+
 instance MonadTrans (TxET e) where
   lift = TxET . lift . lift
 
 instance MFunctor (TxET e) where
   hoist f = TxET . hoist (hoist f) . txHandler
 
-deriving via (ReaderT PGConn (ExceptT e m)) instance MonadBase IO m => MonadBase IO (TxET e m)
+deriving via (ReaderT PGConn (ExceptT e m)) instance (MonadBase IO m) => MonadBase IO (TxET e m)
 
-deriving via (ReaderT PGConn (ExceptT e m)) instance MonadBaseControl IO m => MonadBaseControl IO (TxET e m)
+deriving via (ReaderT PGConn (ExceptT e m)) instance (MonadBaseControl IO m) => MonadBaseControl IO (TxET e m)
 
 type TxE e a = TxET e IO a
 
@@ -209,8 +223,20 @@ discardQE ef t r p = do
   Discard () <- withQE ef t r p
   return ()
 
+-- | Extract the description of a prepared statement.
+describePreparedStatement ::
+  (MonadIO m) =>
+  (PGTxErr -> e) ->
+  ByteString ->
+  TxET e m (PreparedDescription PQ.Oid)
+describePreparedStatement ef name = TxET $
+  ReaderT $ \pgConn ->
+    withExceptT (ef . PGTxErr mempty [] False) $
+      hoist liftIO $
+        describePrepared pgConn name
+
 serverVersion ::
-  MonadIO m => TxET e m Int
+  (MonadIO m) => TxET e m Int
 serverVersion = do
   conn <- asks pgPQConn
   liftIO $ PQ.serverVersion conn

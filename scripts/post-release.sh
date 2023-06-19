@@ -27,11 +27,17 @@ find "$ROOT/install-manifests" \
      -type f -exec sed -i -E \
      's#(hasura/graphql-engine:)v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(.*)*$#\1'"${TAG}"'\9#' {} \;
 
+# replace the data-connector version with latest tag for all references in install-manifests
+find "$ROOT/install-manifests" \
+     -type f -exec sed -i -E \
+     's#(hasura/graphql-data-connector:)v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(.*)*$#\1'"${TAG}"'\9#' {} \;
+
+
 # update version in CLI installation instructions
 sed -i -E 's#(.*)v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(.*)*$#\1'"${TAG}"'\9#' \
     "${ROOT}/cli/README.md" \
     "${ROOT}/cli/get.sh" \
-    "${ROOT}/docs/graphql/core/hasura-cli/install-hasura-cli.rst"
+    "${ROOT}/docs/docs/hasura-cli/install-hasura-cli.mdx"
 
 # update version in CI image scanning tags
 sed -i -E 's#v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)#'"${TAG}"'#' \
@@ -41,7 +47,7 @@ sed -i -E 's#v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)#'"${TAG}"'#' \
 
 git add "$ROOT/install-manifests" \
         "${ROOT}/cli" \
-        "${ROOT}/docs/graphql/core/hasura-cli/install-hasura-cli.rst" \
+        "${ROOT}/docs/docs/hasura-cli/install-hasura-cli.mdx" \
         "${ROOT}/.buildkite/pipeline-gen/pipeline/scan_graphql_engine_images.go" \
         "${ROOT}/.buildkite/pipeline-gen/pipeline/scan_graphql_engine_pro_images.go"
 

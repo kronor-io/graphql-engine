@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Hasura.RQL.Types.Backend
@@ -13,7 +14,9 @@ module Hasura.RQL.Types.Backend
   )
 where
 
-import Autodocodec (HasCodec)
+import Autodocodec (HasCodec (..))
+import Autodocodec.DerivingVia ()
+import Autodocodec.OpenAPI ()
 import Control.Lens.TH (makePrisms)
 import Data.Aeson.Extended
 import Data.Environment qualified as Env
@@ -21,16 +24,17 @@ import Data.Kind (Type)
 import Data.Text.Casing (GQLNameIdentifier)
 import Data.Text.Extended
 import Data.Typeable (Typeable)
+import Hasura.Backends.Postgres.Connection.Settings (ConnectionTemplate (..))
 import Hasura.Base.Error
 import Hasura.Base.ToErrorValue
 import Hasura.EncJSON (EncJSON)
 import Hasura.Prelude
+import Hasura.RQL.Types.BackendTag
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.HealthCheckImplementation (HealthCheckImplementation)
 import Hasura.RQL.Types.ResizePool (ServerReplicas, SourceResizePoolSummary)
 import Hasura.RQL.Types.SourceConfiguration
-import Hasura.SQL.Backend
-import Hasura.SQL.Tag
 import Hasura.SQL.Types
 import Language.GraphQL.Draft.Syntax qualified as G
 
@@ -81,6 +85,7 @@ class
     Representable (ExtraTableMetadata b),
     Representable (FunctionArgument b),
     Representable (FunctionName b),
+    Representable (FunctionReturnType b),
     Representable (HealthCheckTest b),
     Representable (NullsOrderType b),
     Representable (SQLExpression b),
@@ -89,11 +94,17 @@ class
     Representable (XComputedField b),
     Representable (TableName b),
     Eq (RawFunctionInfo b),
+    Show (RawFunctionInfo b),
     Representable (ResolvedConnectionTemplate b),
     Ord (TableName b),
     Ord (FunctionName b),
     Ord (ScalarType b),
     Ord (Column b),
+    Ord (ComputedFieldReturn b),
+    Ord (ComputedFieldImplicitArguments b),
+    Ord (ConstraintName b),
+    Ord (FunctionArgument b),
+    Ord (XComputedField b),
     Data (TableName b),
     FromJSON (BackendConfig b),
     FromJSON (Column b),
@@ -102,15 +113,19 @@ class
     FromJSON (ConstraintName b),
     FromJSON (ExtraTableMetadata b),
     FromJSON (FunctionName b),
+    FromJSON (FunctionReturnType b),
     FromJSON (HealthCheckTest b),
     FromJSON (RawFunctionInfo b),
     FromJSON (ScalarType b),
     FromJSON (TableName b),
     FromJSONKey (Column b),
+    FromJSONKey (ConstraintName b),
+    HasCodec (BackendConfig b),
     HasCodec (BackendSourceKind b),
     HasCodec (Column b),
     HasCodec (ComputedFieldDefinition b),
     HasCodec (FunctionName b),
+    HasCodec (FunctionReturnType b),
     HasCodec (ScalarType b),
     HasCodec (TableName b),
     ToJSON (BackendConfig b),
@@ -119,6 +134,8 @@ class
     ToJSON (ExecutionStatistics b),
     ToJSON (FunctionArgument b),
     ToJSON (FunctionName b),
+    ToJSON (FunctionReturnType b),
+    ToJSON (RawFunctionInfo b),
     ToJSON (ScalarType b),
     ToJSON (TableName b),
     ToJSON (ExtraTableMetadata b),
@@ -129,6 +146,7 @@ class
     ToJSON (HealthCheckTest b),
     ToJSON (ResolvedConnectionTemplate b),
     ToJSONKey (Column b),
+    ToJSONKey (ConstraintName b),
     ToJSONKey (ScalarType b),
     ToTxt (Column b),
     ToTxt (FunctionName b),
@@ -159,6 +177,14 @@ class
     Show (XRelay b),
     Eq (XStreamingSubscription b),
     Show (XStreamingSubscription b),
+    Eq (XNestedObjects b),
+    Ord (XNestedObjects b),
+    Show (XNestedObjects b),
+    NFData (XNestedObjects b),
+    Hashable (XNestedObjects b),
+    ToJSON (XNestedObjects b),
+    FromJSON (XNestedObjects b),
+    ToTxt (XNestedObjects b),
     -- Intermediate Representations
     Traversable (BooleanOperators b),
     Traversable (UpdateVariant b),
@@ -180,6 +206,9 @@ class
 
   -- Fully qualified name of a function
   type FunctionName b :: Type
+
+  type FunctionReturnType b :: Type
+  type FunctionReturnType b = XDisable
 
   -- Information about a function obtained by introspecting the underlying
   -- database
@@ -300,6 +329,9 @@ class
 
   type XStreamingSubscription b :: Type
 
+  type XNestedObjects b :: Type
+  type XNestedObjects b = XDisable
+
   -- The result of dynamic connection template resolution
   type ResolvedConnectionTemplate b :: Type
   type ResolvedConnectionTemplate b = () -- Uninmplemented value
@@ -309,8 +341,8 @@ class
   type ConnectionTemplateRequestContext b :: Type
   type ConnectionTemplateRequestContext b = () -- Uninmplemented value
 
-  resolveConnectionTemplate :: SourceConfig b -> ConnectionTemplateRequestContext b -> Either QErr EncJSON
-  resolveConnectionTemplate _ _ = Left (err400 (NotSupported) "connection template is not implemented")
+  resolveConnectionTemplate :: SourceConfig b -> ConnectionTemplateRequestContext b -> Maybe ConnectionTemplate -> Either QErr EncJSON
+  resolveConnectionTemplate _ _ _ = Left (err400 (NotSupported) "connection template is not implemented")
 
   -- | Information about the query execution that may be useful for debugging
   -- or reporting.
@@ -339,6 +371,27 @@ class
   tableToFunction :: TableName b -> FunctionName b
   computedFieldFunction :: ComputedFieldDefinition b -> FunctionName b
   computedFieldReturnType :: ComputedFieldReturn b -> ComputedFieldReturnType b
+
+  -- | Backends that don't support aggregate computed fields will never
+  -- encounter an 'RQL.IR.Select.SelectionField'. However, backends are
+  -- expected to provide a total transformation from 'SelectionField' to the
+  -- backend's query language.
+  --
+  -- Rather than implement error handling for every backend that doesn't
+  -- support aggregate computed fields, and then remove that error handling for
+  -- each backend when we /add/ support - honestly, adding error handling would
+  -- probably take longer than adding aggregate computed field support - we
+  -- instead have a flag.
+  --
+  -- If a backend declares this flag as 'False', computed fields will not be
+  -- added to the GraphQL schema. This means that backends can safely handle
+  -- 'SFComputedField' with a runtime exception /as long as/ this flag is
+  -- 'False'.
+  --
+  -- Once all backends support all aggregate computed field operations, this
+  -- flag can be deleted.
+  supportsAggregateComputedFields :: Bool
+  supportsAggregateComputedFields = False
 
   -- | Build function arguments expression from computed field implicit arguments
   fromComputedFieldImplicitArguments :: v -> ComputedFieldImplicitArguments b -> [FunctionArgumentExp b v]

@@ -1,6 +1,6 @@
 module Test.DataConnector.MockAgent.TestHelpers
   ( mkTableName,
-    mkQueryRequest,
+    mkTableRequest,
     emptyQuery,
     emptyMutationRequest,
     mkRowsQueryResponse,
@@ -10,7 +10,7 @@ module Test.DataConnector.MockAgent.TestHelpers
   )
 where
 
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Hasura.Backends.DataConnector.API qualified as API
 import Hasura.Prelude
@@ -18,22 +18,22 @@ import Hasura.Prelude
 mkTableName :: Text -> API.TableName
 mkTableName name = API.TableName (name :| [])
 
-mkQueryRequest :: API.TableName -> API.Query -> API.QueryRequest
-mkQueryRequest tableName query = API.QueryRequest tableName [] query Nothing
+mkTableRequest :: API.TableName -> API.Query -> API.QueryRequest
+mkTableRequest tableName query = API.QRTable $ API.TableRequest tableName mempty query Nothing
 
 emptyQuery :: API.Query
 emptyQuery = API.Query Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 emptyMutationRequest :: API.MutationRequest
-emptyMutationRequest = API.MutationRequest [] [] []
+emptyMutationRequest = API.MutationRequest mempty mempty []
 
 mkRowsQueryResponse :: [[(Text, API.FieldValue)]] -> API.QueryResponse
 mkRowsQueryResponse rows = API.QueryResponse (Just $ mkFieldsMap <$> rows) Nothing
 
-mkAggregatesQueryResponse :: [(Text, Aeson.Value)] -> API.QueryResponse
+mkAggregatesQueryResponse :: [(Text, J.Value)] -> API.QueryResponse
 mkAggregatesQueryResponse aggregates = API.QueryResponse Nothing (Just $ mkFieldsMap aggregates)
 
-mkQueryResponse :: [[(Text, API.FieldValue)]] -> [(Text, Aeson.Value)] -> API.QueryResponse
+mkQueryResponse :: [[(Text, API.FieldValue)]] -> [(Text, J.Value)] -> API.QueryResponse
 mkQueryResponse rows aggregates = API.QueryResponse (Just $ mkFieldsMap <$> rows) (Just $ mkFieldsMap aggregates)
 
 mkFieldsMap :: [(Text, v)] -> HashMap API.FieldName v

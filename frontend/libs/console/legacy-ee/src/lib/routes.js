@@ -12,7 +12,10 @@ import {
   isMetadataStatusPage,
   prefetchSurveysData,
   prefetchOnboardingData,
+  prefetchEELicenseInfo,
   PageNotFound,
+  dataHeaders,
+  loadAdminSecretState,
 } from '@hasura/console-legacy-ce';
 import {
   dataRouterUtils,
@@ -44,8 +47,15 @@ import {
   isMonitoringTabSupportedEnvironment,
   AllowListDetail,
   PrometheusSettings,
+  QueryResponseCaching,
   OpenTelemetryFeature,
+  MultipleAdminSecretsPage,
+  MultipleJWTSecretsPage,
+  SingleSignOnPage,
+  SchemaRegistryContainer,
+  SchemaDetailsView,
 } from '@hasura/console-legacy-ce';
+
 import AccessDeniedComponent from './components/AccessDenied/AccessDenied';
 import { restrictedPathsMetadata } from './utils/redirectUtils';
 import generatedCallbackConnector from './components/OAuthCallback/OAuthCallback';
@@ -56,6 +66,7 @@ import { decodeToken, checkAccess } from './utils/computeAccess';
 import preLoginHook from './utils/preLoginHook';
 import metricsRouter from './components/Services/Metrics/MetricsRouter';
 import { notifyRouteChangeToAppcues } from './utils/appCues';
+import extendedGlobals from './Globals';
 
 const routes = store => {
   // load hasuractl migration status
@@ -251,6 +262,11 @@ const routes = store => {
       prefetchSurveysData();
       prefetchOnboardingData();
     }
+
+    if (globals.consoleType === 'pro-lite') {
+      prefetchEELicenseInfo(dataHeaders(store.getState));
+    }
+
     const onEnterHooks = [validateAccessToRoute];
     const { shouldLoadOpts, shouldLoadServer } = shouldLoadAsyncGlobals(store);
     if (shouldLoadOpts || shouldLoadServer) {
@@ -274,6 +290,18 @@ const routes = store => {
     // when console type is pro-lite only admin secret login is allowed, making this check unnecessary
     // ie. admin privileges are already checked in the login process
     if (globals.consoleType === 'pro-lite') return; // show security tab
+
+    // when consoleType === pro and if admin secret is provided, show security tab
+    if (
+      globals.consoleType === 'pro' &&
+      (extendedGlobals.adminSecret ||
+        loadAdminSecretState() ||
+        globals.adminSecret) &&
+      (extendedGlobals.adminSecret ||
+        loadAdminSecretState() ||
+        globals.adminSecret) !== ''
+    )
+      return;
 
     // cloud cli doesn't have any privileges when `hasura console` command is executed, it will only have previleges when `hasura pro console` is executed.
     // this will make sure that security tab is visible even when the users are running `hasura console` command with valid admin secret
@@ -357,6 +385,8 @@ const routes = store => {
         >
           <Route path="settings" component={metadataContainer(connect)}>
             <IndexRedirect to="metadata-actions" />
+            <Route path="schema-registry" component={SchemaRegistryContainer} />
+            <Route path="schema-registry/:id" component={SchemaDetailsView} />
             <Route
               path="metadata-actions"
               component={metadataOptionsContainer(connect)}
@@ -370,6 +400,19 @@ const routes = store => {
             <Route path="inherited-roles" component={InheritedRolesContainer} />
             <Route path="insecure-domain" component={InsecureDomains} />
             <Route path="prometheus-settings" component={PrometheusSettings} />
+            <Route
+              path="query-response-caching"
+              component={QueryResponseCaching}
+            />
+            <Route
+              path="multiple-admin-secrets"
+              component={MultipleAdminSecretsPage}
+            />
+            <Route
+              path="multiple-jwt-secrets"
+              component={MultipleJWTSecretsPage}
+            />
+            <Route path="single-sign-on" component={SingleSignOnPage} />
             <Route path="opentelemetry" component={OpenTelemetryFeature} />
             <Route path="feature-flags" component={FeatureFlags} />
           </Route>

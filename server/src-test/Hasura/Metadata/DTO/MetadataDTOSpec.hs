@@ -25,8 +25,8 @@ import Hasura.RQL.Types.ApiLimit (emptyApiLimit)
 import Hasura.RQL.Types.Common (emptyMetricsConfig)
 import Hasura.RQL.Types.CustomTypes (emptyCustomTypes)
 import Hasura.RQL.Types.Metadata (Metadata, MetadataDefaults, metadataToDTO, overrideMetadataDefaults)
-import Hasura.RQL.Types.Network (emptyNetwork)
 import Hasura.RQL.Types.OpenTelemetry (emptyOpenTelemetryConfig)
+import Network.Types.Extended (emptyNetwork)
 import Test.Hspec
 import Test.Hspec.Expectations.Json (shouldBeJson)
 
@@ -117,7 +117,7 @@ emptyMetadataV3 =
       metaV3InheritedRoles = mempty,
       metaV3GraphqlSchemaIntrospection = mempty,
       metaV3Network = emptyNetwork,
-      metaV3BackendConfigs = Nothing,
+      metaV3BackendConfigs = mempty,
       metaV3OpenTelemetryConfig = emptyOpenTelemetryConfig
     }
 

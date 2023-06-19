@@ -38,14 +38,14 @@ corsMiddleware getPolicy app req sendResp = do
 
     respondPreFlight :: B.ByteString -> CorsPolicy -> Response
     respondPreFlight origin policy =
-      setHeaders (mkPreFlightHeaders requestedHeaders) $
-        injectCorsHeaders origin policy emptyResponse
+      setHeaders (mkPreFlightHeaders requestedHeaders)
+        $ injectCorsHeaders origin policy emptyResponse
 
     emptyResponse = responseLBS HTTP.status204 [] ""
     requestedHeaders =
-      fromMaybe "" $
-        getRequestHeader "Access-Control-Request-Headers" $
-          requestHeaders req
+      fromMaybe ""
+        $ getRequestHeader "Access-Control-Request-Headers"
+        $ requestHeaders req
 
     injectCorsHeaders :: B.ByteString -> CorsPolicy -> Response -> Response
     injectCorsHeaders origin policy = setHeaders (mkCorsHeaders origin policy)
@@ -62,8 +62,14 @@ corsMiddleware getPolicy app req sendResp = do
         ("Access-Control-Allow-Credentials", "true"),
         ( "Access-Control-Allow-Methods",
           B.intercalate "," $ TE.encodeUtf8 <$> cpMethods policy
+        ),
+        -- console requires this header to access the cache headers as HGE and console
+        -- are hosted on different domains in production
+        ( "Access-Control-Expose-Headers",
+          B.intercalate "," $ TE.encodeUtf8 <$> cacheExposedHeaders
         )
       ]
 
+    cacheExposedHeaders = ["X-Hasura-Query-Cache-Key", "X-Hasura-Query-Family-Cache-Key", "Warning"]
     setHeaders hdrs = mapResponseHeaders (\h -> mkRespHdrs hdrs ++ h)
     mkRespHdrs = map (\(k, v) -> (CI.mk k, v))

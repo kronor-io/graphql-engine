@@ -6,6 +6,7 @@ import { FormData } from '../Data/hooks/useInsertRow';
 import Skeleton from 'react-loading-skeleton';
 import { convertTableValue } from './InsertRowForm.utils';
 import { ListAllTableColumn } from '../Data/hooks/useListAllTableColumns';
+import { SupportedDrivers } from '../hasura-metadata-types';
 
 export type InsertRowFormProps = {
   columns: (ListAllTableColumn & {
@@ -16,6 +17,7 @@ export type InsertRowFormProps = {
   isInserting: boolean;
   isLoading: boolean;
   onInsertRow: (formData: FormData) => void;
+  driver: SupportedDrivers;
 };
 
 export const InsertRowForm: React.VFC<InsertRowFormProps> = ({
@@ -23,6 +25,7 @@ export const InsertRowForm: React.VFC<InsertRowFormProps> = ({
   isInserting = false,
   isLoading = false,
   onInsertRow,
+  driver,
 }) => {
   const [values, setValues] = useState<InsertRowArgs['rowValues'][]>([]);
 
@@ -133,11 +136,12 @@ export const InsertRowForm: React.VFC<InsertRowFormProps> = ({
             onChange={onChange}
             placeholder={column.placeholder}
             isDisabled={!column.insertable}
-            // disable if the column has no default value
+            // TODO-NEXT: disable if the column has no default value
             isDefaultDisabled={false}
             isNullDisabled={!column.nullable}
             resetToken={resetToken}
             dataType={column.dataType}
+            driver={driver}
           />
         ))}
       </div>

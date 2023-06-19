@@ -11,13 +11,12 @@ import Data.List.NonEmpty qualified as NE
 import Harness.Backend.Postgres qualified as Postgres
 import Harness.GraphqlEngine qualified as GraphqlEngine
 import Harness.Quoter.Yaml
+import Harness.Schema (Table (..), table)
+import Harness.Schema qualified as Schema
 import Harness.Test.Fixture qualified as Fixture
-import Harness.Test.Schema (Table (..), table)
-import Harness.Test.Schema qualified as Schema
 import Harness.Test.SetupAction (SetupAction (..), permitTeardownFail)
 import Harness.TestEnvironment (GlobalTestEnvironment, TestEnvironment)
 import Harness.Webhook qualified as Webhook
-import Harness.Yaml (fromObject)
 import Hasura.Prelude
 import Test.Hspec (SpecWith, describe, it, shouldBe)
 
@@ -76,15 +75,15 @@ authorsTable tableName =
 --------------------------------------------------------------------------------
 -- Tests
 
-tests :: Fixture.Options -> SpecWith (TestEnvironment, (GraphqlEngine.Server, Webhook.EventsQueue))
-tests _opts = do
+tests :: SpecWith (TestEnvironment, (GraphqlEngine.Server, Webhook.EventsQueue))
+tests = do
   scheduledEventsWithInvalidEnvVar
 
 scheduledEventsWithInvalidEnvVar :: SpecWith (TestEnvironment, (GraphqlEngine.Server, Webhook.EventsQueue))
 scheduledEventsWithInvalidEnvVar =
   describe "creating a scheduled event with invalid env var should add a failed invocation log" do
-    it "check the invocation log requests added for failed request corresponding to invalid header" $
-      \(testEnvironment, (_, _)) -> do
+    it "check the invocation log requests added for failed request corresponding to invalid header"
+      $ \(testEnvironment, (_, _)) -> do
         -- get all the scheduled event invocations
         let getScheduledEventInvocationsQuery =
               [yaml|
@@ -114,8 +113,8 @@ scheduledEventsWithInvalidEnvVar =
 postgresSetup :: TestEnvironment -> GraphqlEngine.Server -> IO ()
 postgresSetup testEnvironment webhookServer = do
   let webhookServerEchoEndpoint = GraphqlEngine.serverUrl webhookServer ++ "/echo"
-  GraphqlEngine.postMetadata_ testEnvironment $
-    [interpolateYaml|
+  GraphqlEngine.postMetadata_ testEnvironment
+    $ [interpolateYaml|
       type: create_scheduled_event
       args:
         webhook: #{webhookServerEchoEndpoint}
@@ -129,3 +128,7 @@ postgresSetup testEnvironment webhookServer = do
           num_retries: 1
           retry_interval_seconds: 5
     |]
+
+fromObject :: Value -> Object
+fromObject (Object x) = x
+fromObject v = error $ "fromObject: Expected object, received" <> show v

@@ -16,10 +16,10 @@ import Harness.Permissions (Permission (SelectPermission), SelectPermissionDetai
 import Harness.Permissions qualified as Permission
 import Harness.Quoter.Graphql (graphql)
 import Harness.Quoter.Yaml (interpolateYaml, yaml)
+import Harness.Schema (SchemaName (..), Table (..), table)
+import Harness.Schema qualified as Schema
 import Harness.Test.BackendType qualified as BackendType
 import Harness.Test.Fixture qualified as Fixture
-import Harness.Test.Schema (SchemaName (..), Table (..), table)
-import Harness.Test.Schema qualified as Schema
 import Harness.TestEnvironment (GlobalTestEnvironment, TestEnvironment (..), getBackendTypeConfig)
 import Harness.Yaml (shouldReturnYaml)
 import Hasura.Prelude
@@ -45,8 +45,8 @@ spec =
                   <> bigquerySetupFunctions testEnv
                   <> setupMetadata testEnv,
               Fixture.customOptions =
-                Just $
-                  Fixture.defaultOptions
+                Just
+                  $ Fixture.defaultOptions
                     { Fixture.stringifyNumbers = True
                     }
             }
@@ -114,8 +114,8 @@ postgresSetupFunctions testEnv =
       articleTableSQL = unSchemaName schemaName <> ".article"
    in [ Fixture.SetupAction
           { Fixture.setupAction =
-              Postgres.run_ testEnv $
-                [i|
+              Postgres.run_ testEnv
+                $ [i|
                   CREATE FUNCTION #{ fetch_articles schemaName }(author_row author, search TEXT)
                   RETURNS SETOF article AS $$
                     SELECT *
@@ -130,8 +130,8 @@ postgresSetupFunctions testEnv =
           },
         Fixture.SetupAction
           { Fixture.setupAction =
-              Postgres.run_ testEnv $
-                [i|
+              Postgres.run_ testEnv
+                $ [i|
                   CREATE FUNCTION #{ fetch_articles_no_user_args schemaName }(author_row author)
                   RETURNS SETOF article AS $$
                     SELECT *
@@ -149,8 +149,8 @@ bigquerySetupFunctions testEnv =
       articleTableSQL = unSchemaName schemaName <> ".article"
    in [ Fixture.SetupAction
           { Fixture.setupAction =
-              BigQuery.run_ $
-                [i|
+              BigQuery.run_
+                $ [i|
                   CREATE TABLE FUNCTION
                   #{ fetch_articles schemaName }(a_id INT64, search STRING)
                   AS
@@ -163,8 +163,8 @@ bigquerySetupFunctions testEnv =
           },
         Fixture.SetupAction
           { Fixture.setupAction =
-              BigQuery.run_ $
-                [i|
+              BigQuery.run_
+                $ [i|
                   CREATE TABLE FUNCTION
                   #{ fetch_articles_no_user_args schemaName }(a_id INT64)
                   AS
@@ -270,13 +270,13 @@ setupMetadata testEnvironment =
 
 -- * Tests
 
-tests :: Fixture.Options -> SpecWith TestEnvironment
-tests opts = do
+tests :: SpecWith TestEnvironment
+tests = do
   it "Query with computed fields" $ \testEnv -> do
     let schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postGraphql
           testEnv
           [graphql|
@@ -311,7 +311,7 @@ tests opts = do
     let schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postGraphqlWithHeaders
           testEnv
           [("X-Hasura-Role", "user_1")]
@@ -347,7 +347,7 @@ tests opts = do
     let schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postGraphqlWithHeaders
           testEnv
           [("X-Hasura-Role", "user_2")]
@@ -378,7 +378,7 @@ tests opts = do
     let schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postGraphqlWithHeaders
           testEnv
           [("X-Hasura-Role", "user_2")]
@@ -410,7 +410,7 @@ tests opts = do
     let schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postGraphql
           testEnv
           [graphql|
@@ -440,7 +440,7 @@ tests opts = do
     let schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postGraphql
           testEnv
           [graphql|

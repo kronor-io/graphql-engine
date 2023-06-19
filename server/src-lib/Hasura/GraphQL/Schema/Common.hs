@@ -23,6 +23,8 @@ module Hasura.GraphQL.Schema.Common
     ConnectionSelectExp,
     AnnotatedActionField,
     AnnotatedActionFields,
+    AnnotatedNestedObjectSelect,
+    AnnotatedNestedArraySelect,
     EdgeFields,
     Scenario (..),
     SelectArgs,
@@ -33,6 +35,8 @@ module Hasura.GraphQL.Schema.Common
     getTableRoles,
     getLogicalModelRoles,
     askTableInfo,
+    askLogicalModelInfo,
+    askNativeQueryInfo,
     comparisonAggOperators,
     mapField,
     mkDescriptionWith,
@@ -41,7 +45,8 @@ module Hasura.GraphQL.Schema.Common
     parsedSelectionsToFields,
     partialSQLExpToUnpreparedValue,
     requiredFieldParser,
-    takeValidLogicalModels,
+    takeValidNativeQueries,
+    takeValidStoredProcedures,
     takeValidFunctions,
     takeValidTables,
     textToName,
@@ -56,8 +61,8 @@ where
 
 import Data.Either (isRight)
 import Data.Has
-import Data.HashMap.Strict qualified as Map
-import Data.HashMap.Strict.InsOrd qualified as OMap
+import Data.HashMap.Strict qualified as HashMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.List (uncons)
 import Data.Text qualified as T
 import Data.Text.Casing (GQLNameIdentifier)
@@ -65,27 +70,31 @@ import Data.Text.Casing qualified as C
 import Data.Text.Extended
 import Hasura.Backends.Postgres.SQL.Types qualified as Postgres
 import Hasura.Base.Error
+import Hasura.Function.Cache
 import Hasura.GraphQL.Namespace (NamespacedField)
 import Hasura.GraphQL.Parser.Internal.TypeChecking qualified as P
 import Hasura.GraphQL.Schema.Node
-import Hasura.GraphQL.Schema.Options (SchemaOptions)
-import Hasura.GraphQL.Schema.Options qualified as Options
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Typename
-import Hasura.LogicalModel.Cache (LogicalModelCache, _lmiPermissions)
+import Hasura.LogicalModel.Cache (LogicalModelInfo (_lmiPermissions))
+import Hasura.LogicalModel.Types (LogicalModelName)
+import Hasura.NativeQuery.Cache (NativeQueryCache, NativeQueryInfo)
+import Hasura.NativeQuery.Types (NativeQueryName)
 import Hasura.Prelude
 import Hasura.RQL.IR qualified as IR
 import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.Common
-import Hasura.RQL.Types.Function
 import Hasura.RQL.Types.Relationships.Remote
+import Hasura.RQL.Types.Roles (RoleName, adminRoleName)
+import Hasura.RQL.Types.Schema.Options (SchemaOptions)
+import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
 import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
 import Hasura.RemoteSchema.SchemaCache.Types
 import Hasura.SQL.AnyBackend qualified as AB
-import Hasura.Session (RoleName, adminRoleName)
+import Hasura.StoredProcedure.Cache (StoredProcedureCache)
 import Language.GraphQL.Draft.Syntax qualified as G
 
 -------------------------------------------------------------------------------
@@ -129,7 +138,7 @@ type MonadBuildSchemaBase m n =
 newtype RemoteRelationshipParserBuilder
   = RemoteRelationshipParserBuilder
       ( forall lhsJoinField r n m.
-        MonadBuildSchemaBase m n =>
+        (MonadBuildSchemaBase m n) =>
         RemoteFieldInfo lhsJoinField ->
         SchemaT r m (Maybe [P.FieldParser n (IR.RemoteRelationshipField IR.UnpreparedValue)])
       )
@@ -147,7 +156,7 @@ ignoreRemoteRelationship = RemoteRelationshipParserBuilder $ const $ pure Nothin
 newtype NodeInterfaceParserBuilder = NodeInterfaceParserBuilder
   { runNodeBuilder ::
       ( forall m n.
-        MonadBuildSchemaBase m n =>
+        (MonadBuildSchemaBase m n) =>
         SchemaContext ->
         SchemaOptions ->
         m (P.Parser 'P.Output n NodeMap)
@@ -310,6 +319,10 @@ type AnnotatedActionFields = IR.ActionFieldsG (IR.RemoteRelationshipField IR.Unp
 
 type AnnotatedActionField = IR.ActionFieldG (IR.RemoteRelationshipField IR.UnpreparedValue)
 
+type AnnotatedNestedObjectSelect b = IR.AnnNestedObjectSelectG b (IR.RemoteRelationshipField IR.UnpreparedValue) (IR.UnpreparedValue b)
+
+type AnnotatedNestedArraySelect b = IR.AnnNestedArraySelectG b (IR.RemoteRelationshipField IR.UnpreparedValue) (IR.UnpreparedValue b)
+
 -------------------------------------------------------------------------------
 
 data RemoteSchemaParser n = RemoteSchemaParser
@@ -321,12 +334,12 @@ data RemoteSchemaParser n = RemoteSchemaParser
 getTableRoles :: BackendSourceInfo -> [RoleName]
 getTableRoles bsi = AB.dispatchAnyBackend @Backend bsi go
   where
-    go si = Map.keys . _tiRolePermInfoMap =<< Map.elems (_siTables si)
+    go si = HashMap.keys . _tiRolePermInfoMap =<< HashMap.elems (_siTables si)
 
 getLogicalModelRoles :: BackendSourceInfo -> [RoleName]
 getLogicalModelRoles bsi = AB.dispatchAnyBackend @Backend bsi go
   where
-    go si = Map.keys . _lmiPermissions =<< Map.elems (_siLogicalModels si)
+    go si = HashMap.keys . _lmiPermissions =<< HashMap.elems (_siLogicalModels si)
 
 -- | Looks up table information for the given table name. This function
 -- should never fail, since the schema cache construction process is
@@ -339,23 +352,52 @@ askTableInfo ::
   m (TableInfo b)
 askTableInfo tableName = do
   SourceInfo {..} <- asks getter
-  Map.lookup tableName _siTables
+  HashMap.lookup tableName _siTables
     `onNothing` throw500 ("askTableInfo: no info for table " <> dquote tableName <> " in source " <> dquote _siName)
+
+-- | Looks up logical model information for the given logical model name. This function
+-- should never fail, since the schema cache construction process is
+-- supposed to ensure all dependencies are resolved.
+-- TODO: deduplicate this with `CacheRM`.
+askLogicalModelInfo ::
+  forall b r m.
+  (MonadError QErr m, MonadReader r m, Has (SourceInfo b) r) =>
+  LogicalModelName ->
+  m (LogicalModelInfo b)
+askLogicalModelInfo logicalModelName = do
+  SourceInfo {..} <- asks getter
+  HashMap.lookup logicalModelName _siLogicalModels
+    `onNothing` throw500 ("askLogicalModelInfo: no info for logical model " <> dquote logicalModelName <> " in source " <> dquote _siName)
+
+-- | Looks up native query information for the given native query name. This function
+-- should never fail, since the schema cache construction process is
+-- supposed to ensure all dependencies are resolved.
+-- TODO: deduplicate this with `CacheRM`.
+askNativeQueryInfo ::
+  forall b r m.
+  (MonadError QErr m, MonadReader r m, Has (SourceInfo b) r) =>
+  NativeQueryName ->
+  m (NativeQueryInfo b)
+askNativeQueryInfo nativeQueryName = do
+  SourceInfo {..} <- asks getter
+  HashMap.lookup nativeQueryName _siNativeQueries
+    `onNothing` throw500 ("askNativeQueryInfo: no info for native query " <> dquote nativeQueryName <> " in source " <> dquote _siName)
 
 -- | Whether the request is sent with `x-hasura-use-backend-only-permissions` set to `true`.
 data Scenario = Backend | Frontend deriving (Enum, Show, Eq)
 
-textToName :: MonadError QErr m => Text -> m G.Name
+textToName :: (MonadError QErr m) => Text -> m G.Name
 textToName textName =
   G.mkName textName
     `onNothing` throw400
       ValidationFailed
       ( "cannot include "
-          <> textName <<> " in the GraphQL schema because "
+          <> textName
+          <<> " in the GraphQL schema because "
           <> " it is not a valid GraphQL identifier"
       )
 
-textToGQLIdentifier :: MonadError QErr m => Text -> m GQLNameIdentifier
+textToGQLIdentifier :: (MonadError QErr m) => Text -> m GQLNameIdentifier
 textToGQLIdentifier textName = do
   let gqlIdents = do
         (pref, suffs) <- uncons (C.fromSnake textName)
@@ -366,7 +408,8 @@ textToGQLIdentifier textName = do
     `onNothing` throw400
       ValidationFailed
       ( "cannot include "
-          <> textName <<> " in the GraphQL schema because "
+          <> textName
+          <<> " in the GraphQL schema because "
           <> " it is not a valid GraphQL identifier"
       )
 
@@ -376,7 +419,7 @@ partialSQLExpToUnpreparedValue PSESession = IR.UVSession
 partialSQLExpToUnpreparedValue (PSESQLExp sqlExp) = IR.UVLiteral sqlExp
 
 mapField ::
-  Functor m =>
+  (Functor m) =>
   P.InputFieldsParser m (Maybe a) ->
   (a -> b) ->
   P.InputFieldsParser m (Maybe b)
@@ -385,10 +428,10 @@ mapField fp f = fmap (fmap f) fp
 parsedSelectionsToFields ::
   -- | how to handle @__typename@ fields
   (Text -> a) ->
-  OMap.InsOrdHashMap G.Name (P.ParsedSelection a) ->
+  InsOrdHashMap.InsOrdHashMap G.Name (P.ParsedSelection a) ->
   Fields a
 parsedSelectionsToFields mkTypenameFromText =
-  OMap.toList
+  InsOrdHashMap.toList
     >>> map (FieldName . G.unName *** P.handleTypename (mkTypenameFromText . G.unName))
 
 numericAggOperators :: [C.GQLNameIdentifier]
@@ -421,8 +464,8 @@ mkDescriptionWith descM defaultTxt = G.Description $ case descM of
 --      Karthikeyan: Yes, this is correct. We allowed this pre PDV but somehow
 --        got removed in PDV. OTOH, I’m not sure how prevalent this feature
 --        actually is
-takeValidTables :: forall b. Backend b => TableCache b -> TableCache b
-takeValidTables = Map.filterWithKey graphQLTableFilter
+takeValidTables :: forall b. (Backend b) => TableCache b -> TableCache b
+takeValidTables = HashMap.filterWithKey graphQLTableFilter
   where
     graphQLTableFilter tableName tableInfo =
       -- either the table name should be GraphQL compliant
@@ -432,13 +475,17 @@ takeValidTables = Map.filterWithKey graphQLTableFilter
 
 -- TODO and what about graphql-compliant function names here too?
 takeValidFunctions :: forall b. FunctionCache b -> FunctionCache b
-takeValidFunctions = Map.filter functionFilter
+takeValidFunctions = HashMap.filter functionFilter
   where
     functionFilter = not . isSystemDefined . _fiSystemDefined
 
--- | Currently we do no validation on logical models in schema. Should we?
-takeValidLogicalModels :: forall b. LogicalModelCache b -> LogicalModelCache b
-takeValidLogicalModels = id
+-- | @TODO: Currently we do no validation on native queries in schema. Should we?
+takeValidNativeQueries :: forall b. NativeQueryCache b -> NativeQueryCache b
+takeValidNativeQueries = id
+
+-- | @TODO: Currently we do no validation on stored procedures in schema. Should we?
+takeValidStoredProcedures :: forall b. StoredProcedureCache b -> StoredProcedureCache b
+takeValidStoredProcedures = id
 
 -- root field builder helpers
 
@@ -465,12 +512,12 @@ mkEnumTypeName enumTableName enumTableCustomName = do
 
 addEnumSuffix :: ResolvedSourceCustomization -> GQLNameIdentifier -> Maybe G.Name -> G.Name
 addEnumSuffix customization enumTableGQLName enumTableCustomName =
-  runMkTypename (_rscTypeNames customization) $
-    applyTypeNameCaseIdentifier (_rscNamingConvention customization) $
-      mkEnumTableTypeName enumTableGQLName enumTableCustomName
+  runMkTypename (_rscTypeNames customization)
+    $ applyTypeNameCaseIdentifier (_rscNamingConvention customization)
+    $ mkEnumTableTypeName enumTableGQLName enumTableCustomName
 
 -- TODO: figure out what the purpose of this method is.
-peelWithOrigin :: P.MonadParse m => P.Parser 'P.Both m a -> P.Parser 'P.Both m (IR.ValueWithOrigin a)
+peelWithOrigin :: (P.MonadParse m) => P.Parser 'P.Both m a -> P.Parser 'P.Both m (IR.ValueWithOrigin a)
 peelWithOrigin parser =
   parser
     { P.pParser = \case
@@ -484,12 +531,12 @@ peelWithOrigin parser =
 getIntrospectionResult :: Options.RemoteSchemaPermissions -> RoleName -> RemoteSchemaCtxG remoteFieldInfo -> Maybe IntrospectionResult
 getIntrospectionResult remoteSchemaPermsCtx role remoteSchemaContext =
   if
-      | -- admin doesn't have a custom annotated introspection, defaulting to the original one
-        role == adminRoleName ->
-          pure $ _rscIntroOriginal remoteSchemaContext
-      | -- if permissions are disabled, the role map will be empty, defaulting to the original one
-        remoteSchemaPermsCtx == Options.DisableRemoteSchemaPermissions ->
-          pure $ _rscIntroOriginal remoteSchemaContext
-      | -- otherwise, look the role up in the map; if we find nothing, then the role doesn't have access
-        otherwise ->
-          Map.lookup role (_rscPermissions remoteSchemaContext)
+    | -- admin doesn't have a custom annotated introspection, defaulting to the original one
+      role == adminRoleName ->
+        pure $ _rscIntroOriginal remoteSchemaContext
+    | -- if permissions are disabled, the role map will be empty, defaulting to the original one
+      remoteSchemaPermsCtx == Options.DisableRemoteSchemaPermissions ->
+        pure $ _rscIntroOriginal remoteSchemaContext
+    | -- otherwise, look the role up in the map; if we find nothing, then the role doesn't have access
+      otherwise ->
+        HashMap.lookup role (_rscPermissions remoteSchemaContext)

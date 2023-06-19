@@ -4,9 +4,9 @@ module Main (main) where
 
 import Constants qualified
 import Control.Concurrent.MVar
-import Control.Monad.Trans.Managed (ManagedT (..))
+import Control.Monad.Trans.Managed (lowerManagedT)
 import Control.Natural ((:~>) (..))
-import Data.Aeson qualified as A
+import Data.Aeson qualified as J
 import Data.ByteString.Lazy.Char8 qualified as BL
 import Data.ByteString.Lazy.UTF8 qualified as LBS
 import Data.Environment qualified as Env
@@ -15,27 +15,29 @@ import Data.Time.Clock (getCurrentTime)
 import Data.URL.Template
 import Database.PG.Query qualified as PG
 import Hasura.App
-  ( PGMetadataStorageAppT,
-    initGlobalCtx,
-    initialiseContext,
+  ( AppM,
+    BasicConnectionInfo (..),
+    initMetadataConnectionInfo,
+    initialiseAppEnv,
     mkMSSQLSourceResolver,
     mkPgSourceResolver,
-    runPGMetadataStorageAppT,
+    runAppM,
   )
 import Hasura.Backends.Postgres.Connection.Settings
 import Hasura.Backends.Postgres.Execute.Types
 import Hasura.Base.Error
-import Hasura.GraphQL.Schema.Options qualified as Options
 import Hasura.Logging
 import Hasura.Prelude
 import Hasura.RQL.DDL.Schema.Cache
 import Hasura.RQL.DDL.Schema.Cache.Common
+import Hasura.RQL.DDL.Schema.Cache.Config
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Metadata (emptyMetadataDefaults)
 import Hasura.RQL.Types.ResizePool
+import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.Server.Init
-import Hasura.Server.Init.FeatureFlag as FF
 import Hasura.Server.Metrics (ServerMetricsSpec, createServerMetrics)
 import Hasura.Server.Migrate
 import Hasura.Server.Prometheus (makeDummyPrometheusMetrics)
@@ -51,19 +53,21 @@ import Test.Hasura.Server.MigrateSuite qualified as MigrateSuite
 import Test.Hasura.StreamingSubscriptionSuite qualified as StreamingSubscriptionSuite
 import Test.Hspec
 
-{-# ANN main ("HLINT: ignore Use env_from_function_argument" :: String) #-}
+{-# ANN main ("HLINT: ignore avoid getEnvironment" :: String) #-}
 main :: IO ()
 main = do
   env <- getEnvironment
   let envMap = Env.mkEnvironment env
 
-  pgUrlText <- flip onLeft printErrExit $
-    runWithEnv env $ do
+  pgUrlText <- flip onLeft printErrExit
+    $ runWithEnv env
+    $ do
       let envVar = _envVar databaseUrlOption
       maybeV <- considerEnv envVar
-      onNothing maybeV $
-        throwError $
-          "Expected: " <> envVar
+      onNothing maybeV
+        $ throwError
+        $ "Expected: "
+        <> envVar
 
   let pgConnInfo = PG.ConnInfo 1 $ PG.CDDatabaseURI $ txtToBs pgUrlText
       urlConf = UrlValue $ InputWebhook $ mkPlainURLTemplate pgUrlText
@@ -84,11 +88,12 @@ main = do
       logger :: Logger Hasura = Logger $ \l -> do
         let (logLevel, logType :: EngineLogType Hasura, logDetail) = toEngineLog l
         t <- liftIO $ getFormattedTime Nothing
-        liftIO $ putStrLn $ LBS.toString $ A.encode $ EngineLog t logLevel logType logDetail
+        liftIO $ putStrLn $ LBS.toString $ J.encode $ EngineLog t logLevel logType logDetail
 
       setupCacheRef = do
         httpManager <- HTTP.newManager HTTP.tlsManagerSettings
-        globalCtx <- initGlobalCtx envMap metadataDbUrl rci
+        metadataConnectionInfo <- initMetadataConnectionInfo envMap metadataDbUrl rci
+        let globalCtx = BasicConnectionInfo metadataConnectionInfo Nothing
         (_, serverMetrics) <-
           liftIO $ do
             store <- EKG.newStore @TestMetricsSpec
@@ -104,23 +109,29 @@ main = do
                 Options.EnableBigQueryStringNumericInput
             maintenanceMode = MaintenanceModeDisabled
             readOnlyMode = ReadOnlyModeDisabled
-            serverConfigCtx =
-              ServerConfigCtx
+            staticConfig =
+              CacheStaticConfig
+                maintenanceMode
+                EventingEnabled
+                readOnlyMode
+                logger
+                (const False)
+                False
+            dynamicConfig =
+              CacheDynamicConfig
                 Options.InferFunctionPermissions
                 Options.DisableRemoteSchemaPermissions
                 sqlGenCtx
-                maintenanceMode
                 mempty
-                EventingEnabled
-                readOnlyMode
                 (_default defaultNamingConventionOption)
                 emptyMetadataDefaults
-                (CheckFeatureFlag $ FF.checkFeatureFlag mempty)
                 ApolloFederationDisabled
-            cacheBuildParams = CacheBuildParams httpManager (mkPgSourceResolver print) mkMSSQLSourceResolver serverConfigCtx
+                (_default closeWebsocketsOnMetadataChangeOption)
+            cacheBuildParams = CacheBuildParams httpManager (mkPgSourceResolver print) mkMSSQLSourceResolver staticConfig
 
-        (_appStateRef, appEnv) <- runManagedT
-          ( initialiseContext
+        (_appInit, appEnv) <-
+          lowerManagedT
+            $ initialiseAppEnv
               envMap
               globalCtx
               serveOptions
@@ -128,42 +139,41 @@ main = do
               serverMetrics
               prometheusMetrics
               sampleAlways
-          )
-          $ \(appStateRef, appEnv) -> return (appStateRef, appEnv)
 
-        let run :: ExceptT QErr (PGMetadataStorageAppT IO) a -> IO a
+        let run :: ExceptT QErr AppM a -> IO a
             run =
               runExceptT
-                >>> runPGMetadataStorageAppT appEnv
+                >>> runAppM appEnv
                 >>> flip onLeftM printErrJExit
 
+        -- why are we building the schema cache here? it's already built in initialiseContext
         (metadata, schemaCache) <- run do
-          metadata <-
+          metadataWithVersion <-
             snd
               <$> (liftEitherM . runExceptT . _pecRunTx pgContext (PGExecCtxInfo (Tx PG.ReadWrite Nothing) InternalRawQuery))
                 (migrateCatalog (Just sourceConfig) defaultPostgresExtensionsSchema maintenanceMode =<< liftIO getCurrentTime)
-          schemaCache <- runCacheBuild cacheBuildParams $ buildRebuildableSchemaCache logger envMap metadata
-          pure (metadata, schemaCache)
+          schemaCache <- runCacheBuild cacheBuildParams $ buildRebuildableSchemaCache logger envMap metadataWithVersion dynamicConfig Nothing
+          pure (_mwrvMetadata metadataWithVersion, schemaCache)
 
         cacheRef <- newMVar schemaCache
-        pure $ NT (run . flip MigrateSuite.runCacheRefT (serverConfigCtx, cacheRef) . fmap fst . runMetadataT metadata emptyMetadataDefaults)
+        pure $ NT (run . flip MigrateSuite.runCacheRefT (dynamicConfig, cacheRef) . fmap fst . runMetadataT metadata emptyMetadataDefaults)
 
   streamingSubscriptionSuite <- StreamingSubscriptionSuite.buildStreamingSubscriptionSuite
   eventTriggerLogCleanupSuite <- EventTriggerCleanupSuite.buildEventTriggerCleanupSuite
 
   hspec do
-    describe "Migrate suite" $
-      beforeAll setupCacheRef $
-        describe "Hasura.Server.Migrate" $
-          MigrateSuite.suite sourceConfig pgContext pgConnInfo
+    describe "Migrate suite"
+      $ beforeAll setupCacheRef
+      $ describe "Hasura.Server.Migrate"
+      $ MigrateSuite.suite sourceConfig pgContext pgConnInfo
     describe "Streaming subscription suite" $ streamingSubscriptionSuite
     describe "Event trigger log cleanup suite" $ eventTriggerLogCleanupSuite
 
 printErrExit :: String -> IO a
 printErrExit = (*> exitFailure) . putStrLn
 
-printErrJExit :: (A.ToJSON a) => a -> IO b
-printErrJExit = (*> exitFailure) . BL.putStrLn . A.encode
+printErrJExit :: (J.ToJSON a) => a -> IO b
+printErrJExit = (*> exitFailure) . BL.putStrLn . J.encode
 
 -- | Used only for 'runApp' above.
 data TestMetricsSpec name metricType tags

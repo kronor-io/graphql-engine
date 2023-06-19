@@ -25,8 +25,8 @@ where
 import Control.Lens
 import Control.Monad.Writer
 import Data.ByteString qualified as B
-import Data.HashMap.Strict qualified as Map
-import Data.HashMap.Strict.InsOrd qualified as OMap
+import Data.HashMap.Strict qualified as HashMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.HashSet qualified as Set
 import Data.Semigroup.Generic
 import Data.Text.Extended
@@ -47,10 +47,10 @@ import Hasura.GraphQL.Parser.Names
 import Hasura.Prelude
 import Hasura.RQL.IR
 import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Subscription
-import Hasura.SQL.Backend
 import Hasura.SQL.Types
 import Hasura.Session
 import Language.GraphQL.Draft.Syntax qualified as G
@@ -139,7 +139,7 @@ mkMultiplexedQuery ::
   ( Backend ('Postgres pgKind),
     DS.PostgresAnnotatedFieldJSON pgKind
   ) =>
-  OMap.InsOrdHashMap G.Name (QueryDB ('Postgres pgKind) Void S.SQLExp) ->
+  InsOrdHashMap.InsOrdHashMap G.Name (QueryDB ('Postgres pgKind) Void S.SQLExp) ->
   MultiplexedQuery
 mkMultiplexedQuery rootFields =
   MultiplexedQuery . toQuery $ selectWith
@@ -152,10 +152,10 @@ mkMultiplexedQuery rootFields =
               S.Extractor (mkQualifiedIdentifier fldRespIdentifier (Identifier "root")) (Just $ S.toColumnAlias $ Identifier "result")
             ],
           S.selFrom =
-            Just $
-              S.FromExp
-                [ S.FIJoin $
-                    S.JoinExpr subsInputFromItem S.LeftOuter responseLateralFromItem (S.JoinOn $ S.BELit True)
+            Just
+              $ S.FromExp
+                [ S.FIJoin
+                    $ S.JoinExpr subsInputFromItem S.LeftOuter responseLateralFromItem (S.JoinOn $ S.BELit True)
                 ]
         }
 
@@ -170,12 +170,12 @@ mkMultiplexedQuery rootFields =
         [S.toColumnAlias $ Identifier "result_id", S.toColumnAlias $ Identifier "result_vars"]
 
     (sqlFrom, customSQLCTEs) =
-      runWriter $
-        traverse
+      runWriter
+        $ traverse
           ( \(fieldAlias, resolvedAST) ->
               toSQLFromItem (S.mkTableAlias $ G.unName fieldAlias) resolvedAST
           )
-          (OMap.toList rootFields)
+          (InsOrdHashMap.toList rootFields)
 
     -- LEFT OUTER JOIN LATERAL ( ... ) _fld_resp
     responseLateralFromItem = S.mkLateralFromItem selectRootFields fldRespAlias
@@ -189,7 +189,7 @@ mkMultiplexedQuery rootFields =
 
     -- json_build_object('field1', field1.root, 'field2', field2.root, ...)
     rootFieldsJsonAggregate = S.SEFnApp "json_build_object" rootFieldsJsonPairs Nothing
-    rootFieldsJsonPairs = flip concatMap (OMap.keys rootFields) $ \fieldAlias ->
+    rootFieldsJsonPairs = flip concatMap (InsOrdHashMap.keys rootFields) $ \fieldAlias ->
       [ S.SELit (G.unName fieldAlias),
         mkQualifiedIdentifier (aliasToIdentifier fieldAlias) (Identifier "root")
       ]
@@ -217,10 +217,10 @@ mkStreamingMultiplexedQuery (fieldAlias, resolvedAST) =
               S.Extractor (mkQualifiedIdentifier fldRespIdentifier (Identifier "cursor")) (Just $ S.toColumnAlias $ Identifier "cursor")
             ],
           S.selFrom =
-            Just $
-              S.FromExp
-                [ S.FIJoin $
-                    S.JoinExpr subsInputFromItem S.LeftOuter responseLateralFromItem (S.JoinOn $ S.BELit True)
+            Just
+              $ S.FromExp
+                [ S.FIJoin
+                    $ S.JoinExpr subsInputFromItem S.LeftOuter responseLateralFromItem (S.JoinOn $ S.BELit True)
                 ]
         }
 
@@ -268,12 +268,13 @@ resolveMultiplexedValue ::
   UnpreparedValue ('Postgres pgKind) ->
   m S.SQLExp
 resolveMultiplexedValue allSessionVars = \case
-  UVParameter varM colVal -> do
-    varJsonPath <- case fmap getName varM of
-      Just varName -> do
-        modifying qpiReusableVariableValues $ Map.insert varName colVal
+  UVParameter provenance colVal -> do
+    varJsonPath <- case provenance of
+      FromGraphQL varInfo -> do
+        let varName = getName varInfo
+        modifying qpiReusableVariableValues $ HashMap.insert varName colVal
         pure ["query", G.unName varName]
-      Nothing -> do
+      _ -> do
         syntheticVarIndex <- use (qpiSyntheticVariableValues . to length)
         modifying qpiSyntheticVariableValues (|> colVal)
         pure ["synthetic", tshow syntheticVarIndex]
@@ -293,8 +294,8 @@ resolveMultiplexedValue allSessionVars = \case
     pure $ fromResVars (CollectableTypeScalar PGJSON) ["session"]
   where
     fromResVars pgType jPath =
-      addTypeAnnotation pgType $
-        S.SEOpApp
+      addTypeAnnotation pgType
+        $ S.SEOpApp
           (S.SQLOp "#>>")
           [ S.SEQIdentifier $ S.QIdentifier (S.QualifiedIdentifier subsIdentifier Nothing) (Identifier "result_vars"),
             S.SEArray $ map S.SELit jPath

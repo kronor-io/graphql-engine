@@ -6,7 +6,7 @@ module Test.DataConnector.MockAgent.RemoteRelationshipsSpec (spec) where
 --------------------------------------------------------------------------------
 
 import Control.Lens ((.~), (?~), _Just)
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NonEmpty
@@ -16,10 +16,10 @@ import Harness.Backend.Postgres qualified as Postgres
 import Harness.GraphqlEngine qualified as GraphqlEngine
 import Harness.Quoter.Graphql (graphql)
 import Harness.Quoter.Yaml (interpolateYaml, yaml)
+import Harness.Schema (Table (..))
+import Harness.Schema qualified as Schema
 import Harness.Test.BackendType qualified as BackendType
 import Harness.Test.Fixture qualified as Fixture
-import Harness.Test.Schema (Table (..))
-import Harness.Test.Schema qualified as Schema
 import Harness.TestEnvironment (GlobalTestEnvironment, TestEnvironment)
 import Harness.Yaml (shouldBeYaml, shouldReturnYaml)
 import Hasura.Backends.DataConnector.API qualified as API
@@ -68,7 +68,7 @@ spec = describe "Remote Relationships Tests" $ do
 
 --------------------------------------------------------------------------------
 
-sourceMetadata :: Aeson.Value
+sourceMetadata :: J.Value
 sourceMetadata =
   let source = BackendType.backendSourceName Mock.backendTypeMetadata
       backendType = BackendType.backendTypeString Mock.backendTypeMetadata
@@ -111,7 +111,7 @@ postgresTables =
 pgSourceName :: String
 pgSourceName = "pg_source"
 
-setupPostgres :: HasCallStack => TestEnvironment -> IO ()
+setupPostgres :: (HasCallStack) => TestEnvironment -> IO ()
 setupPostgres testEnv = do
   let sourceConfig = Postgres.defaultSourceConfiguration testEnv
       schemaName = Schema.getSchemaName testEnv
@@ -142,7 +142,7 @@ setupPostgres testEnv = do
             name: #{tableName table}
       |]
 
-registerRemoteRelationships :: HasCallStack => TestEnvironment -> IO ()
+registerRemoteRelationships :: (HasCallStack) => TestEnvironment -> IO ()
 registerRemoteRelationships testEnv = do
   let mockAgentSourceName = BackendType.backendSourceName Mock.backendTypeMetadata
       schemaName = Schema.getSchemaName testEnv
@@ -193,8 +193,8 @@ teardownPostgres testEnv = do
 
 --------------------------------------------------------------------------------
 
-tests :: Fixture.Options -> SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
-tests _opts = do
+tests :: SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
+tests = do
   mockAgentGraphqlTest "can act as the target of a remote array relationship" $ \testEnv performGraphqlRequest -> do
     let pgSchemaName = Schema.getSchemaName testEnv
     let headers = []
@@ -214,31 +214,31 @@ tests _opts = do
     let queryResponse =
           mkRowsQueryResponse
             [ [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkRowsQueryResponse
-                      [ [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 1),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "For Those About To Rock We Salute You")
+                  API.mkRelationshipFieldValue
+                    $ mkRowsQueryResponse
+                      [ [ ("AlbumId", API.mkColumnFieldValue $ J.Number 1),
+                          ("Title", API.mkColumnFieldValue $ J.String "For Those About To Rock We Salute You")
                         ],
-                        [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 4),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "Let There Be Rock")
+                        [ ("AlbumId", API.mkColumnFieldValue $ J.Number 4),
+                          ("Title", API.mkColumnFieldValue $ J.String "Let There Be Rock")
                         ]
                       ]
                 )
               ],
               [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkRowsQueryResponse
-                      [ [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 2),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "Balls to the Wall")
+                  API.mkRelationshipFieldValue
+                    $ mkRowsQueryResponse
+                      [ [ ("AlbumId", API.mkColumnFieldValue $ J.Number 2),
+                          ("Title", API.mkColumnFieldValue $ J.String "Balls to the Wall")
                         ],
-                        [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 3),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "Restless and Wild")
+                        [ ("AlbumId", API.mkColumnFieldValue $ J.Number 3),
+                          ("Title", API.mkColumnFieldValue $ J.String "Restless and Wild")
                         ]
                       ]
                 )
               ]
             ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse queryResponse
+    let mockConfig = mockQueryResponse queryResponse
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -264,21 +264,22 @@ tests _opts = do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Album")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
-                        ("Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
-                      ]
+                  ?~ mkFieldsMap
+                    [ ("AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
+                      ("Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
+                    ]
               )
-              & API.qrForeach
-                ?~ NonEmpty.fromList
-                  [ HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (Aeson.Number 1) (API.ScalarType "number"))],
-                    HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (Aeson.Number 2) (API.ScalarType "number"))]
-                  ]
+            & API._QRTable
+            . API.trForeach
+            ?~ NonEmpty.fromList
+              [ HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (J.Number 1) (API.ScalarType "number"))],
+                HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (J.Number 2) (API.ScalarType "number"))]
+              ]
         )
 
   mockAgentGraphqlTest "can act as the target of a remote object relationship" $ \testEnv performGraphqlRequest -> do
@@ -300,34 +301,34 @@ tests _opts = do
     let queryResponse =
           mkRowsQueryResponse
             [ [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkRowsQueryResponse
-                      [ [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 3),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "Restless and Wild")
+                  API.mkRelationshipFieldValue
+                    $ mkRowsQueryResponse
+                      [ [ ("AlbumId", API.mkColumnFieldValue $ J.Number 3),
+                          ("Title", API.mkColumnFieldValue $ J.String "Restless and Wild")
                         ]
                       ]
                 )
               ],
               [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkRowsQueryResponse
-                      [ [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 1),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "For Those About To Rock We Salute You")
+                  API.mkRelationshipFieldValue
+                    $ mkRowsQueryResponse
+                      [ [ ("AlbumId", API.mkColumnFieldValue $ J.Number 1),
+                          ("Title", API.mkColumnFieldValue $ J.String "For Those About To Rock We Salute You")
                         ]
                       ]
                 )
               ],
               [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkRowsQueryResponse
-                      [ [ ("AlbumId", API.mkColumnFieldValue $ Aeson.Number 4),
-                          ("Title", API.mkColumnFieldValue $ Aeson.String "Let There Be Rock")
+                  API.mkRelationshipFieldValue
+                    $ mkRowsQueryResponse
+                      [ [ ("AlbumId", API.mkColumnFieldValue $ J.Number 4),
+                          ("Title", API.mkColumnFieldValue $ J.String "Let There Be Rock")
                         ]
                       ]
                 )
               ]
             ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse queryResponse
+    let mockConfig = mockQueryResponse queryResponse
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -354,22 +355,23 @@ tests _opts = do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Album")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
-                        ("Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
-                      ]
+                  ?~ mkFieldsMap
+                    [ ("AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
+                      ("Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
+                    ]
               )
-              & API.qrForeach
-                ?~ NonEmpty.fromList
-                  [ HashMap.fromList [(API.ColumnName "AlbumId", API.ScalarValue (Aeson.Number 3) (API.ScalarType "number"))],
-                    HashMap.fromList [(API.ColumnName "AlbumId", API.ScalarValue (Aeson.Number 1) (API.ScalarType "number"))],
-                    HashMap.fromList [(API.ColumnName "AlbumId", API.ScalarValue (Aeson.Number 4) (API.ScalarType "number"))]
-                  ]
+            & API._QRTable
+            . API.trForeach
+            ?~ NonEmpty.fromList
+              [ HashMap.fromList [(API.ColumnName "AlbumId", API.ScalarValue (J.Number 3) (API.ScalarType "number"))],
+                HashMap.fromList [(API.ColumnName "AlbumId", API.ScalarValue (J.Number 1) (API.ScalarType "number"))],
+                HashMap.fromList [(API.ColumnName "AlbumId", API.ScalarValue (J.Number 4) (API.ScalarType "number"))]
+              ]
         )
 
   mockAgentGraphqlTest "can act as the target of an aggregation over a remote array relationship" $ \testEnv performGraphqlRequest -> do
@@ -396,35 +398,35 @@ tests _opts = do
     let queryResponse =
           mkRowsQueryResponse
             [ [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkQueryResponse
-                      [ [ ("nodes_AlbumId", API.mkColumnFieldValue $ Aeson.Number 1),
-                          ("nodes_Title", API.mkColumnFieldValue $ Aeson.String "For Those About To Rock We Salute You")
+                  API.mkRelationshipFieldValue
+                    $ mkQueryResponse
+                      [ [ ("nodes_AlbumId", API.mkColumnFieldValue $ J.Number 1),
+                          ("nodes_Title", API.mkColumnFieldValue $ J.String "For Those About To Rock We Salute You")
                         ],
-                        [ ("nodes_AlbumId", API.mkColumnFieldValue $ Aeson.Number 4),
-                          ("nodes_Title", API.mkColumnFieldValue $ Aeson.String "Let There Be Rock")
+                        [ ("nodes_AlbumId", API.mkColumnFieldValue $ J.Number 4),
+                          ("nodes_Title", API.mkColumnFieldValue $ J.String "Let There Be Rock")
                         ]
                       ]
-                      [ ("aggregate_count", Aeson.Number 2)
+                      [ ("aggregate_count", J.Number 2)
                       ]
                 )
               ],
               [ ( "query",
-                  API.mkRelationshipFieldValue $
-                    mkQueryResponse
-                      [ [ ("nodes_AlbumId", API.mkColumnFieldValue $ Aeson.Number 2),
-                          ("nodes_Title", API.mkColumnFieldValue $ Aeson.String "Balls to the Wall")
+                  API.mkRelationshipFieldValue
+                    $ mkQueryResponse
+                      [ [ ("nodes_AlbumId", API.mkColumnFieldValue $ J.Number 2),
+                          ("nodes_Title", API.mkColumnFieldValue $ J.String "Balls to the Wall")
                         ],
-                        [ ("nodes_AlbumId", API.mkColumnFieldValue $ Aeson.Number 3),
-                          ("nodes_Title", API.mkColumnFieldValue $ Aeson.String "Restless and Wild")
+                        [ ("nodes_AlbumId", API.mkColumnFieldValue $ J.Number 3),
+                          ("nodes_Title", API.mkColumnFieldValue $ J.String "Restless and Wild")
                         ]
                       ]
-                      [ ("aggregate_count", Aeson.Number 2)
+                      [ ("aggregate_count", J.Number 2)
                       ]
                 )
               ]
             ]
-    let mockConfig = Mock.chinookMock & mockQueryResponse queryResponse
+    let mockConfig = mockQueryResponse queryResponse
 
     MockRequestResults {..} <- performGraphqlRequest mockConfig headers graphqlRequest
 
@@ -456,32 +458,34 @@ tests _opts = do
 
     _mrrRecordedRequest
       `shouldBe` Just
-        ( Query $
-            mkQueryRequest
+        ( Query
+            $ mkTableRequest
               (mkTableName "Album")
               ( emptyQuery
                   & API.qFields
-                    ?~ mkFieldsMap
-                      [ ("nodes_AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
-                        ("nodes_Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
-                      ]
-                  & API.qAggregates ?~ mkFieldsMap [("aggregate_count", API.StarCount)]
+                  ?~ mkFieldsMap
+                    [ ("nodes_AlbumId", API.ColumnField (API.ColumnName "AlbumId") $ API.ScalarType "number"),
+                      ("nodes_Title", API.ColumnField (API.ColumnName "Title") $ API.ScalarType "string")
+                    ]
+                    & API.qAggregates
+                  ?~ mkFieldsMap [("aggregate_count", API.StarCount)]
               )
-              & API.qrForeach
-                ?~ NonEmpty.fromList
-                  [ HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (Aeson.Number 1) (API.ScalarType "number"))],
-                    HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (Aeson.Number 2) (API.ScalarType "number"))]
-                  ]
+            & API._QRTable
+            . API.trForeach
+            ?~ NonEmpty.fromList
+              [ HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (J.Number 1) (API.ScalarType "number"))],
+                HashMap.fromList [(API.ColumnName "ArtistId", API.ScalarValue (J.Number 2) (API.ScalarType "number"))]
+              ]
         )
 
-errorTests :: Fixture.Options -> SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
-errorTests opts = do
+errorTests :: SpecWith (TestEnvironment, Mock.MockAgentEnvironment)
+errorTests = do
   it "creating a remote relationship returns an error when it is unsupported by the target" $ \(testEnv, _) -> do
     let mockAgentSourceName = BackendType.backendSourceName Mock.backendTypeMetadata
         schemaName = Schema.getSchemaName testEnv
 
     shouldReturnYaml
-      opts
+      testEnv
       ( GraphqlEngine.postMetadataWithStatus
           400
           testEnv
