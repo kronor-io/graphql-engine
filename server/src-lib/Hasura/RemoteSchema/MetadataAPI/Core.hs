@@ -1,5 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
-
 module Hasura.RemoteSchema.MetadataAPI.Core
   ( AddRemoteSchemaQuery (..),
     RemoteSchemaNameQuery (..),
@@ -14,7 +12,7 @@ module Hasura.RemoteSchema.MetadataAPI.Core
   )
 where
 
-import Data.Aeson.TH qualified as J
+import Data.Aeson qualified as J
 import Data.Environment qualified as Env
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
@@ -23,6 +21,7 @@ import Data.Text.Extended
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.GraphQL.RemoteServer
+import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags)
 import Hasura.Prelude
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Metadata
@@ -50,14 +49,24 @@ data AddRemoteSchemaQuery = AddRemoteSchemaQuery
 
 instance NFData AddRemoteSchemaQuery
 
-$(J.deriveJSON hasuraJSON ''AddRemoteSchemaQuery)
+instance J.FromJSON AddRemoteSchemaQuery where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON AddRemoteSchemaQuery where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 newtype RemoteSchemaNameQuery = RemoteSchemaNameQuery
   { _rsnqName :: RemoteSchemaName
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''RemoteSchemaNameQuery)
+instance J.FromJSON RemoteSchemaNameQuery where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON RemoteSchemaNameQuery where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 runAddRemoteSchema ::
   ( QErrM m,
@@ -68,11 +77,12 @@ runAddRemoteSchema ::
     Tracing.MonadTrace m
   ) =>
   Env.Environment ->
+  SchemaSampledFeatureFlags ->
   AddRemoteSchemaQuery ->
   m EncJSON
-runAddRemoteSchema env (AddRemoteSchemaQuery name defn comment) = do
+runAddRemoteSchema env schemaSampledFeatureFlags (AddRemoteSchemaQuery name defn comment) = do
   addRemoteSchemaP1 name
-  void $ addRemoteSchemaP2Setup env defn
+  void $ addRemoteSchemaP2Setup env schemaSampledFeatureFlags defn
   buildSchemaCacheFor (MORemoteSchema name)
     $ MetadataModifier
     $ metaRemoteSchemas
@@ -153,7 +163,7 @@ runReloadRemoteSchema (RemoteSchemaNameQuery name) = do
   let invalidations = mempty {ciRemoteSchemas = S.singleton name}
   metadata <- getMetadata
   withNewInconsistentObjsCheck
-    $ buildSchemaCacheWithOptions (CatalogUpdate Nothing) invalidations metadata
+    $ buildSchemaCacheWithOptions (CatalogUpdate Nothing) invalidations metadata Nothing
   pure successMsg
 
 runIntrospectRemoteSchema ::
@@ -173,9 +183,10 @@ runUpdateRemoteSchema ::
     Tracing.MonadTrace m
   ) =>
   Env.Environment ->
+  SchemaSampledFeatureFlags ->
   AddRemoteSchemaQuery ->
   m EncJSON
-runUpdateRemoteSchema env (AddRemoteSchemaQuery name defn comment) = do
+runUpdateRemoteSchema env schemaSampledFeatureFlags (AddRemoteSchemaQuery name defn comment) = do
   remoteSchemaNames <- getAllRemoteSchemas <$> askSchemaCache
   remoteSchemaMap <- _metaRemoteSchemas <$> getMetadata
 
@@ -204,7 +215,7 @@ runUpdateRemoteSchema env (AddRemoteSchemaQuery name defn comment) = do
         || (isJust metadataRMSchemaURLFromEnv && isJust currentRMSchemaURLFromEnv && metadataRMSchemaURLFromEnv == currentRMSchemaURLFromEnv)
     )
     $ void
-    $ fetchRemoteSchema env rsi
+    $ fetchRemoteSchema env schemaSampledFeatureFlags rsi
 
   -- This will throw an error if the new schema fetched in incompatible
   -- with the existing permissions and relations

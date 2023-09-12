@@ -50,6 +50,7 @@ import System.Metrics.Gauge qualified as EKG.Gauge
 
 createWSServerApp ::
   ( MonadIO m,
+    MonadFail m, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
     MC.MonadBaseControl IO m,
     LA.Forall (LA.Pure m),
     UserAuthentication m,
@@ -159,9 +160,9 @@ mkWSActions logger subProtocol =
       case subProtocol of
         Apollo ->
           case mErrMsg of
-            WS.ConnInitFailed -> sendCloseWithMsg logger wsConn (WS.mkWSServerErrorCode mErrMsg err) (Just $ SMConnErr err) Nothing
+            WS.ConnInitFailed -> sendCloseWithMsg logger wsConn (WS.mkWSServerErrorCode subProtocol mErrMsg err) (Just $ SMConnErr err) Nothing
             WS.ClientMessageParseFailed -> sendMsg wsConn $ SMConnErr err
-        GraphQLWS -> sendCloseWithMsg logger wsConn (WS.mkWSServerErrorCode mErrMsg err) (Just $ SMConnErr err) Nothing
+        GraphQLWS -> sendCloseWithMsg logger wsConn (WS.mkWSServerErrorCode subProtocol mErrMsg err) Nothing Nothing
 
     mkConnectionCloseAction wsConn opId errMsg =
       when (subProtocol == GraphQLWS)

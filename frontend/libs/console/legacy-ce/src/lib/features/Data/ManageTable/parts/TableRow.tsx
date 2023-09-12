@@ -9,6 +9,9 @@ import { MetadataTable } from '../../../hasura-metadata-types';
 import { useTrackTables } from '../../hooks/useTrackTables';
 import { TableDisplayName } from '../components/TableDisplayName';
 import { TrackableTable } from '../types';
+import { MongoTrackCollectionModalWrapper } from '../../MongoTrackCollection/MongoTrackCollectionModalWrapper';
+import { useDriverCapabilities } from '../../hooks/useDriverCapabilities';
+import { supportsSchemaLessTables } from '../../LogicalModels/LogicalModelWidget/utils';
 
 interface TableRowProps {
   dataSourceName: string;
@@ -17,6 +20,8 @@ interface TableRowProps {
   reset: () => void;
   onChange: () => void;
   onTableNameClick?: () => void;
+  onTableTrack?: (table: TrackableTable) => void;
+  isRowSelectionEnabled: boolean;
 }
 
 export const TableRow = React.memo(
@@ -27,11 +32,21 @@ export const TableRow = React.memo(
     reset,
     onChange,
     onTableNameClick,
+    onTableTrack,
+    isRowSelectionEnabled,
   }: TableRowProps) => {
     const [showCustomModal, setShowCustomModal] = React.useState(false);
+    const [isMongoTrackingModalVisible, setShowMongoTrackingModalVisible] =
+      React.useState(false);
     const { trackTables, untrackTables, isLoading } = useTrackTables({
       dataSourceName,
     });
+
+    const { data: capabilities } = useDriverCapabilities({
+      dataSourceName: dataSourceName,
+    });
+
+    const areSchemaLessTablesSupported = supportsSchemaLessTables(capabilities);
 
     const track = (customConfiguration?: MetadataTable['configuration']) => {
       const t = { ...table };
@@ -40,7 +55,7 @@ export const TableRow = React.memo(
       }
 
       trackTables({
-        tablesToBeTracked: [t],
+        tables: [t],
         onSuccess: () => {
           hasuraToast({
             type: 'success',
@@ -49,9 +64,9 @@ export const TableRow = React.memo(
           });
           reset();
           setShowCustomModal(false);
+          onTableTrack?.(table);
         },
         onError: err => {
-          console.log('!!!', err);
           hasuraToast({
             type: 'error',
             title: 'Unable to perform operation',
@@ -63,7 +78,7 @@ export const TableRow = React.memo(
 
     const untrack = () => {
       untrackTables({
-        tablesToBeUntracked: [table],
+        tables: [table],
         onSuccess: () => {
           hasuraToast({
             type: 'success',
@@ -71,9 +86,9 @@ export const TableRow = React.memo(
             message: 'Object untracked successfully.',
           });
           reset();
+          onTableTrack?.(table);
         },
         onError: err => {
-          console.log('log!!');
           hasuraToast({
             type: 'error',
             title: 'Unable to perform operation',
@@ -87,15 +102,17 @@ export const TableRow = React.memo(
       <CardedTable.TableBodyRow
         className={checked ? 'bg-blue-50' : 'bg-transparent'}
       >
-        <td className="w-0 px-sm text-sm font-semibold text-muted uppercase tracking-wider">
-          <input
-            type="checkbox"
-            className="cursor-pointer rounded border shadow-sm border-gray-400 hover:border-gray-500 focus:ring-yellow-400"
-            value={table.id}
-            checked={checked}
-            onChange={onChange}
-          />
-        </td>
+        {isRowSelectionEnabled && (
+          <td className="w-0 px-sm text-sm font-semibold text-muted uppercase tracking-wider">
+            <input
+              type="checkbox"
+              className="cursor-pointer rounded border shadow-sm border-gray-400 hover:border-gray-500 focus:ring-yellow-400"
+              value={table.id}
+              checked={checked}
+              onChange={onChange}
+            />
+          </td>
+        )}
         <CardedTable.TableBodyCell>
           <TableDisplayName onClick={onTableNameClick} table={table.table} />
         </CardedTable.TableBodyCell>
@@ -105,7 +122,7 @@ export const TableRow = React.memo(
             <Button
               data-testid={`untrack-${table.name}`}
               size="sm"
-              onClick={untrack}
+              onClick={() => untrack()}
               isLoading={isLoading}
               loadingText="Please wait"
             >
@@ -116,7 +133,13 @@ export const TableRow = React.memo(
               <Button
                 data-testid={`track-${table.name}`}
                 size="sm"
-                onClick={() => track()}
+                onClick={() => {
+                  if (areSchemaLessTablesSupported) {
+                    setShowMongoTrackingModalVisible(true);
+                    return;
+                  }
+                  track();
+                }}
                 isLoading={isLoading}
                 loadingText="Please wait"
               >
@@ -124,11 +147,17 @@ export const TableRow = React.memo(
               </Button>
 
               {/* Hiding this customize button while loading as it looks odd to have two buttons in "loading mode" */}
-              {!isLoading && (
+              {!areSchemaLessTablesSupported && !isLoading && (
                 <Button
                   size="sm"
                   className="ml-2"
-                  onClick={() => setShowCustomModal(true)}
+                  onClick={() => {
+                    if (areSchemaLessTablesSupported) {
+                      setShowMongoTrackingModalVisible(true);
+                      return;
+                    }
+                    setShowCustomModal(true);
+                  }}
                   icon={<FiSettings />}
                 >
                   Customize &amp; Track
@@ -148,7 +177,17 @@ export const TableRow = React.memo(
                 callToActionLoadingText="Saving..."
                 isLoading={isLoading}
                 show={showCustomModal}
+                source={dataSourceName}
               />
+
+              {isMongoTrackingModalVisible && (
+                <MongoTrackCollectionModalWrapper
+                  dataSourceName={dataSourceName}
+                  collectionName={table.name}
+                  isVisible={isMongoTrackingModalVisible}
+                  onClose={() => setShowMongoTrackingModalVisible(false)}
+                />
+              )}
             </div>
           )}
         </CardedTable.TableBodyCell>

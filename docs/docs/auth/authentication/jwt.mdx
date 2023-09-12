@@ -542,6 +542,7 @@ The following are the possible values:
 
 - `{"type": "Authorization"}`
 - `{"type": "Cookie", "name": "cookie_name" }`
+- `{"type": "CustomHeader", "name": "header_name" }`
 
 Default is `{"type": "Authorization"}`.
 
@@ -549,6 +550,8 @@ In the default mode, Hasura expects an `Authorization` header with a `Bearer` to
 
 In the cookie mode, Hasura will try to parse the cookie header with the given cookie name. The value of the cookie
 should be the exact JWT.
+
+In the custom header mode, Hasura expects a `header_name` header with the exact JWT token value.
 
 Example:
 
@@ -562,6 +565,12 @@ If `header` is `{"type": "Cookie", "name": "cookie_name" }` then JWT header shou
 
 ```none
 Cookie: cookie_name=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWI...
+```
+
+If `header` is `{"type": "CustomHeader", "name": "header_name" }` then JWT header should look like:
+
+```none
+header_name: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWI...
 ```
 
 ## Run Hasura GraphQL Engine in JWT mode {#running-with-jwt}
@@ -708,7 +717,7 @@ needs to have the public key.
 
 By providing a set of JWT secrets to GraphQL Engine on Cloud or Enterprise versions, you can set it up to authenticate
 using various JWT issuers. This configuration option allows for greater flexibility in authentication. Read more here:
-[Multiple JWT Secrets](/security/multiple-jwt-secrets.mdx).
+[Multiple JWT Secrets](/auth/authentication/multiple-jwt-secrets.mdx).
 
 ## Security considerations
 
@@ -827,7 +836,7 @@ to get started.
 
 - [Custom JWT server with Hasura Actions](/actions/codegen/python-flask.mdx): A simple Python / Flask API that
   implements `Signup` and `Login` methods as Actions returning JWTs
-- [Auth0 JWT example](https://github.com/hasura/graphql-engine/tree/master/community/sample-apps/todo-auth0-jwt): A todo
+- [Auth0 JWT example](https://github.com/hasura/sample-apps/tree/main/todo-auth0-jwt): A todo
   app that uses Hasura GraphQL Engine and Auth0 JWT
-- [Firebase JWT example](https://github.com/hasura/graphql-engine/tree/master/community/sample-apps/firebase-jwt):
+- [Firebase JWT example](https://github.com/hasura/sample-apps/tree/main/firebase-jwt):
   Barebones example to show how to have Firebase Auth integrated with Hasura JWT mode

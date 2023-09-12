@@ -59,7 +59,7 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
 
 <p>Hasura Enterprise Edition capabilities include all the features of the Hasura Open Source Community Edition plus:</p>
 <div className="overview-gallery">
-  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Databases</h2>
+  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }} id="databases">Databases</h2>
   <VersionedLink to="/databases/snowflake/index/">
     <div className="card">
       <h3>Snowflake</h3>
@@ -96,8 +96,8 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
       <p>Learn how to connect Hasura to MongoDB using Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>
-  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Performance</h2>
-  <VersionedLink to="/enterprise/caching/">
+  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }} id="performance">Performance</h2>
+  <VersionedLink to="/caching/enterprise-caching/">
     <div className="card">
       <h3>Caching</h3>
       <p>Learn how to configure caching in Hasura Enterprise Edition to improve the performance of your GraphQL API.</p>
@@ -117,7 +117,7 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
       <p>Authentication webhook session variables can be cached to improve the performance of a request with Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>
-  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Security</h2>
+  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }} id="security">Security</h2>
   <VersionedLink to="/security/api-limits/">
     <div className="card">
       <h3>API Limiting</h3>
@@ -137,26 +137,26 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
       <p>Prevent unauthorized access to your GraphQL API by disabling GraphQL introspection in Hasura Enterprise.</p>
     </div>
   </VersionedLink>
-  <VersionedLink to="/security/multiple-admin-secrets/">
+  <VersionedLink to="/auth/authentication/multiple-admin-secrets/">
     <div className="card">
       <h3>Multiple Admin Secrets</h3>
       <p>Configure multiple admin secrets in Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>
-  <VersionedLink to="/security/multiple-jwt-secrets/">
+  <VersionedLink to="/auth/authentication/multiple-jwt-secrets/">
     <div className="card">
       <h3>Multiple JWT Secrets</h3>
       <p>Configure multiple JWT secrets in Hasura Enterprise Edition to support multiple authentication providers.</p>
     </div>
   </VersionedLink>
-  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Event Triggers</h2>
+  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }} id="event-triggers">Event Triggers</h2>
   <VersionedLink to="/event-triggers/clean-up/auto-cleanup/">
     <div className="card">
       <h3>Auto Cleanup of Event Triggers</h3>
       <p>Learn how to configure auto cleanup of Event Triggers in Hasura Enterprise Edition to keep your logs clean.</p>
     </div>
   </VersionedLink>
-  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }}>Observability</h2>
+  <h2 style={{ gridColumn: `1 / -1`, marginTop: `1.2rem`, marginBottom: `.3rem`, justifySelf: `start`, fontSize: `1.8rem` }} id="observability">Observability</h2>
   <VersionedLink to="/deployment/logging/">
     <div className="card">
       <h3>Logs</h3>
@@ -165,15 +165,15 @@ import Enterprise from '@site/static/icons/features/enterprise.svg';
       </p>
     </div>
   </VersionedLink>
-  <VersionedLink to="/enterprise/metrics/">
+  <VersionedLink to="/observability/enterprise-edition/prometheus/index/">
     <div className="card">
       <h3>Metrics via Prometheus</h3>
       <p>Learn how to configure Prometheus in Hasura Enterprise Edition to monitor your GraphQL API.</p>
     </div>
   </VersionedLink>
-  <VersionedLink to="/enterprise/opentelemetry/">
+  <VersionedLink to="/observability/opentelemetry/">
     <div className="card">
-      <h3>Traces via OpenTelemetry</h3>
+      <h3>Traces and Metrics via OpenTelemetry</h3>
       <p>Learn how to configure OpenTelemetry in Hasura Enterprise Edition.</p>
     </div>
   </VersionedLink>

@@ -5,7 +5,12 @@ module Harness.Schema.Table
   ( Table (..),
     table,
     Reference (..),
+    RelationshipType (..),
+    NativeQueryRelationship (..),
     reference,
+    nativeQueryArrayRelationship,
+    nativeQueryObjectRelationship,
+    InsertOrder (..),
     Column (..),
     ScalarType (..),
     defaultSerialType,
@@ -18,7 +23,6 @@ module Harness.Schema.Table
     BackendScalarType (..),
     BackendScalarValue (..),
     BackendScalarValueType (..),
-    ManualRelationship (..),
     quotedValue,
     unquotedValue,
     backendScalarValue,
@@ -53,6 +57,7 @@ data Table = Table
     tablePrimaryKey :: [Text],
     tableReferences :: [Reference],
     tableManualRelationships :: [Reference],
+    tableNativeQueryRelationships :: [NativeQueryRelationship],
     tableData :: [[ScalarValue]],
     tableConstraints :: [Constraint],
     tableUniqueIndexes :: [UniqueIndex],
@@ -84,18 +89,24 @@ table tableName =
       tablePrimaryKey = [],
       tableReferences = [],
       tableManualRelationships = [],
+      tableNativeQueryRelationships = [],
       tableData = [],
       tableConstraints = [],
       tableUniqueIndexes = [],
       tableQualifiers = []
     }
 
+data InsertOrder = BeforeParent | AfterParent
+  deriving (Show, Eq)
+
 -- | Foreign keys for backends that support it.
 data Reference = Reference
   { referenceLocalColumn :: Text,
     referenceTargetTable :: Text,
     referenceTargetColumn :: Text,
-    referenceTargetQualifiers :: [Text]
+    referenceTargetQualifiers :: [Text],
+    referenceInsertionOrder :: InsertOrder,
+    referenceCascade :: Bool
   }
   deriving (Show, Eq)
 
@@ -105,19 +116,40 @@ reference localColumn targetTable targetColumn =
     { referenceLocalColumn = localColumn,
       referenceTargetTable = targetTable,
       referenceTargetColumn = targetColumn,
-      referenceTargetQualifiers = mempty
+      referenceTargetQualifiers = mempty,
+      referenceInsertionOrder = BeforeParent,
+      referenceCascade = True
     }
 
--- | Type representing manual relationship between tables. This is
--- only used for BigQuery backend currently where additional
--- relationships has to be manually specified.
-data ManualRelationship = ManualRelationship
-  { relSourceTable :: Text,
-    relTargetTable :: Text,
-    relSourceColumn :: Text,
-    relTargetColumn :: Text
+data RelationshipType = ArrayRelationship | ObjectRelationship
+  deriving (Eq, Show)
+
+-- | Relationship to a Native Query
+data NativeQueryRelationship = NativeQueryRelationship
+  { nqRelationshipLocalColumn :: Text,
+    nqRelationshipTarget :: Text,
+    nqRelationshipTargetColumn :: Text,
+    nqRelationshipType :: RelationshipType
   }
   deriving (Show, Eq)
+
+nativeQueryObjectRelationship :: Text -> Text -> Text -> NativeQueryRelationship
+nativeQueryObjectRelationship localColumn targetNativeQuery targetColumn =
+  NativeQueryRelationship
+    { nqRelationshipLocalColumn = localColumn,
+      nqRelationshipTarget = targetNativeQuery,
+      nqRelationshipTargetColumn = targetColumn,
+      nqRelationshipType = ObjectRelationship
+    }
+
+nativeQueryArrayRelationship :: Text -> Text -> Text -> NativeQueryRelationship
+nativeQueryArrayRelationship localColumn targetNativeQuery targetColumn =
+  NativeQueryRelationship
+    { nqRelationshipLocalColumn = localColumn,
+      nqRelationshipTarget = targetNativeQuery,
+      nqRelationshipTargetColumn = targetColumn,
+      nqRelationshipType = ArrayRelationship
+    }
 
 -- | Generic type to construct columns for all backends
 data Column = Column

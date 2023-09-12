@@ -55,7 +55,6 @@ import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column hiding (EnumValueInfo)
 import Hasura.RQL.Types.Column qualified as Column
-import Hasura.RQL.Types.Common (RelName)
 import Hasura.RQL.Types.ComputedField
 import Hasura.RQL.Types.NamingCase
 import Hasura.RQL.Types.Relationships.Local
@@ -216,6 +215,8 @@ class
   relayExtension :: Maybe (XRelay b)
   nodesAggExtension :: Maybe (XNodesAgg b)
   streamSubscriptionExtension :: Maybe (XStreamingSubscription b)
+  groupByExtension :: Maybe (XGroupBy b)
+  groupByExtension = Nothing
 
   -- individual components
   columnParser ::
@@ -257,8 +258,8 @@ class
   -- which generates @'CountType b' from optional "distinct" field value
   countTypeInput ::
     (MonadParse n) =>
-    Maybe (Parser 'Both n (Column b)) ->
-    InputFieldsParser n (CountDistinct -> CountType b)
+    Maybe (Parser 'Both n (Column b, AnnRedactionExpUnpreparedValue b)) ->
+    InputFieldsParser n (CountDistinct -> CountType b (UnpreparedValue b))
 
   aggregateOrderByCountType :: ScalarType b
 
@@ -322,7 +323,6 @@ class (Backend b) => BackendLogicalModelSelectSchema (b :: BackendType) where
 
   logicalModelSelectionSet ::
     (MonadBuildSourceSchema b r m n) =>
-    InsOrdHashMap RelName (RelInfo b) ->
     LogicalModelInfo b ->
     SchemaT r m (Maybe (Parser 'Output n (AnnotatedFields b)))
 

@@ -22,7 +22,7 @@ import Hasura.GraphQL.Parser.Internal.Parser (FieldParser (..))
 import Hasura.GraphQL.Parser.Schema (Definition (..))
 import Hasura.GraphQL.Parser.Variable (Variable (..))
 import Hasura.Prelude
-import Hasura.RQL.IR.BoolExp (AnnBoolExpFld (..), GBoolExp (..), OpExpG (..))
+import Hasura.RQL.IR.BoolExp (AnnBoolExpFld (..), AnnRedactionExp (..), GBoolExp (..), OpExpG (..))
 import Hasura.RQL.IR.Returning (MutationOutputG (..))
 import Hasura.RQL.IR.Root (RemoteRelationshipField)
 import Hasura.RQL.IR.Update (AnnotatedUpdateG (..))
@@ -30,8 +30,9 @@ import Hasura.RQL.IR.Update.Batch (UpdateBatch (..))
 import Hasura.RQL.IR.Value (UnpreparedValue)
 import Hasura.RQL.Types.BackendType (BackendSourceKind (PostgresVanillaKind), BackendType (Postgres), PostgresKind (Vanilla))
 import Hasura.RQL.Types.Column (ColumnInfo (..))
-import Hasura.RQL.Types.Common (SourceName (..))
+import Hasura.RQL.Types.Common (ResolvedWebhook, SourceName (..))
 import Hasura.RQL.Types.NamingCase
+import Hasura.RQL.Types.Permission
 import Hasura.RQL.Types.Source (DBObjectsIntrospection (..), SourceInfo (..))
 import Hasura.RQL.Types.SourceCustomization (ResolvedSourceCustomization (..))
 import Hasura.Table.Cache (TableInfo (..))
@@ -209,11 +210,14 @@ mkAnnotatedUpdate AnnotatedUpdateBuilder {..} = AnnotatedUpdateG {..}
     _auUpdatePermissions :: BoolExp
     _auUpdatePermissions =
       BoolAnd
-        . fmap (\c -> BoolField . AVColumn c $ [])
+        . fmap (\c -> BoolField . AVColumn c NoRedaction $ [])
         $ aubColumns
 
     _auNamingConvention :: Maybe NamingCase
     _auNamingConvention = Just HasuraCase
 
+    _auValidateInput :: Maybe (ValidateInput ResolvedWebhook)
+    _auValidateInput = Nothing
+
 toBoolExp :: [(ColumnInfo PG, [OpExpG PG (UnpreparedValue PG)])] -> BoolExp
-toBoolExp = BoolAnd . fmap (\(c, ops) -> BoolField $ AVColumn c ops)
+toBoolExp = BoolAnd . fmap (\(c, ops) -> BoolField $ AVColumn c NoRedaction ops)

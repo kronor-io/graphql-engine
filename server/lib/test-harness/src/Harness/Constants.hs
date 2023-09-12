@@ -280,6 +280,7 @@ serveOptions =
       soEnableTelemetry = Init.TelemetryDisabled,
       soStringifyNum = Options.Don'tStringifyNumbers,
       soDangerousBooleanCollapse = Options.Don'tDangerouslyCollapseBooleans,
+      soRemoteNullForwardingPolicy = Options.RemoteForwardAccurately,
       soEnabledAPIs = testSuiteEnabledApis,
       soLiveQueryOpts = ES.mkSubscriptionsOptions Nothing Nothing,
       soStreamingQueryOpts = ES.mkSubscriptionsOptions Nothing Nothing,
@@ -309,7 +310,9 @@ serveOptions =
       soExtensionsSchema = ExtensionsSchema "public",
       soMetadataDefaults = emptyMetadataDefaults,
       soApolloFederationStatus = ApolloFederationDisabled,
-      soCloseWebsocketsOnMetadataChangeStatus = Init._default Init.closeWebsocketsOnMetadataChangeOption
+      soCloseWebsocketsOnMetadataChangeStatus = Init._default Init.closeWebsocketsOnMetadataChangeOption,
+      soMaxTotalHeaderLength = Init._default Init.maxTotalHeaderLengthOption,
+      soTriggersErrorLogLevelStatus = Init._default Init.triggersErrorLogLevelStatusOption
     }
 
 -- | What log level should be used by the engine; this is not exported, and

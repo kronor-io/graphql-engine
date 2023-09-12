@@ -280,7 +280,7 @@ export const supportedNumericTypes = [
   'decimal',
 ];
 
-const getValueWithType = (variableData: VariableState) => {
+export const getValueWithType = (variableData: VariableState) => {
   if (variableData.type === 'Boolean') {
     if (variableData.value.trim().toLowerCase() === 'false') {
       return false;
@@ -293,8 +293,7 @@ const getValueWithType = (variableData: VariableState) => {
     return Number(variableData.value);
   }
 
-  // NOTE: bool_exp are of JSON type, so pass it as JSON object (issue: https://github.com/hasura/graphql-engine/issues/9671)
-  if (variableData.type.endsWith('_exp') && isJsonString(variableData.value)) {
+  if (isJsonString(variableData.value)) {
     return JSON.parse(variableData.value);
   }
 

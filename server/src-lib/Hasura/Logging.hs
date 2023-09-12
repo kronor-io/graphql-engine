@@ -1,6 +1,7 @@
 {-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Hasura.Logging
   ( LoggerSettings (..),
@@ -9,14 +10,17 @@ module Hasura.Logging
     Hasura,
     InternalLogTypes (..),
     EngineLog (..),
+    FormattedTime, -- N.B. opaque
+    toPOSIX_ns,
     userAllowedLogTypes,
     ToEngineLog (..),
     debugT,
     debugBS,
     debugLBS,
     UnstructuredLog (..),
-    Logger (..),
+    Logger (.., Logger, unLogger),
     LogLevel (..),
+    prettyLogLevel,
     UnhandledInternalErrorLog (..),
     mkLogger,
     nullLogger,
@@ -52,7 +56,6 @@ import Control.FoldDebounce qualified as FDebounce
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Managed (ManagedT (..), allocate)
 import Data.Aeson qualified as J
-import Data.Aeson.TH qualified as J
 import Data.Aeson.Types qualified as J
 import Data.ByteString qualified as B
 import Data.ByteString.Lazy qualified as BL
@@ -64,15 +67,34 @@ import Data.SerializableBlob qualified as SB
 import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Time.Clock qualified as Time
+import Data.Time.Clock.POSIX qualified as Time
 import Data.Time.Format qualified as Format
 import Data.Time.LocalTime qualified as Time
 import Hasura.Base.Error (QErr)
 import Hasura.Prelude
+import Hasura.Tracing.Class qualified as Tracing
+import Hasura.Tracing.Context
+import Hasura.Tracing.TraceId
 import System.Log.FastLogger qualified as FL
 import Witch qualified
 
-newtype FormattedTime = FormattedTime {_unFormattedTime :: Text}
-  deriving (Show, Eq, J.ToJSON)
+-- | A zoned timestamp with defined serialized format (via the ToJSON instance)
+--
+-- Internals not exported. Construct with 'getFormattedTime'
+data FormattedTime = FormattedTime Time.UTCTime Time.TimeZone
+  deriving (Show, Eq)
+
+instance J.ToJSON FormattedTime where
+  toJSON (FormattedTime t tz) = J.toJSON $ T.pack $ formatTime $ Time.utcToZonedTime tz t
+    where
+      formatTime = Format.formatTime Format.defaultTimeLocale format
+      format = "%FT%H:%M:%S%3Q%z"
+
+-- format = Format.iso8601DateFormat (Just "%H:%M:%S")
+
+-- | Timestamp as uniz epoch time, in nanoseconds.
+toPOSIX_ns :: FormattedTime -> Word64
+toPOSIX_ns (FormattedTime t _) = floor . (* 1e9) . Time.utcTimeToPOSIXSeconds $ t
 
 -- | Typeclass representing any type which can be parsed into a list of enabled log types, and has a @Set@
 -- of default enabled log types, and can find out if a log type is enabled
@@ -86,6 +108,9 @@ data family EngineLogType impl
 
 data Hasura
 
+-- log types emitted from the OSS core.
+-- NOTE: however these are also emitted by e.g. graphql-engine-pro (in addition
+-- to other log types)
 data instance EngineLogType Hasura
   = ELTHttpLog
   | ELTWebsocketLog
@@ -97,6 +122,7 @@ data instance EngineLogType Hasura
   | ELTActionHandler
   | ELTDataConnectorLog
   | ELTJwkRefreshLog
+  | ELTValidateInputLog
   | -- internal log types
     ELTInternal !InternalLogTypes
   deriving (Show, Eq, Generic)
@@ -115,6 +141,7 @@ instance Witch.From (EngineLogType Hasura) Text where
     ELTActionHandler -> "action-handler-log"
     ELTDataConnectorLog -> "data-connector-log"
     ELTJwkRefreshLog -> "jwk-refresh-log"
+    ELTValidateInputLog -> "validate-insert-input-log"
     ELTInternal t -> Witch.from t
 
 instance J.ToJSON (EngineLogType Hasura) where
@@ -210,7 +237,8 @@ userAllowedLogTypes =
     ELTLivequeryPollerLog,
     ELTActionHandler,
     ELTDataConnectorLog,
-    ELTJwkRefreshLog
+    ELTJwkRefreshLog,
+    ELTValidateInputLog
   ]
 
 data LogLevel
@@ -222,32 +250,37 @@ data LogLevel
   deriving (Show, Eq, Ord)
 
 instance J.ToJSON LogLevel where
-  toJSON =
-    J.toJSON . \case
-      LevelDebug -> "debug"
-      LevelInfo -> "info"
-      LevelWarn -> "warn"
-      LevelError -> "error"
-      LevelOther t -> t
+  toJSON = J.toJSON . prettyLogLevel
 
+-- | Human-readable LogLevel, as serialized for end-users
+prettyLogLevel :: LogLevel -> Text
+prettyLogLevel = \case
+  LevelDebug -> "debug"
+  LevelInfo -> "info"
+  LevelWarn -> "warn"
+  LevelError -> "error"
+  LevelOther t -> t
+
+-- | This is the top-level log type emitted for OSS and on-prem enterprise. It
+-- is built from the output of 'toEngineLog'
 data EngineLog impl = EngineLog
   { _elTimestamp :: !FormattedTime,
     _elLevel :: !LogLevel,
     _elType :: !(EngineLogType impl),
-    _elDetail :: !J.Value
+    _elDetail :: !J.Value,
+    -- | The trace context in which this log message was emitted, if any. See 'unLoggerTracing'.
+    _elTraceId :: !(Maybe TraceId),
+    -- | The span context in which this log message was emitted, if any. See 'unLoggerTracing'.
+    _elSpanId :: !(Maybe SpanId)
   }
+  deriving stock (Generic)
 
 deriving instance (Show (EngineLogType impl)) => Show (EngineLog impl)
 
 deriving instance (Eq (EngineLogType impl)) => Eq (EngineLog impl)
 
--- Empty splice to bring all the above definitions in scope.
---
--- TODO: Restructure the code so that we can avoid this.
-$(pure [])
-
 instance (J.ToJSON (EngineLogType impl)) => J.ToJSON (EngineLog impl) where
-  toJSON = $(J.mkToJSON hasuraJSON ''EngineLog)
+  toJSON = J.genericToJSON hasuraJSON {J.omitNothingFields = True}
 
 -- | Typeclass representing any data type that can be converted to @EngineLog@ for the purpose of
 -- logging
@@ -305,17 +338,12 @@ defaultLoggerSettings :: Bool -> LogLevel -> LoggerSettings
 defaultLoggerSettings isCached =
   LoggerSettings isCached Nothing
 
+-- | Get the current time, formatted with the current or specified timezone
 getFormattedTime :: Maybe Time.TimeZone -> IO FormattedTime
 getFormattedTime tzM = do
   tz <- onNothing tzM Time.getCurrentTimeZone
   t <- Time.getCurrentTime
-  let zt = Time.utcToZonedTime tz t
-  return $ FormattedTime $ T.pack $ formatTime zt
-  where
-    formatTime = Format.formatTime Format.defaultTimeLocale format
-    format = "%FT%H:%M:%S%3Q%z"
-
--- format = Format.iso8601DateFormat (Just "%H:%M:%S")
+  return $ FormattedTime t tz
 
 -- | Creates a new 'LoggerCtx'.
 --
@@ -349,17 +377,39 @@ cleanLoggerCtx :: LoggerCtx a -> IO ()
 cleanLoggerCtx =
   FL.rmLoggerSet . _lcLoggerSet
 
--- See Note [Existentially Quantified Types]
-newtype Logger impl = Logger {unLogger :: forall a m. (ToEngineLog a impl, MonadIO m) => a -> m ()}
+-- | A callback capable of actually emitting a log line (e.g. to stdout). If
+-- not in a 'MonadTrace' context you can make use of the old API via 'Logger'
+-- and 'unLogger'.
+newtype Logger impl = LoggerTracing {unLoggerTracing :: forall a m. (ToEngineLog a impl, Tracing.MonadTraceContext m, MonadIO m) => a -> m ()}
+
+-- | This is kept for compatibility with the old interface, which didn't
+-- require a 'MonadTraceContext' environment
+pattern Logger :: forall impl. (forall a m. (ToEngineLog a impl, MonadIO m) => a -> m ()) -> Logger impl
+pattern Logger {unLogger} <- (newToOrig -> unLogger)
+  where
+    Logger f = LoggerTracing f
+
+{-# COMPLETE Logger :: Logger #-}
+
+-- Internal. To get 'pattern Logger' to typecheck
+newToOrig :: Logger impl -> (forall a m. (ToEngineLog a impl, MonadIO m) => a -> m ())
+newToOrig (LoggerTracing f) = fmap Tracing.runNoMonadTraceContext f
 
 mkLogger :: (J.ToJSON (EngineLogType impl)) => LoggerCtx impl -> Logger impl
-mkLogger (LoggerCtx loggerSet serverLogLevel timeGetter enabledLogTypes) = Logger $ \l -> do
+mkLogger (LoggerCtx loggerSet serverLogLevel timeGetter enabledLogTypes) = LoggerTracing $ \l -> do
+  -- NOTE: This has us logging a trace and span id even  in the OSS server,
+  -- where tracing isn't actually supported.  We decided this was fine, and
+  -- actually might end up being useful as a way for OSS users to correlate
+  -- logs that are part of the same operation
+  cxt <- Tracing.currentContext
+  let mbCurrentSpan = tcCurrentSpan <$> cxt
+      mbCurrentTrace = tcCurrentTrace <$> cxt
   localTime <- liftIO timeGetter
   let (logLevel, logTy, logDet) = toEngineLog l
   when (logLevel >= serverLogLevel && isLogTypeEnabled enabledLogTypes logTy)
     $ liftIO
     $ FL.pushLogStrLn loggerSet
-    $ FL.toLogStr (J.encode $ EngineLog localTime logLevel logTy logDet)
+    $ FL.toLogStr (J.encode $ EngineLog localTime logLevel logTy logDet mbCurrentTrace mbCurrentSpan)
 
 nullLogger :: Logger Hasura
 nullLogger = Logger \_ -> pure ()

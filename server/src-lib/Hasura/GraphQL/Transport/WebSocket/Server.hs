@@ -60,7 +60,6 @@ import Data.Word (Word16)
 import GHC.AssertNF.CPP
 import GHC.Int (Int64)
 import Hasura.GraphQL.ParameterizedQueryHash (ParameterizedQueryHash)
-import Hasura.GraphQL.Schema.NamingCase (hasNamingConventionChanged)
 import Hasura.GraphQL.Transport.HTTP.Protocol
 import Hasura.GraphQL.Transport.WebSocket.Protocol
 import Hasura.Logging qualified as L
@@ -72,9 +71,11 @@ import Hasura.Server.Auth (AuthMode, compareAuthMode)
 import Hasura.Server.Cors (CorsPolicy)
 import Hasura.Server.Init.Config (AllowListStatus (..), WSConnectionInitTimeout (..))
 import Hasura.Server.Prometheus
-  ( PrometheusMetrics (..),
+  ( DynamicSubscriptionLabel (..),
+    PrometheusMetrics (..),
+    recordMetricWithLabel,
   )
-import Hasura.Server.Types (ExperimentalFeature (..))
+import Hasura.Server.Types (ExperimentalFeature (..), MonadGetPolicies (runGetPrometheusMetricsGranularity))
 import ListT qualified
 import Network.Wai.Extended (IpAddress)
 import Network.Wai.Handler.Warp qualified as Warp
@@ -83,6 +84,7 @@ import Refined (unrefine)
 import StmContainers.Map qualified as STMMap
 import System.IO.Error qualified as E
 import System.Metrics.Prometheus.Counter qualified as Prometheus.Counter
+import System.Metrics.Prometheus.CounterVector qualified as CounterVector
 import System.Metrics.Prometheus.Histogram qualified as Prometheus.Histogram
 import System.TimeManager qualified as TM
 
@@ -342,10 +344,12 @@ data WSActions a = WSActions
 
 data WSErrorMessage = ClientMessageParseFailed | ConnInitFailed
 
-mkWSServerErrorCode :: WSErrorMessage -> ConnErrMsg -> ServerErrorCode
-mkWSServerErrorCode errorMessage connErrMsg = case errorMessage of
+mkWSServerErrorCode :: WSSubProtocol -> WSErrorMessage -> ConnErrMsg -> ServerErrorCode
+mkWSServerErrorCode subProtocol errorMessage connErrMsg = case errorMessage of
   ClientMessageParseFailed -> (GenericError4400 $ ("Parsing client message failed: ") <> (T.unpack . unConnErrMsg $ connErrMsg))
-  ConnInitFailed -> (GenericError4400 $ ("Connection initialization failed: ") <> (T.unpack . unConnErrMsg $ connErrMsg))
+  ConnInitFailed -> case subProtocol of
+    Apollo -> (GenericError4400 $ ("Connection initialization failed: ") <> (T.unpack . unConnErrMsg $ connErrMsg))
+    GraphQLWS -> Forbidden4403
 
 type OnConnH m a = WSId -> WS.RequestHead -> IpAddress -> WSActions a -> m (Either WS.RejectRequest (AcceptWith a))
 
@@ -416,7 +420,7 @@ websocketConnectionReaper getLatestConfig getSchemaCache ws@(WSServer _ userConf
             hasBigqueryStringNumericInputChanged = bigqueryStringNumericInput currSqlGenCtx /= bigqueryStringNumericInput prevSqlGenCtx
             hasHideAggregationPredicatesChanged = (EFHideAggregationPredicates `elem` currExperimentalFeatures) && (EFHideAggregationPredicates `elem` prevExperimentalFeatures)
             hasHideStreamFieldsChanged = (EFHideStreamFields `elem` currExperimentalFeatures) && (EFHideStreamFields `elem` prevExperimentalFeatures)
-            hasDefaultNamingCaseChanged = hasNamingConventionChanged (prevExperimentalFeatures, prevDefaultNamingCase) (currExperimentalFeatures, currDefaultNamingCase)
+            hasDefaultNamingCaseChanged = prevDefaultNamingCase /= currDefaultNamingCase
         if
           -- if CORS policy has changed, close all connections
           | hasCorsPolicyChanged ->
@@ -495,7 +499,7 @@ websocketConnectionReaper getLatestConfig getSchemaCache ws@(WSServer _ userConf
           | otherwise -> pure ()
 
 createServerApp ::
-  (MonadIO m, MC.MonadBaseControl IO m, LA.Forall (LA.Pure m), MonadWSLog m) =>
+  (MonadIO m, MC.MonadBaseControl IO m, LA.Forall (LA.Pure m), MonadWSLog m, MonadGetPolicies m) =>
   IO MetricsConfig ->
   WSConnectionInitTimeout ->
   WSServer a ->
@@ -624,17 +628,28 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
 
             let send = forever $ do
                   WSQueueResponse msg wsInfo wsTimer <- liftIO $ STM.atomically $ STM.readTQueue sendQ
-                  liftIO $ WS.sendTextData conn msg
                   messageQueueTime <- liftIO $ realToFrac <$> wsTimer
+                  (messageWriteTime, _) <- liftIO $ withElapsedTime $ WS.sendTextData conn msg
                   let messageLength = BL.length msg
                       messageDetails = MessageDetails (SB.fromLBS msg) messageLength
+                      parameterizedQueryHash = wsInfo >>= _wseiParameterizedQueryHash
+                      operationName = wsInfo >>= _wseiOperationName
+                      promMetricGranularLabel = DynamicSubscriptionLabel parameterizedQueryHash operationName
+                      promMetricLabel = DynamicSubscriptionLabel Nothing Nothing
+                      websocketBytesSentMetric = pmWebSocketBytesSent prometheusMetrics
+                  granularPrometheusMetricsState <- runGetPrometheusMetricsGranularity
                   liftIO $ do
-                    Prometheus.Counter.add
-                      (pmWebSocketBytesSent prometheusMetrics)
-                      messageLength
+                    recordMetricWithLabel
+                      granularPrometheusMetricsState
+                      True
+                      (CounterVector.add websocketBytesSentMetric promMetricGranularLabel messageLength)
+                      (CounterVector.add websocketBytesSentMetric promMetricLabel messageLength)
                     Prometheus.Histogram.observe
                       (pmWebsocketMsgQueueTimeSeconds prometheusMetrics)
                       messageQueueTime
+                    Prometheus.Histogram.observe
+                      (pmWebsocketMsgWriteTimeSeconds prometheusMetrics)
+                      (realToFrac messageWriteTime)
                   logWSLog logger $ WSLog wsId (EMessageSent messageDetails) wsInfo
 
             -- withAsync lets us be very sure that if e.g. an async exception is raised while we're

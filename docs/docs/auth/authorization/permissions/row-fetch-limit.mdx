@@ -13,8 +13,9 @@ import Thumbnail from '@site/src/components/Thumbnail';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-
 # Row Fetch Limit
+
+## Introduction
 
 Limit the number of rows returned in a response on `select` operations.
 
@@ -95,4 +96,4 @@ In the above example, this configuration restricts the number of accessible rows
 `{"id":{"_eq":"X-Hasura-User-Id"}}`) to 1.
 
 Setting row fetch limits is useful for preventing abuse of your API especially if it is exposed to the public. You
-can [also configure other limits](/deployment/best-practices/security.mdx#limit-the-api).
+can [also configure other limits](/security/security-best-practices.mdx#limit-the-api).

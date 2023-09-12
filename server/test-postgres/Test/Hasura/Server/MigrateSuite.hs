@@ -84,16 +84,16 @@ instance
   ) =>
   CacheRWM (CacheRefT m)
   where
-  tryBuildSchemaCacheWithOptions reason invalidations metadata validateNewSchemaCache = do
+  tryBuildSchemaCacheWithOptions reason invalidations metadata metadataResourceVersion validateNewSchemaCache = do
     (dynamicConfig, scVar) <- ask
     modifyMVar scVar \schemaCache -> do
-      (valueToReturn, cache, _, _) <- runCacheRWT dynamicConfig schemaCache (tryBuildSchemaCacheWithOptions reason invalidations metadata validateNewSchemaCache)
+      (valueToReturn, cache, _, _, _) <- runCacheRWT dynamicConfig schemaCache (tryBuildSchemaCacheWithOptions reason invalidations metadata metadataResourceVersion validateNewSchemaCache)
       pure (cache, valueToReturn)
 
   setMetadataResourceVersionInSchemaCache resourceVersion = do
     (dynamicConfig, scVar) <- ask
     modifyMVar scVar \schemaCache -> do
-      ((), cache, _, _) <- runCacheRWT dynamicConfig schemaCache (setMetadataResourceVersionInSchemaCache resourceVersion)
+      ((), cache, _, _, _) <- runCacheRWT dynamicConfig schemaCache (setMetadataResourceVersionInSchemaCache resourceVersion)
       pure (cache, ())
 
 instance Example (MetadataT (CacheRefT m) ()) where
@@ -125,7 +125,7 @@ suite srcConfig pgExecCtx pgConnInfo = do
   let logger :: Logger Hasura = Logger $ \l -> do
         let (logLevel, logType :: EngineLogType Hasura, logDetail) = toEngineLog l
         t <- liftIO $ getFormattedTime Nothing
-        liftIO $ putStrLn $ LBS.toString $ encode $ EngineLog t logLevel logType logDetail
+        liftIO $ putStrLn $ LBS.toString $ encode $ EngineLog t logLevel logType logDetail Nothing Nothing
 
       migrateCatalogAndBuildCache env time = do
         dynamicConfig <- asks fst

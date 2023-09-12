@@ -10,8 +10,10 @@ import Control.Lens ((.~))
 import Data.Bifunctor (first)
 import Data.Environment (Environment)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as Text
-import Hasura.Base.Error (Code (InvalidParams), QErr, err400)
+import Data.URL.Template (parseTemplate, renderTemplate)
+import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Metadata.Class ()
 import Hasura.Prelude hiding (first)
@@ -56,43 +58,52 @@ runSetOpenTelemetryStatus otelStatus = do
 -- Returns a @Left qErr@ to signal a validation error. Returns @Right Nothing@
 -- to signal that the exporter should be disabled without raising an error.
 --
--- Allows the trace endpoint to be unset if the entire OpenTelemetry system is
--- disabled.
+-- If this is called we assume 'OtelEnabled'
 parseOtelExporterConfig ::
-  OtelStatus ->
   Environment ->
+  Set.Set OtelDataType ->
   OtelExporterConfig ->
-  Either QErr (Maybe OtelExporterInfo)
-parseOtelExporterConfig otelStatus env OtelExporterConfig {..} = do
+  Either QErr OtelExporterInfo
+parseOtelExporterConfig env enabledDataTypes OtelExporterConfig {..} = do
   -- First validate everything but the trace endpoint
   headers <- makeHeadersFromConf env _oecHeaders
-  -- Allow the trace endpoint to be unset when OpenTelemetry is disabled
-  case _oecTracesEndpoint of
-    Nothing ->
-      case otelStatus of
-        OtelDisabled ->
-          pure Nothing
-        OtelEnabled -> Left (err400 InvalidParams "Missing traces endpoint")
-    Just rawTracesEndpoint -> do
-      tracesUri <-
-        maybeToEither (err400 InvalidParams "Invalid URL")
-          $ parseURI
-          $ Text.unpack rawTracesEndpoint
-      uriRequest <-
-        first (err400 InvalidParams . tshow) $ requestFromURI tracesUri
-      pure
-        $ Just
-        $ OtelExporterInfo
-          { _oteleiTracesBaseRequest =
-              uriRequest
-                { requestHeaders = headers ++ requestHeaders uriRequest
-                },
-            _oteleiResourceAttributes =
-              Map.fromList
-                $ map
-                  (\NameValue {nv_name, nv_value} -> (nv_name, nv_value))
-                  _oecResourceAttributes
-          }
+  let mkExportReq rawEndpoint = mapLeft (err400 InvalidParams) $ do
+        rawTemplateEndpoint <- mapLeft Text.pack $ parseTemplate rawEndpoint
+        rawUri <- renderTemplate env rawTemplateEndpoint
+        uri <- maybeToEither "Invalid URL" $ parseURI (Text.unpack rawUri)
+        uriRequest <- first tshow $ requestFromURI uri
+        pure
+          $ Just
+          $ uriRequest
+            { requestHeaders = headers ++ requestHeaders uriRequest
+            }
+  -- Allow telemetry endpoints to be unset when not enabled
+  _oteleiTracesBaseRequest <- case _oecTracesEndpoint of
+    Nothing
+      | OtelTraces `Set.member` enabledDataTypes ->
+          Left (err400 InvalidParams "Traces export is enabled but tracing endpoint missing")
+    Just rawTracesEndpoint
+      | OtelTraces `Set.member` enabledDataTypes ->
+          mkExportReq rawTracesEndpoint
+    _ -> pure Nothing -- disabled
+  _oteleiMetricsBaseRequest <- case _oecMetricsEndpoint of
+    Nothing
+      | OtelMetrics `Set.member` enabledDataTypes ->
+          Left (err400 InvalidParams "Metrics export is enabled but metrics endpoint missing")
+    Just rawMetricsEndpoint
+      | OtelMetrics `Set.member` enabledDataTypes ->
+          mkExportReq rawMetricsEndpoint
+    _ -> pure Nothing -- disabled
+  pure
+    $ OtelExporterInfo
+      { _oteleiMetricsBaseRequest,
+        _oteleiTracesBaseRequest,
+        _oteleiResourceAttributes =
+          Map.fromList
+            $ map
+              (\NameValue {nv_name, nv_value} -> (nv_name, nv_value))
+              _oecResourceAttributes
+      }
 
 -- Smart constructor. Consistent with defaults.
 parseOtelBatchSpanProcessorConfig ::

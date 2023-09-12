@@ -1,5 +1,4 @@
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 -- | API related to server configuration
 module Hasura.Server.API.Config
@@ -9,7 +8,7 @@ module Hasura.Server.API.Config
   )
 where
 
-import Data.Aeson.TH
+import Data.Aeson qualified as J
 import Data.HashSet qualified as Set
 import Hasura.GraphQL.Execute.Subscription.Options qualified as ES
 import Hasura.Prelude
@@ -18,8 +17,8 @@ import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.Server.Auth
 import Hasura.Server.Auth.JWT
 import Hasura.Server.Init.Config (API (METRICS), AllowListStatus)
-import Hasura.Server.Init.FeatureFlag (FeatureFlag (..), getIdentifier)
-import Hasura.Server.Types (ExperimentalFeature)
+import Hasura.Server.Init.FeatureFlag (FeatureFlag (..))
+import Hasura.Server.Types (ApolloFederationStatus, ExperimentalFeature)
 import Hasura.Server.Version (Version, currentVersion)
 
 data FeatureFlagInfo = FeatureFlagInfo
@@ -29,16 +28,20 @@ data FeatureFlagInfo = FeatureFlagInfo
   }
   deriving (Show, Eq, Generic, Hashable)
 
-$(deriveToJSON hasuraJSON ''FeatureFlagInfo)
+instance J.ToJSON FeatureFlagInfo where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data JWTInfo = JWTInfo
   { jwtiClaimsNamespace :: !JWTNamespace,
     jwtiClaimsFormat :: !JWTClaimsFormat,
     jwtiClaimsMap :: !(Maybe JWTCustomClaimsMap)
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(deriveToJSON hasuraJSON ''JWTInfo)
+instance J.ToJSON JWTInfo where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data ServerConfig = ServerConfig
   { scfgVersion :: !Version,
@@ -55,11 +58,14 @@ data ServerConfig = ServerConfig
     scfgExperimentalFeatures :: !(Set.HashSet ExperimentalFeature),
     scfgIsPrometheusMetricsEnabled :: !Bool,
     scfgDefaultNamingConvention :: !NamingCase,
-    scfgFeatureFlags :: !(Set.HashSet FeatureFlagInfo)
+    scfgFeatureFlags :: !(Set.HashSet FeatureFlagInfo),
+    scfgIsApolloFederationEnabled :: !ApolloFederationStatus
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(deriveToJSON hasuraJSON ''ServerConfig)
+instance J.ToJSON ServerConfig where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 runGetConfig ::
   Options.InferFunctionPermissions ->
@@ -72,7 +78,8 @@ runGetConfig ::
   Set.HashSet ExperimentalFeature ->
   Set.HashSet API ->
   NamingCase ->
-  [(FeatureFlag, Bool)] ->
+  [(FeatureFlag, Text, Bool)] ->
+  ApolloFederationStatus ->
   ServerConfig
 runGetConfig
   functionPermsCtx
@@ -85,7 +92,8 @@ runGetConfig
   experimentalFeatures
   enabledAPIs
   defaultNamingConvention
-  featureFlags =
+  featureFlags
+  apolloFederationStatus =
     ServerConfig
       currentVersion
       functionPermsCtx
@@ -102,11 +110,18 @@ runGetConfig
       isPrometheusMetricsEnabled
       defaultNamingConvention
       featureFlagSettings
+      apolloFederationStatus
     where
       isPrometheusMetricsEnabled = METRICS `Set.member` enabledAPIs
       featureFlagSettings =
         Set.fromList
-          $ (\(FeatureFlag {ffDescription, ffIdentifier}, enabled) -> FeatureFlagInfo {ffiName = getIdentifier ffIdentifier, ffiEnabled = enabled, ffiDescription = ffDescription})
+          $ ( \(FeatureFlag {ffIdentifier}, description, enabled) ->
+                FeatureFlagInfo
+                  { ffiName = ffIdentifier,
+                    ffiEnabled = enabled,
+                    ffiDescription = description
+                  }
+            )
           <$> featureFlags
 
 isAdminSecretSet :: AuthMode -> Bool

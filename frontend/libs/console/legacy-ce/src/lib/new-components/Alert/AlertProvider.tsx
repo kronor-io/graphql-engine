@@ -184,6 +184,8 @@ export const AlertProvider: React.FC = ({ children }) => {
             // init
           },
         })}
+        //this ensures the component is given a new instances when it's closed/re-opened
+        key={showAlert.toString()}
         isLoading={loading}
         open={showAlert}
         success={success}
@@ -208,11 +210,13 @@ const useDestructiveConfirm = () => {
       resourceName,
       resourceType,
       destroyTerm = 'remove',
+      appendTerm = '',
       onConfirm,
     }: {
       resourceName: string;
       resourceType: string;
       destroyTerm?: 'delete' | 'remove';
+      appendTerm?: string;
       onConfirm: () => Promise<boolean>;
     }) => {
       if (!onConfirm) throw new Error('onCloseAsync() is required.');
@@ -222,7 +226,7 @@ const useDestructiveConfirm = () => {
         message: (
           <div>
             Are you sure you want to {destroyTerm} {resourceType}:{' '}
-            <strong>{resourceName}</strong>?
+            <strong>{resourceName}</strong>?{appendTerm ? ` ${appendTerm}` : ''}
           </div>
         ),
         confirmText: 'Remove',
@@ -255,11 +259,13 @@ const useDestructivePrompt = () => {
       resourceName,
       resourceType,
       destroyTerm = 'remove',
+      appendTerm = '',
       onConfirm,
     }: {
       resourceName: string;
       resourceType: string;
       destroyTerm?: 'delete' | 'remove';
+      appendTerm?: string;
       onConfirm: () => Promise<boolean>;
     }) => {
       if (!onConfirm) throw new Error('onCloseAsync() is required.');
@@ -269,7 +275,7 @@ const useDestructivePrompt = () => {
         message: (
           <div>
             Are you sure you want to {destroyTerm} {resourceType}:{' '}
-            <strong>{resourceName}</strong>?
+            <strong>{resourceName}</strong>?{appendTerm ? ` ${appendTerm}` : ''}
           </div>
         ),
         confirmText: 'Remove',

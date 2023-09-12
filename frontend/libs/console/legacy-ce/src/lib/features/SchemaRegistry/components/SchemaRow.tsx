@@ -1,14 +1,13 @@
 import React from 'react';
 import { CountLabel } from './CountLabel';
 import { SchemaChange } from '../types';
-import { FaChevronRight } from 'react-icons/fa';
+import { CapitalizeFirstLetter } from '../utils';
 
 export const SchemaRow: React.VFC<{
   role: string;
   changes?: SchemaChange[];
-  onClick?: VoidFunction;
 }> = props => {
-  const { role, changes, onClick } = props;
+  const { role, changes } = props;
 
   const countBreakingChanges = changes?.filter(
     c => c.criticality.level === 'BREAKING'
@@ -19,14 +18,18 @@ export const SchemaRow: React.VFC<{
   const countSafeChanges = changes?.filter(
     c => c.criticality.level === 'NON_BREAKING'
   )?.length;
+  const totalCount =
+    (countBreakingChanges || 0) +
+    (countDangerousChanges || 0) +
+    (countSafeChanges || 0);
   return (
-    <div className="w-full flex my-2">
-      <div className="flex text-base w-[72%] justify-start">
-        <span className="text-sm font-bold bg-gray-100 p-1 rounded">
-          {role}
+    <div className="flex mt-8 px-4 py-2 w-full">
+      <div className="flex text-base  justify-between w-[15%]">
+        <span className="text-md font-bold bg-gray-100 rounded p-1">
+          {CapitalizeFirstLetter(role)}
         </span>
       </div>
-      <div className="flex text-base w-[28%] justify-between">
+      <div className="flex text-base items-center justify-around w-[30%]">
         {changes ? (
           <>
             <CountLabel count={countBreakingChanges || 0} type="BREAKING" />
@@ -41,16 +44,9 @@ export const SchemaRow: React.VFC<{
           </>
         )}
       </div>
-      {onClick && (
-        <div
-          className="flex text-base w-[2%] justify-end mt-[6px]"
-          role="button"
-          onClick={onClick}
-        >
-          <FaChevronRight />
-        </div>
-      )}
-      {!onClick && <div className="flex w-[4%] justify-end"></div>}
+      <div className="flex text-base items-center justify-around w-[55%]">
+        <div className="font-bold text-xl mx-2">{totalCount}</div>
+      </div>
     </div>
   );
 };

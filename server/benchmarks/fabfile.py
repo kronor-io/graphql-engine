@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 import boto3
@@ -196,7 +196,10 @@ def run_benchmark_set(benchmark_set, use_spot=True):
                         ImageId=runner_image_id,
                         MinCount=1, MaxCount=1,
                         # NOTE: benchmarks are tuned very specifically to this instance type  and
-                        # the other settings here (see bench.hs):
+                        # the other settings here (see bench.sh):
+                        #   Lately AWS seems to be running out of capacity and so we may need to research 
+                        # (check numa configuration, etc) and switch to one of these:
+                        #   https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/processor_state_control.html
                         InstanceType='c4.8xlarge',
                         KeyName='hasura-benchmarks-runner',
                         InstanceInitiatedShutdownBehavior='terminate',
@@ -281,7 +284,9 @@ def run_benchmark_set(benchmark_set, use_spot=True):
             break
 
         # Install any extra dependencies (TODO: bake these into AMI)
-        c.sudo('apt install -y jq')
+        c.sudo('apt-get update')
+        c.sudo('apt-get upgrade -y')
+        c.sudo('apt-get install -y jq')
 
         # In case our heroic exception handling and cleanup attempts here fail,
         # make sure this instance shuts down (and is terminated, per
@@ -584,7 +589,8 @@ def pretty_print_regression_report_github_comment(results, skip_pr_report_names,
         for bench_name, metrics in benchmarks:
             bench_name_pretty = bench_name.replace('-k6-custom','').replace('_',' ') # need at least 40 chars
             if "throughput" in benchmark_set_name:
-                col = highlight_lax
+                # invert the sign so we color properly, since higher throughput is better:
+                col = lambda v: highlight_lax(-v)
             else:
                 col = highlight_sensitive
 

@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Hasura.Backends.DataConnector.Adapter.Types
   ( ConnSourceConfig (..),
@@ -27,7 +28,6 @@ module Hasura.Backends.DataConnector.Adapter.Types
     API.GraphQLType (..),
     ScalarType (..),
     ArgumentExp (..),
-    mkScalarType,
     fromGQLType,
     ExtraTableMetadata (..),
     ExtraColumnMetadata (..),
@@ -44,6 +44,7 @@ import Data.Aeson qualified as J
 import Data.Aeson.KeyMap qualified as J
 import Data.Aeson.Types (parseEither, toJSONKeyText)
 import Data.Environment (Environment)
+import Data.Has
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.OpenApi (ToSchema)
@@ -52,8 +53,10 @@ import Data.Text.Extended (ToTxt (..))
 import Hasura.Backends.DataConnector.API qualified as API
 import Hasura.Base.ErrorValue qualified as ErrorValue
 import Hasura.Base.ToErrorValue (ToErrorValue (..))
-import Hasura.Metadata.DTO.Placeholder (placeholderCodecViaJSON)
 import Hasura.Prelude
+import Hasura.RQL.IR.BoolExp qualified as IR
+import Hasura.RQL.Types.Backend (Backend)
+import Hasura.RQL.Types.BackendType (BackendType (..))
 import Hasura.RQL.Types.DataConnector
 import Language.GraphQL.Draft.Syntax qualified as GQL
 import Network.HTTP.Client qualified as HTTP
@@ -377,12 +380,29 @@ instance (Hashable a) => Hashable (ArgumentExp a)
 
 --------------------------------------------------------------------------------
 
-data CountAggregate
+data CountAggregate v
   = StarCount
-  | ColumnCount ColumnName
-  | ColumnDistinctCount ColumnName
-  deriving stock (Data, Eq, Generic, Ord, Show)
-  deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
+  | ColumnCount (ColumnName, IR.AnnRedactionExp 'DataConnector v)
+  | ColumnDistinctCount (ColumnName, IR.AnnRedactionExp 'DataConnector v)
+  deriving (Generic)
+
+deriving stock instance
+  (Backend 'DataConnector, Show (IR.AnnRedactionExp 'DataConnector v), Show v) =>
+  Show (CountAggregate v)
+
+deriving stock instance (Backend 'DataConnector) => Functor CountAggregate
+
+deriving stock instance (Backend 'DataConnector) => Foldable CountAggregate
+
+deriving stock instance (Backend 'DataConnector) => Traversable CountAggregate
+
+deriving stock instance
+  (Backend 'DataConnector, Eq (IR.AnnRedactionExp 'DataConnector v), Eq v) =>
+  Eq (CountAggregate v)
+
+deriving stock instance
+  (Backend 'DataConnector, Data (IR.AnnRedactionExp 'DataConnector v), Data v) =>
+  Data (CountAggregate v)
 
 --------------------------------------------------------------------------------
 
@@ -413,28 +433,26 @@ instance Witch.From OrderDirection API.OrderDirection where
 
 --------------------------------------------------------------------------------
 
-data ScalarType
-  = ScalarType Text (Maybe API.GraphQLType)
+newtype ScalarType = ScalarType {unScalarType :: Text}
   deriving stock (Eq, Generic, Ord, Show)
-  deriving anyclass (FromJSON, FromJSONKey, Hashable, NFData, ToJSON, ToJSONKey)
+  deriving anyclass (Hashable, NFData)
+  deriving newtype (FromJSONKey, ToJSONKey)
+  deriving (FromJSON, ToJSON) via AC.Autodocodec ScalarType
 
 instance HasCodec ScalarType where
-  codec = AC.named "ScalarType" placeholderCodecViaJSON
+  codec = AC.named "ScalarType" $ AC.dimapCodec ScalarType unScalarType codec
 
 instance ToTxt ScalarType where
-  toTxt (ScalarType name _) = name
+  toTxt (ScalarType name) = name
 
 instance ToErrorValue ScalarType where
   toErrorValue = ErrorValue.squote . toTxt
 
 instance Witch.From ScalarType API.ScalarType where
-  from (ScalarType name _) = API.ScalarType name
+  from (ScalarType name) = API.ScalarType name
 
-mkScalarType :: API.Capabilities -> API.ScalarType -> ScalarType
-mkScalarType API.Capabilities {..} apiType@(API.ScalarType name) =
-  ScalarType name graphQLType
-  where
-    graphQLType = HashMap.lookup apiType (API.unScalarTypesCapabilities _cScalarTypes) >>= API._stcGraphQLType
+instance Witch.From API.ScalarType ScalarType where
+  from (API.ScalarType name) = ScalarType name
 
 fromGQLType :: GQL.Name -> API.ScalarType
 fromGQLType typeName =
@@ -459,3 +477,6 @@ data ExtraColumnMetadata = ExtraColumnMetadata
 --------------------------------------------------------------------------------
 
 $(makeLenses ''SourceConfig)
+
+instance Has API.ScalarTypesCapabilities SourceConfig where
+  hasLens = scCapabilities . API.cScalarTypes

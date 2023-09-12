@@ -76,6 +76,9 @@ module Hasura.RQL.IR.Select
     TableAggregateFieldG (..),
     TableAggregateFields,
     TableAggregateFieldsG,
+    GroupByG (..),
+    GroupByField (..),
+    GroupKeyField (..),
     CountDistinct (..),
     insertFunctionArg,
     mkAnnColumnField,
@@ -293,17 +296,17 @@ type AnnFields b = AnnFieldsG b Void (SQLExpression b)
 mkAnnColumnField ::
   Column backend ->
   ColumnType backend ->
-  Maybe (AnnColumnCaseBoolExp backend v) ->
+  AnnRedactionExp backend v ->
   Maybe (ScalarSelectionArguments backend) ->
   AnnFieldG backend r v
-mkAnnColumnField col typ caseBoolExp colOpM =
-  AFColumn (AnnColumnField col typ False colOpM caseBoolExp)
+mkAnnColumnField col typ redactionExp colOpM =
+  AFColumn (AnnColumnField col typ False colOpM redactionExp)
 
 mkAnnColumnFieldAsText ::
   ColumnInfo backend ->
   AnnFieldG backend r v
 mkAnnColumnFieldAsText ci =
-  AFColumn (AnnColumnField (ciColumn ci) (ciType ci) True Nothing Nothing)
+  AFColumn (AnnColumnField (ciColumn ci) (ciType ci) True Nothing NoRedaction)
 
 traverseSourceRelationshipSelection ::
   (Applicative f, Backend backend) =>
@@ -323,41 +326,51 @@ traverseSourceRelationshipSelection f = \case
 data TableAggregateFieldG (b :: BackendType) (r :: Type) v
   = TAFAgg (AggregateFields b v)
   | TAFNodes (XNodesAgg b) (AnnFieldsG b r v)
+  | TAFGroupBy (XGroupBy b) (GroupByG b r v)
   | TAFExp Text
   deriving stock (Functor, Foldable, Traversable)
 
 deriving stock instance
   ( Backend b,
     Eq (AggregateFields b v),
-    Eq (AnnFieldsG b r v)
+    Eq (AnnFieldsG b r v),
+    Eq (GroupByG b r v)
   ) =>
   Eq (TableAggregateFieldG b r v)
 
 deriving stock instance
   ( Backend b,
     Show (AggregateFields b v),
-    Show (AnnFieldsG b r v)
+    Show (AnnFieldsG b r v),
+    Show (GroupByG b r v)
   ) =>
   Show (TableAggregateFieldG b r v)
 
 instance (Backend b) => Bifoldable (TableAggregateFieldG b) where
-  bifoldMap f g = \case
-    TAFAgg {} -> mempty
-    TAFNodes _ fields -> foldMap (foldMap $ bifoldMap f g) fields
+  bifoldMap :: (Monoid m) => (r -> m) -> (v -> m) -> TableAggregateFieldG b r v -> m
+  bifoldMap mapR mapV = \case
+    TAFAgg aggFields -> foldMap (foldMap $ foldMap mapV) aggFields
+    TAFNodes _ fields -> foldMap (foldMap $ bifoldMap mapR mapV) fields
+    TAFGroupBy _ groupByFields -> bifoldMap mapR mapV groupByFields
     TAFExp {} -> mempty
 
 data AggregateField (b :: BackendType) v
-  = AFCount (CountType b)
+  = AFCount (CountType b v)
   | AFOp (AggregateOp b v)
   | AFExp Text
-  deriving (Functor, Foldable, Traversable)
+
+deriving stock instance (Backend b) => Functor (AggregateField b)
+
+deriving stock instance (Backend b) => Foldable (AggregateField b)
+
+deriving stock instance (Backend b) => Traversable (AggregateField b)
 
 deriving stock instance
-  (Backend b, Eq (FunctionArgumentExp b v), Eq v) =>
+  (Backend b, Eq (CountType b v), Eq (AggregateOp b v), Eq v) =>
   Eq (AggregateField b v)
 
 deriving stock instance
-  (Backend b, Show (FunctionArgumentExp b v), Show v) =>
+  (Backend b, Show (CountType b v), Show (AggregateOp b v), Show v) =>
   Show (AggregateField b v)
 
 data AggregateOp (b :: BackendType) v = AggregateOp
@@ -367,26 +380,73 @@ data AggregateOp (b :: BackendType) v = AggregateOp
   deriving (Functor, Foldable, Traversable)
 
 deriving stock instance
-  (Backend b, Eq (FunctionArgumentExp b v), Eq v) =>
+  (Backend b, Eq (SelectionFields b v), Eq v) =>
   Eq (AggregateOp b v)
 
 deriving stock instance
-  (Backend b, Show (FunctionArgumentExp b v), Show v) =>
+  (Backend b, Show (SelectionFields b v), Show v) =>
   Show (AggregateOp b v)
+
+data GroupByG (b :: BackendType) r v = GroupByG
+  { _gbgKeys :: [GroupKeyField b],
+    _gbgFields :: Fields (GroupByField b r v)
+  }
+  deriving (Functor, Foldable, Traversable)
+
+deriving stock instance (Backend b, Eq (GroupByField b r v), Eq (GroupKeyField b)) => Eq (GroupByG b r v)
+
+deriving stock instance (Backend b, Show (GroupByField b r v), Show (GroupKeyField b)) => Show (GroupByG b r v)
+
+instance (Backend b) => Bifoldable (GroupByG b) where
+  bifoldMap :: (Monoid m) => (r -> m) -> (v -> m) -> GroupByG b r v -> m
+  bifoldMap mapR mapV GroupByG {..} =
+    foldMap (foldMap $ bifoldMap mapR mapV) _gbgFields
+
+data GroupByField (b :: BackendType) r v
+  = GBFGroupKey (Fields (GroupKeyField b))
+  | GBFAggregate (AggregateFields b v)
+  | GBFNodes (AnnFieldsG b r v)
+  | GBFExp Text
+  deriving (Functor, Foldable, Traversable)
+
+deriving stock instance (Backend b, Eq (GroupKeyField b), Eq (AggregateField b v), Eq (AnnFieldG b r v)) => Eq (GroupByField b r v)
+
+deriving stock instance (Backend b, Show (GroupKeyField b), Show (AggregateField b v), Show (AnnFieldG b r v)) => Show (GroupByField b r v)
+
+instance (Backend b) => Bifoldable (GroupByField b) where
+  bifoldMap :: (Monoid m) => (r -> m) -> (v -> m) -> GroupByField b r v -> m
+  bifoldMap mapR mapV = \case
+    GBFGroupKey _groupKeyFields -> mempty
+    GBFAggregate aggFields -> foldMap (foldMap $ foldMap mapV) aggFields
+    GBFNodes fields -> foldMap (foldMap $ bifoldMap mapR mapV) fields
+    GBFExp _text -> mempty
+
+data GroupKeyField (b :: BackendType)
+  = GKFColumn (Column b)
+  | GKFExp Text
+
+deriving stock instance (Backend b) => Eq (GroupKeyField b)
+
+deriving stock instance (Backend b) => Show (GroupKeyField b)
 
 -- | Types of fields that can be selected in a user query.
 data SelectionField (b :: BackendType) v
-  = SFCol (Column b) (ColumnType b)
+  = SFCol
+      (Column b)
+      (ColumnType b)
+      -- | This type is used to determine whether the column should be redacted
+      -- before being aggregated
+      (AnnRedactionExp b v)
   | SFComputedField ComputedFieldName (ComputedFieldScalarSelect b v)
   | SFExp Text
   deriving (Functor, Foldable, Traversable)
 
 deriving stock instance
-  (Backend b, Eq (FunctionArgumentExp b v), Eq v) =>
+  (Backend b, Eq (FunctionArgumentExp b v), Eq (AnnRedactionExp b v), Eq v) =>
   Eq (SelectionField b v)
 
 deriving stock instance
-  (Backend b, Show (FunctionArgumentExp b v), Show v) =>
+  (Backend b, Show (FunctionArgumentExp b v), Show (AnnRedactionExp b v), Show v) =>
   Show (SelectionField b v)
 
 type TableAggregateField b = TableAggregateFieldG b Void (SQLExpression b)
@@ -471,24 +531,20 @@ data AnnColumnField (b :: BackendType) v = AnnColumnField
     _acfAsText :: Bool,
     -- | Arguments of this column's selection. See 'ScalarSelectionArguments'
     _acfArguments :: Maybe (ScalarSelectionArguments b),
-    -- | This type is used to determine whether the column
-    -- should be nullified. When the value is `Nothing`, the column value
-    -- will be outputted as computed and when the value is `Just c`, the
-    -- column will be outputted when `c` evaluates to `true` and `null`
-    -- when `c` evaluates to `false`.
-    _acfCaseBoolExpression :: (Maybe (AnnColumnCaseBoolExp b v))
+    -- | This type is used to determine whether the column should be redacted
+    _acfRedactionExpression :: AnnRedactionExp b v
   }
   deriving stock (Functor, Foldable, Traversable)
 
 deriving stock instance
   ( Backend b,
-    Eq (AnnColumnCaseBoolExp b v)
+    Eq (AnnRedactionExp b v)
   ) =>
   Eq (AnnColumnField b v)
 
 deriving stock instance
   ( Backend b,
-    Show (AnnColumnCaseBoolExp b v)
+    Show (AnnRedactionExp b v)
   ) =>
   Show (AnnColumnField b v)
 
@@ -498,35 +554,37 @@ data ComputedFieldScalarSelect (b :: BackendType) v = ComputedFieldScalarSelect
   { _cfssFunction :: FunctionName b,
     _cfssArguments :: FunctionArgsExp b v,
     _cfssType :: ScalarType b,
-    _cfssScalarArguments :: (Maybe (ScalarSelectionArguments b))
+    _cfssScalarArguments :: (Maybe (ScalarSelectionArguments b)),
+    -- | This type is used to determine whether the computed field should be redacted
+    _cfssRedactionExpression :: AnnRedactionExp b v
   }
+  deriving stock (Functor, Foldable, Traversable)
 
-deriving stock instance (Backend b) => Functor (ComputedFieldScalarSelect b)
+deriving stock instance
+  ( Backend b,
+    Show v,
+    Show (FunctionArgumentExp b v),
+    Show (AnnRedactionExp b v)
+  ) =>
+  Show (ComputedFieldScalarSelect b v)
 
-deriving stock instance (Backend b) => Foldable (ComputedFieldScalarSelect b)
-
-deriving stock instance (Backend b) => Traversable (ComputedFieldScalarSelect b)
-
-deriving stock instance (Backend b, Show v, Show (FunctionArgumentExp b v)) => Show (ComputedFieldScalarSelect b v)
-
-deriving stock instance (Backend b, Eq v, Eq (FunctionArgumentExp b v)) => Eq (ComputedFieldScalarSelect b v)
+deriving stock instance
+  ( Backend b,
+    Eq v,
+    Eq (FunctionArgumentExp b v),
+    Eq (AnnRedactionExp b v)
+  ) =>
+  Eq (ComputedFieldScalarSelect b v)
 
 data ComputedFieldSelect (b :: BackendType) (r :: Type) v
   = CFSScalar
       -- | Type containing info about the computed field
       (ComputedFieldScalarSelect b v)
-      -- | This type is used to determine if whether the scalar
-      -- computed field should be nullified. When the value is `Nothing`,
-      -- the scalar computed value will be outputted as computed and when the
-      -- value is `Just c`, the scalar computed field will be outputted when
-      -- `c` evaluates to `true` and `null` when `c` evaluates to `false`
-      (Maybe (AnnColumnCaseBoolExp b v))
   | CFSTable JsonAggSelect (AnnSimpleSelectG b r v)
   deriving stock (Functor, Foldable, Traversable)
 
 deriving stock instance
   ( Backend b,
-    Eq (AnnColumnCaseBoolExp b v),
     Eq (AnnSimpleSelectG b r v),
     Eq (ComputedFieldScalarSelect b v)
   ) =>
@@ -534,7 +592,6 @@ deriving stock instance
 
 deriving stock instance
   ( Backend b,
-    Show (AnnColumnCaseBoolExp b v),
     Show (AnnSimpleSelectG b r v),
     Show (ComputedFieldScalarSelect b v)
   ) =>
@@ -542,7 +599,7 @@ deriving stock instance
 
 instance (Backend b) => Bifoldable (ComputedFieldSelect b) where
   bifoldMap f g = \case
-    CFSScalar cfsSelect caseBoolExp -> foldMap g cfsSelect <> foldMap (foldMap $ foldMap g) caseBoolExp
+    CFSScalar cfsSelect -> foldMap g cfsSelect
     CFSTable _ simpleSelect -> bifoldMapAnnSelectG f g simpleSelect
 
 -- Local relationship

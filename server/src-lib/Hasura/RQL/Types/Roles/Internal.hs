@@ -95,12 +95,11 @@ rolePermInfoToCombineRolePermInfo RolePermInfo {..} =
     (maybeToCheckPermission _permDel)
   where
     modifySingleSelectPerm SelPermInfo {..} =
-      let columnCaseBoolExp = fmap AnnColumnCaseBoolExpField spiFilter
-          colsWithColCaseBoolExp = spiCols $> Just columnCaseBoolExp
-          scalarCompFieldsWithColCaseBoolExp = spiComputedFields $> Just columnCaseBoolExp
+      let colsWithRedactionExp = spiCols $> RedactIfFalse spiFilter
+          scalarCompFieldsWithRedactionExp = spiComputedFields $> RedactIfFalse spiFilter
        in CombinedSelPermInfo
-            [colsWithColCaseBoolExp]
-            [scalarCompFieldsWithColCaseBoolExp]
+            [colsWithRedactionExp]
+            [scalarCompFieldsWithRedactionExp]
             [spiFilter]
             (Max <$> spiLimit)
             (Any spiAllowAgg)
@@ -156,8 +155,8 @@ instance
   where
   annBoolExpFldL ==~ annBoolExpFldR =
     case (annBoolExpFldL, annBoolExpFldR) of
-      (AVColumn colInfoL opExpsL, AVColumn colInfoR opExpsR) ->
-        colInfoL == colInfoR && Set.fromList opExpsL == Set.fromList opExpsR
+      (AVColumn colInfoL redactionExpL opExpsL, AVColumn colInfoR redactionExpR opExpsR) ->
+        colInfoL == colInfoR && Set.fromList opExpsL == Set.fromList opExpsR && redactionExpL ==~ redactionExpR
       (AVRelationship relInfoL (RelationshipFilters permsL annBoolExpL), AVRelationship relInfoR (RelationshipFilters permsR annBoolExpR)) ->
         relInfoL == relInfoR && annBoolExpL ==~ annBoolExpR && permsL ==~ permsR
       (AVComputedField annCompFldBoolExpL, AVComputedField annCompFldBoolExpR) ->
@@ -170,8 +169,8 @@ instance
   ) =>
   OnlyRelevantEq (InsPermInfo b)
   where
-  (InsPermInfo colsL checkL setL backendOnlyL reqHeadersL)
-    ==~ (InsPermInfo colsR checkR setR backendOnlyR reqHeadersR) =
+  (InsPermInfo colsL checkL setL backendOnlyL reqHeadersL validateInputL)
+    ==~ (InsPermInfo colsR checkR setR backendOnlyR reqHeadersR validateInputR) =
       colsL
         == colsR
         && checkL
@@ -182,6 +181,8 @@ instance
         == backendOnlyR
         && reqHeadersL
         == reqHeadersR
+        && validateInputL
+        == validateInputR
 
 instance
   ( Backend b,
@@ -189,8 +190,8 @@ instance
   ) =>
   OnlyRelevantEq (UpdPermInfo b)
   where
-  (UpdPermInfo colsL tableL filterL checkL setL backendOnlyL reqHeadersL)
-    ==~ (UpdPermInfo colsR tableR filterR checkR setR backendOnlyR reqHeadersR) =
+  (UpdPermInfo colsL tableL filterL checkL setL backendOnlyL reqHeadersL validateInputL)
+    ==~ (UpdPermInfo colsR tableR filterR checkR setR backendOnlyR reqHeadersR validateInputR) =
       colsL
         == colsR
         && tableL
@@ -205,6 +206,8 @@ instance
         == backendOnlyR
         && reqHeadersL
         == reqHeadersR
+        && validateInputL
+        == validateInputR
 
 instance
   ( Backend b,
@@ -212,8 +215,8 @@ instance
   ) =>
   OnlyRelevantEq (DelPermInfo b)
   where
-  (DelPermInfo tableL filterL backendOnlyL reqHeadersL)
-    ==~ (DelPermInfo tableR filterR backendOnlyR reqHeadersR) =
+  (DelPermInfo tableL filterL backendOnlyL reqHeadersL validateInputL)
+    ==~ (DelPermInfo tableR filterR backendOnlyR reqHeadersR validateInputR) =
       tableL
         == tableR
         && filterL
@@ -222,6 +225,8 @@ instance
         == backendOnlyR
         && reqHeadersL
         == reqHeadersR
+        && validateInputL
+        == validateInputR
 
 instance OnlyRelevantEq RemoteSchemaInputValueDefinition where
   RemoteSchemaInputValueDefinition defnL presetL
@@ -356,6 +361,15 @@ instance OnlyRelevantEq G.InputValueDefinition where
         == defaultValueR
         && Set.fromList directivesL
         == Set.fromList directivesR
+
+instance
+  (OnlyRelevantEq (GBoolExp b (AnnBoolExpFld b v))) =>
+  OnlyRelevantEq (AnnRedactionExp b v)
+  where
+  NoRedaction ==~ NoRedaction = True
+  NoRedaction ==~ RedactIfFalse {} = False
+  RedactIfFalse {} ==~ NoRedaction = False
+  RedactIfFalse bExpL ==~ RedactIfFalse bExpR = bExpL ==~ bExpR
 
 maybeToCheckPermission :: Maybe a -> CheckPermission a
 maybeToCheckPermission = maybe CPUndefined CPDefined

@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Types for BigQuery
 module Hasura.Backends.BigQuery.Types
@@ -12,6 +13,7 @@ module Hasura.Backends.BigQuery.Types
     Cardinality (..),
     ColumnName (ColumnName),
     Countable (..),
+    CountType (..),
     Date (..),
     Datetime (..),
     Decimal (..),
@@ -77,7 +79,6 @@ where
 
 import Autodocodec (HasCodec (codec), dimapCodec, object, optionalField', requiredField', (.=))
 import Autodocodec qualified as AC
-import Autodocodec.Extended (boundedEnumCodec)
 import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey)
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
@@ -101,9 +102,12 @@ import Hasura.Base.Error
 import Hasura.Base.ErrorValue qualified as ErrorValue
 import Hasura.Base.ToErrorValue
 import Hasura.Function.Cache (FunctionArgName)
+import Hasura.Metadata.DTO.Placeholder (placeholderCodecViaJSON)
 import Hasura.NativeQuery.Metadata (InterpolatedQuery, NativeQueryName)
 import Hasura.Prelude hiding (state)
 import Hasura.RQL.IR.BoolExp
+import Hasura.RQL.Types.Backend qualified as Backend
+import Hasura.RQL.Types.BackendType (BackendType (BigQuery))
 import Language.GraphQL.Draft.Syntax qualified as G
 import Language.Haskell.TH.Syntax hiding (location)
 import Text.ParserCombinators.ReadP (eof, readP_to_S)
@@ -164,12 +168,13 @@ data Reselect = Reselect
   deriving anyclass (Hashable, NFData)
 
 data OrderBy = OrderBy
-  { orderByFieldName :: FieldName,
+  { orderByExpression :: Expression,
+    orderByFieldName :: FieldName,
     orderByOrder :: Order,
     orderByNullsOrder :: NullsOrder
   }
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
-  deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
+  deriving anyclass (Hashable, NFData)
 
 data Order
   = AscOrder
@@ -213,7 +218,7 @@ data WindowFunction
   = -- | ROW_NUMBER() OVER(PARTITION BY field)
     RowNumberOverPartitionBy (NonEmpty FieldName) (Maybe (NonEmpty OrderBy))
   deriving stock (Eq, Show, Generic, Data, Lift, Ord)
-  deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
+  deriving anyclass (Hashable, NFData)
 
 data JoinType = LeftOuter | Inner
   deriving stock (Eq, Show, Generic, Data, Lift, Ord)
@@ -325,18 +330,45 @@ data JsonPath
   deriving anyclass (FromJSON, Hashable, NFData, ToJSON)
 
 data Aggregate
-  = CountAggregate (Countable FieldName)
+  = CountAggregate (Countable Expression)
   | OpAggregates Text (NonEmpty (Text, Expression))
   | OpAggregate Text Expression
   | TextAggregate Text
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
   deriving anyclass (Hashable, NFData)
 
+newtype CountType field = CountType {getCountType :: Countable (ColumnName, AnnRedactionExp 'BigQuery field)}
+
+deriving stock instance (Backend.Backend 'BigQuery) => Foldable CountType
+
+deriving stock instance (Backend.Backend 'BigQuery) => Functor CountType
+
+deriving stock instance (Backend.Backend 'BigQuery) => Traversable CountType
+
+deriving stock instance
+  ( Backend.Backend 'BigQuery,
+    Eq field,
+    Eq (Backend.AggregationPredicates 'BigQuery field),
+    Eq (Backend.BooleanOperators 'BigQuery field),
+    Eq (Backend.FunctionArgumentExp 'BigQuery field)
+  ) =>
+  Eq (CountType field)
+
+deriving stock instance
+  ( Backend.Backend 'BigQuery,
+    Show field,
+    Show (Backend.AggregationPredicates 'BigQuery field),
+    Show (Backend.BooleanOperators 'BigQuery field),
+    Show (Backend.FunctionArgumentExp 'BigQuery field)
+  ) =>
+  Show (CountType field)
+
 data Countable fieldname
   = StarCountable
   | NonNullFieldCountable (NonEmpty fieldname)
   | DistinctCountable (NonEmpty fieldname)
   deriving stock (Eq, Ord, Show, Generic, Data, Lift)
+  deriving stock (Foldable, Functor, Traversable)
 
 deriving anyclass instance (FromJSON a) => FromJSON (Countable a)
 
@@ -639,25 +671,61 @@ data ScalarType
   | StructScalarType
   deriving stock (Show, Eq, Ord, Bounded, Enum, Generic, Data, Lift)
   deriving anyclass (Hashable, NFData, ToJSONKey)
-  deriving (FromJSON, ToJSON) via AC.Autodocodec ScalarType
 
+-- I do not know how to make Autodocodec case-insensitive or strip out the
+-- length stuff, so here we are
 instance HasCodec ScalarType where
-  codec = AC.named "ScalarType"
-    $ boundedEnumCodec \case
-      StringScalarType -> "STRING"
-      BytesScalarType -> "BYTES"
-      IntegerScalarType -> "INT64"
-      FloatScalarType -> "FLOAT64"
-      BoolScalarType -> "BOOL"
-      TimestampScalarType -> "TIMESTAMP"
-      DateScalarType -> "DATE"
-      TimeScalarType -> "TIME"
-      DatetimeScalarType -> "DATETIME"
-      GeographyScalarType -> "GEOGRAPHY"
-      DecimalScalarType -> "DECIMAL"
-      BigDecimalScalarType -> "BIGDECIMAL"
-      JsonScalarType -> "JSON"
-      StructScalarType -> "STRUCT"
+  codec =
+    AC.CommentCodec
+      ("A scalar type for BigQuery")
+      $ placeholderCodecViaJSON
+
+-- https://hasura.io/docs/latest/schema/bigquery/bigquery-types/
+instance FromJSON ScalarType where
+  parseJSON (J.String s) = parseScalarType (T.toLower s)
+    where
+      parseScalarType = \case
+        "string" -> pure StringScalarType
+        "bytes" -> pure BytesScalarType
+        "integer" -> pure IntegerScalarType
+        "int64" -> pure IntegerScalarType
+        "float" -> pure FloatScalarType
+        "float64" -> pure FloatScalarType
+        "bool" -> pure BoolScalarType
+        "timestamp" -> pure TimestampScalarType
+        "date" -> pure DateScalarType
+        "time" -> pure TimeScalarType
+        "datetime" -> pure DatetimeScalarType
+        "geography" -> pure GeographyScalarType
+        "decimal" -> pure DecimalScalarType
+        "numeric" -> pure DecimalScalarType
+        "bigdecimal" -> pure BigDecimalScalarType
+        "bignumeric" -> pure BigDecimalScalarType
+        "json" -> pure JsonScalarType
+        "struct" -> pure StructScalarType
+        t ->
+          -- if the type is something like `varchar(127)`, try stripping off the data length
+          if T.isInfixOf "(" t
+            then parseScalarType (T.takeWhile (\c -> c /= '(') t)
+            else fail $ "Did not recognize scalar type '" <> T.unpack t <> "'"
+  parseJSON _ = fail "expected a string"
+
+instance ToJSON ScalarType where
+  toJSON = \case
+    StringScalarType -> "STRING"
+    BytesScalarType -> "BYTES"
+    IntegerScalarType -> "INT64"
+    FloatScalarType -> "FLOAT64"
+    BoolScalarType -> "BOOL"
+    TimestampScalarType -> "TIMESTAMP"
+    DateScalarType -> "DATE"
+    TimeScalarType -> "TIME"
+    DatetimeScalarType -> "DATETIME"
+    GeographyScalarType -> "GEOGRAPHY"
+    DecimalScalarType -> "DECIMAL"
+    BigDecimalScalarType -> "BIGDECIMAL"
+    JsonScalarType -> "JSON"
+    StructScalarType -> "STRUCT"
 
 instance ToTxt ScalarType where toTxt = tshow
 

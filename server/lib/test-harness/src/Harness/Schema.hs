@@ -11,7 +11,6 @@ module Harness.Schema
     BackendScalarType (..),
     BackendScalarValue (..),
     BackendScalarValueType (..),
-    ManualRelationship (..),
     SchemaName (..),
     NativeQuery (..),
     NativeQueryColumn (..),
@@ -31,6 +30,7 @@ module Harness.Schema
     untrackRelationships,
     mkObjectRelationshipName,
     mkArrayRelationshipName,
+    createTableToNativeQueryRelationship,
     trackFunction,
     untrackFunction,
     trackComputedField,
@@ -305,6 +305,14 @@ mkObjectRelationshipName Reference {referenceLocalColumn, referenceTargetTable, 
         Nothing -> referenceTargetColumn
    in referenceTargetTable <> "_by_" <> referenceLocalColumn <> "_to_" <> columnName
 
+-- | Helper to create the object relationship name
+mkNativeQueryRelationshipName :: NativeQueryRelationship -> Text
+mkNativeQueryRelationshipName NativeQueryRelationship {nqRelationshipLocalColumn, nqRelationshipTarget, nqRelationshipType} =
+  let joiner = case nqRelationshipType of
+        ObjectRelationship -> "_object_by_"
+        ArrayRelationship -> "_array_by_"
+   in nqRelationshipTarget <> joiner <> nqRelationshipLocalColumn <> "_to_" <> nqRelationshipLocalColumn
+
 -- | Build an 'J.Value' representing a 'BackendType' specific @TableName@.
 mkTableField :: BackendTypeConfig -> SchemaName -> Text -> J.Value
 mkTableField backendTypeMetadata schemaName tableName =
@@ -318,9 +326,13 @@ mkTableField backendTypeMetadata schemaName tableName =
         BackendType.Cockroach -> nativeFieldName
         BackendType.DataConnector _ -> dcFieldName
 
+mkInsertionOrder :: InsertOrder -> Text
+mkInsertionOrder BeforeParent = "before_parent"
+mkInsertionOrder AfterParent = "after_parent"
+
 -- | Unified track object relationships
 trackObjectRelationships :: (HasCallStack) => Table -> TestEnvironment -> IO ()
-trackObjectRelationships tbl@(Table {tableName, tableReferences, tableManualRelationships}) testEnvironment = do
+trackObjectRelationships tbl@(Table {tableName, tableReferences, tableNativeQueryRelationships, tableManualRelationships}) testEnvironment = do
   let backendTypeMetadata = fromMaybe (error "Unknown backend") $ getBackendTypeConfig testEnvironment
       localSchema = resolveTableSchema testEnvironment tbl
       backendType = BackendType.backendTypeString backendTypeMetadata
@@ -342,21 +354,30 @@ trackObjectRelationships tbl@(Table {tableName, tableReferences, tableManualRela
             foreign_key_constraint_on: *referenceLocalColumn
       |]
 
-  for_ tableManualRelationships $ \ref@Reference {referenceLocalColumn, referenceTargetTable, referenceTargetColumn, referenceTargetQualifiers} -> do
-    let targetSchema = case resolveReferenceSchema referenceTargetQualifiers of
-          Just schema -> schema
-          Nothing -> getSchemaName testEnvironment
-        relationshipName = mkObjectRelationshipName ref
-        targetTableField = mkTableField backendTypeMetadata targetSchema referenceTargetTable
-        manualConfiguration :: J.Value
-        manualConfiguration =
-          J.object
-            [ "remote_table" .= targetTableField,
-              "column_mapping"
-                .= J.object [K.fromText referenceLocalColumn .= referenceTargetColumn]
-            ]
-        payload =
-          [yaml|
+  for_ tableManualRelationships
+    $ \ref@Reference
+         { referenceLocalColumn,
+           referenceTargetTable,
+           referenceTargetColumn,
+           referenceTargetQualifiers,
+           referenceInsertionOrder
+         } -> do
+        let targetSchema = case resolveReferenceSchema referenceTargetQualifiers of
+              Just schema -> schema
+              Nothing -> getSchemaName testEnvironment
+            relationshipName = mkObjectRelationshipName ref
+            insertion_order = mkInsertionOrder referenceInsertionOrder
+            targetTableField = mkTableField backendTypeMetadata targetSchema referenceTargetTable
+            manualConfiguration :: J.Value
+            manualConfiguration =
+              J.object
+                [ "remote_table" .= targetTableField,
+                  "column_mapping"
+                    .= J.object [K.fromText referenceLocalColumn .= referenceTargetColumn],
+                  "insertion_order" .= J.String insertion_order
+                ]
+            payload =
+              [yaml|
             type: *requestType
             args:
               source: *source
@@ -366,7 +387,61 @@ trackObjectRelationships tbl@(Table {tableName, tableReferences, tableManualRela
                 manual_configuration: *manualConfiguration
           |]
 
-    GraphqlEngine.postMetadata_ testEnvironment payload
+        GraphqlEngine.postMetadata_ testEnvironment payload
+
+  for_ tableNativeQueryRelationships
+    $ \relationship ->
+      GraphqlEngine.postMetadata_
+        testEnvironment
+        (createTableToNativeQueryRelationship testEnvironment localSchema tableName relationship)
+
+createTableToNativeQueryRelationship :: TestEnvironment -> SchemaName -> Text -> NativeQueryRelationship -> Value
+createTableToNativeQueryRelationship testEnvironment localSchema tableName ref@NativeQueryRelationship {nqRelationshipLocalColumn, nqRelationshipTarget, nqRelationshipTargetColumn, nqRelationshipType} =
+  let backendTypeMetadata = fromMaybe (error "Unknown backend") $ getBackendTypeConfig testEnvironment
+      tableField = mkTableField backendTypeMetadata localSchema tableName
+      source = BackendType.backendSourceName backendTypeMetadata
+      backendType = BackendType.backendTypeString backendTypeMetadata
+      relationshipName = mkNativeQueryRelationshipName ref
+   in case nqRelationshipType of
+        ArrayRelationship ->
+          let manualConfiguration :: J.Value
+              manualConfiguration =
+                J.object
+                  [ "remote_native_query" .= nqRelationshipTarget,
+                    "column_mapping"
+                      .= J.object [K.fromText nqRelationshipLocalColumn .= nqRelationshipTargetColumn],
+                    "insertion_order" .= J.Null
+                  ]
+              requestType = backendType <> "_create_array_relationship"
+           in [yaml|
+                type: *requestType
+                args:
+                  source: *source
+                  table: *tableField
+                  name: *relationshipName
+                  using:
+                    manual_configuration: *manualConfiguration
+              |]
+        ObjectRelationship ->
+          let manualConfiguration :: J.Value
+              manualConfiguration =
+                J.object
+                  [ "remote_native_query" .= nqRelationshipTarget,
+                    "column_mapping"
+                      .= J.object [K.fromText nqRelationshipLocalColumn .= nqRelationshipTargetColumn],
+                    "insertion_order" .= J.Null
+                  ]
+
+              requestType = backendType <> "_create_object_relationship"
+           in [yaml|
+                type: *requestType
+                args:
+                  source: *source
+                  table: *tableField
+                  name: *relationshipName
+                  using:
+                    manual_configuration: *manualConfiguration
+              |]
 
 -- | Helper to create the array relationship name
 mkArrayRelationshipName :: Text -> Text -> Text -> [Text] -> Text
@@ -378,7 +453,7 @@ mkArrayRelationshipName tableName referenceLocalColumn referenceTargetColumn ref
 
 -- | Unified track array relationships
 trackArrayRelationships :: (HasCallStack) => Table -> TestEnvironment -> IO ()
-trackArrayRelationships tbl@(Table {tableName, tableReferences, tableManualRelationships}) testEnvironment = do
+trackArrayRelationships tbl@(Table {tableName, tableReferences, tableNativeQueryRelationships, tableManualRelationships}) testEnvironment = do
   let backendTypeMetadata = fromMaybe (error "Unknown backend") $ getBackendTypeConfig testEnvironment
       localSchema = resolveTableSchema testEnvironment tbl
       backendType = BackendType.backendTypeString backendTypeMetadata
@@ -386,15 +461,21 @@ trackArrayRelationships tbl@(Table {tableName, tableReferences, tableManualRelat
       tableField = mkTableField backendTypeMetadata localSchema tableName
       requestType = backendType <> "_create_array_relationship"
 
-  for_ tableReferences $ \Reference {referenceLocalColumn, referenceTargetTable, referenceTargetColumn, referenceTargetQualifiers} -> do
-    let targetSchema = case resolveReferenceSchema referenceTargetQualifiers of
-          Just schema -> schema
-          Nothing -> getSchemaName testEnvironment
-        relationshipName = mkArrayRelationshipName tableName referenceTargetColumn referenceLocalColumn referenceTargetQualifiers
-        targetTableField = mkTableField backendTypeMetadata targetSchema referenceTargetTable
-    GraphqlEngine.postMetadata_
-      testEnvironment
-      [yaml|
+  for_ tableReferences
+    $ \Reference
+         { referenceLocalColumn,
+           referenceTargetTable,
+           referenceTargetColumn,
+           referenceTargetQualifiers
+         } -> do
+        let targetSchema = case resolveReferenceSchema referenceTargetQualifiers of
+              Just schema -> schema
+              Nothing -> getSchemaName testEnvironment
+            relationshipName = mkArrayRelationshipName tableName referenceTargetColumn referenceLocalColumn referenceTargetQualifiers
+            targetTableField = mkTableField backendTypeMetadata targetSchema referenceTargetTable
+        GraphqlEngine.postMetadata_
+          testEnvironment
+          [yaml|
         type: *requestType
         args:
           source: *source
@@ -406,32 +487,47 @@ trackArrayRelationships tbl@(Table {tableName, tableReferences, tableManualRelat
               column: *referenceLocalColumn
       |]
 
-  for_ tableManualRelationships $ \Reference {referenceLocalColumn, referenceTargetTable, referenceTargetColumn, referenceTargetQualifiers} -> do
-    let targetSchema = case resolveReferenceSchema referenceTargetQualifiers of
-          Just schema -> schema
-          Nothing -> getSchemaName testEnvironment
-        relationshipName = mkArrayRelationshipName tableName referenceTargetColumn referenceLocalColumn referenceTargetQualifiers
-        targetTableField = mkTableField backendTypeMetadata targetSchema referenceTargetTable
-        manualConfiguration :: J.Value
-        manualConfiguration =
-          J.object
-            [ "remote_table"
-                .= tableField,
-              "column_mapping"
-                .= J.object [K.fromText referenceTargetColumn .= referenceLocalColumn]
-            ]
-        payload =
-          [yaml|
-type: *requestType
-args:
-  source: *source
-  table: *targetTableField
-  name: *relationshipName
-  using:
-    manual_configuration: *manualConfiguration
-|]
+  for_ tableManualRelationships
+    $ \Reference
+         { referenceLocalColumn,
+           referenceTargetTable,
+           referenceTargetColumn,
+           referenceTargetQualifiers,
+           referenceInsertionOrder
+         } -> do
+        let targetSchema = case resolveReferenceSchema referenceTargetQualifiers of
+              Just schema -> schema
+              Nothing -> getSchemaName testEnvironment
+            relationshipName = mkArrayRelationshipName tableName referenceTargetColumn referenceLocalColumn referenceTargetQualifiers
+            targetTableField = mkTableField backendTypeMetadata targetSchema referenceTargetTable
+            insertion_order = mkInsertionOrder referenceInsertionOrder
+            manualConfiguration :: J.Value
+            manualConfiguration =
+              J.object
+                [ "remote_table"
+                    .= tableField,
+                  "column_mapping"
+                    .= J.object [K.fromText referenceTargetColumn .= referenceLocalColumn],
+                  "insertion_order" .= J.String insertion_order
+                ]
+            payload =
+              [yaml|
+                type: *requestType
+                args:
+                  source: *source
+                  table: *targetTableField
+                  name: *relationshipName
+                  using:
+                    manual_configuration: *manualConfiguration
+                |]
 
-    GraphqlEngine.postMetadata_ testEnvironment payload
+        GraphqlEngine.postMetadata_ testEnvironment payload
+
+  for_ tableNativeQueryRelationships
+    $ \relationship ->
+      GraphqlEngine.postMetadata_
+        testEnvironment
+        (createTableToNativeQueryRelationship testEnvironment localSchema tableName relationship)
 
 -- | Unified untrack relationships
 untrackRelationships :: (HasCallStack) => Table -> TestEnvironment -> IO ()

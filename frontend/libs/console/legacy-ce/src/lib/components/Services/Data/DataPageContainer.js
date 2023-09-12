@@ -1,35 +1,26 @@
-import React, { useEffect } from 'react';
 import { Link } from 'react-router';
-import { Analytics, REDACT_EVERYTHING } from '../../../features/Analytics';
 import globals from '../../../Globals';
+import { Analytics, REDACT_EVERYTHING } from '../../../features/Analytics';
 
-import LeftContainer from '../../Common/Layout/LeftContainer/LeftContainer';
-import PageContainer from '../../Common/Layout/PageContainer/PageContainer';
-import DataSubSidebar from './DataSubSidebar';
+import clsx from 'clsx';
 import { CLI_CONSOLE_MODE } from '../../../constants';
+import { Sidebar as NewSidebar } from '../../../features/DataSidebar/Sidebar';
+import { SIDEBAR_ID } from '../../../features/DataSidebar/constants';
+import {
+  availableFeatureFlagIds,
+  useIsFeatureFlagEnabled,
+} from '../../../features/FeatureFlags';
+import { useMetadata } from '../../../features/hasura-metadata-api';
+import PageContainer from '../../Common/Layout/PageContainer/PageContainer';
 import styles from '../../Common/TableCommon/Table.module.scss';
-import { isFeatureSupported } from '../../../dataSources';
-import { fetchPostgresVersion } from '../../Main/Actions';
-// import { useEnvironmentState } from '../../../features/ConnectDBRedesign/hooks';
+import DataSubSidebar from './DataSubSidebar';
 
-const DataPageContainer = ({
-  children,
-  location,
-  dispatch,
-  currentDataSource,
-}) => {
-  // const { consoleType } = useEnvironmentState();
-  useEffect(() => {
-    // TODO: handle for different drivers
-    if (
-      currentDataSource &&
-      isFeatureSupported('driver.fetchVersion.enabled')
-    ) {
-      dispatch(fetchPostgresVersion);
-    }
-  }, [dispatch, currentDataSource]);
-
+const DataPageContainer = ({ children, location }) => {
   const currentLocation = location.pathname;
+
+  const { data: areSourcesPresent = false } = useMetadata(
+    m => !!m.metadata.sources.length
+  );
 
   let migrationTab = null;
   if (globals.consoleMode === CLI_CONSOLE_MODE) {
@@ -47,7 +38,7 @@ const DataPageContainer = ({
     );
   }
 
-  const sidebarContent = (
+  const legacySidebarContent = (
     <Analytics name="DataPageContainerSidebar" {...REDACT_EVERYTHING}>
       <ul className="bootstrap-jail">
         <li
@@ -70,7 +61,7 @@ const DataPageContainer = ({
 
           <DataSubSidebar />
         </li>
-        {currentDataSource && (
+        {areSourcesPresent && (
           <>
             <li
               role="presentation"
@@ -101,6 +92,22 @@ const DataPageContainer = ({
                 Native Queries
               </Link>
             </li>
+            <li
+              role="presentation"
+              className={
+                currentLocation.includes('/model-count-summary')
+                  ? styles.active
+                  : ''
+              }
+            >
+              <Link
+                className={styles.linkBorder}
+                to={`/data/model-count-summary`}
+                data-test="model-count-summary"
+              >
+                Model Summary
+              </Link>
+            </li>
           </>
         )}
         {migrationTab}
@@ -110,7 +117,22 @@ const DataPageContainer = ({
 
   const helmet = 'Data | Hasura';
 
-  const leftContainer = <LeftContainer>{sidebarContent}</LeftContainer>;
+  const { enabled: performanceModeEnabled } = useIsFeatureFlagEnabled(
+    availableFeatureFlagIds.performanceMode
+  );
+
+  const leftContainer = (
+    <div
+      id={SIDEBAR_ID}
+      className={clsx(
+        !performanceModeEnabled &&
+          `${styles.pageSidebar} ${styles.padd_remove}`,
+        performanceModeEnabled && `h-[calc(100vh-56px)]`
+      )}
+    >
+      {performanceModeEnabled ? <NewSidebar /> : legacySidebarContent}
+    </div>
+  );
 
   return (
     <PageContainer helmet={helmet} leftContainer={leftContainer}>

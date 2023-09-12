@@ -53,9 +53,10 @@ import Data.Sequence qualified as Seq
 import Data.Text.Extended
 import Hasura.Base.Error
 import Hasura.Incremental qualified as Inc
-import Hasura.LogicalModel.Types (LogicalModelName)
+import Hasura.LogicalModel.Types (LogicalModelLocation (..), LogicalModelName)
 import Hasura.Prelude
 import Hasura.RQL.DDL.Schema.Cache.Config
+import Hasura.RQL.DDL.SchemaRegistry (SchemaRegistryAction)
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
@@ -134,7 +135,8 @@ data TableBuildInput b = TableBuildInput
   { _tbiName :: TableName b,
     _tbiIsEnum :: Bool,
     _tbiConfiguration :: TableConfig b,
-    _tbiApolloFederationConfig :: Maybe ApolloFederationConfig
+    _tbiApolloFederationConfig :: Maybe ApolloFederationConfig,
+    _tbiLogicalModel :: Maybe LogicalModelName
   }
   deriving (Show, Eq, Generic)
 
@@ -167,7 +169,7 @@ mkTableInputs ::
 mkTableInputs TableMetadata {..} =
   (buildInput, nonColumns, permissions)
   where
-    buildInput = TableBuildInput _tmTable _tmIsEnum _tmConfiguration _tmApolloFederationConfig
+    buildInput = TableBuildInput _tmTable _tmIsEnum _tmConfiguration _tmApolloFederationConfig _tmLogicalModel
     nonColumns =
       NonColumnTableInputs
         _tmTable
@@ -273,7 +275,7 @@ data SourcesIntrospectionStatus
 data RebuildableSchemaCache = RebuildableSchemaCache
   { lastBuiltSchemaCache :: SchemaCache,
     _rscInvalidationMap :: InvalidationKeys,
-    _rscRebuild :: Inc.Rule (ReaderT BuildReason CacheBuild) (MetadataWithResourceVersion, CacheDynamicConfig, InvalidationKeys, Maybe StoredIntrospection) (SchemaCache, SourcesIntrospectionStatus)
+    _rscRebuild :: Inc.Rule (ReaderT BuildReason CacheBuild) (MetadataWithResourceVersion, CacheDynamicConfig, InvalidationKeys, Maybe StoredIntrospection) (SchemaCache, (SourcesIntrospectionStatus, SchemaRegistryAction))
   }
 
 withRecordDependencies ::
@@ -387,5 +389,6 @@ buildInfoMapPreservingMetadataM extractKey mkMetadataObject buildInfo =
 addTableContext :: (Backend b) => TableName b -> Text -> Text
 addTableContext tableName e = "in table " <> tableName <<> ": " <> e
 
-addLogicalModelContext :: LogicalModelName -> Text -> Text
-addLogicalModelContext logicalModelName e = "in logical model " <> logicalModelName <<> ": " <> e
+addLogicalModelContext :: LogicalModelLocation -> Text -> Text
+addLogicalModelContext (LMLLogicalModel logicalModelName) e = "in logical model " <> logicalModelName <<> ": " <> e
+addLogicalModelContext (LMLNativeQuery nativeQueryName) e = "in logical model for native query" <> nativeQueryName <<> ": " <> e

@@ -6,9 +6,13 @@ export const postgresCapabilities: Capabilities = {
     update: {},
     delete: {},
   },
-  queries: {},
+  queries: {
+    foreach: {},
+  },
+  relationships: {},
   user_defined_functions: {},
   data_schema: {
     supports_foreign_keys: true,
   },
+  interpolated_queries: {},
 };

@@ -253,6 +253,9 @@ instance FromEnv Options.RemoteSchemaPermissions where
 instance FromEnv Options.DangerouslyCollapseBooleans where
   fromEnv = fmap (bool Options.Don'tDangerouslyCollapseBooleans Options.DangerouslyCollapseBooleans) . fromEnv @Bool
 
+instance FromEnv Options.RemoteNullForwardingPolicy where
+  fromEnv = fmap (bool Options.RemoteForwardAccurately Options.RemoteOnlyForwardNonNull) . fromEnv @Bool
+
 instance FromEnv Options.InferFunctionPermissions where
   fromEnv = fmap (bool Options.Don'tInferFunctionPermissions Options.InferFunctionPermissions) . fromEnv @Bool
 
@@ -346,8 +349,8 @@ instance FromEnv Logging.LogLevel where
     "error" -> Right Logging.LevelError
     _ -> Left "Valid log levels: debug, info, warn or error"
 
-instance FromEnv Template.URLTemplate where
-  fromEnv = Template.parseURLTemplate . Text.pack
+instance FromEnv Template.Template where
+  fromEnv = Template.parseTemplate . Text.pack
 
 instance (Num a, Ord a, FromEnv a) => FromEnv (Refined NonNegative a) where
   fromEnv s =
@@ -375,3 +378,6 @@ instance FromEnv GranularPrometheusMetricsState where
 
 instance FromEnv Server.Types.CloseWebsocketsOnMetadataChangeStatus where
   fromEnv = fmap (bool Server.Types.CWMCDisabled Server.Types.CWMCEnabled) . fromEnv @Bool
+
+instance FromEnv Server.Types.TriggersErrorLogLevelStatus where
+  fromEnv = fmap (bool Server.Types.TriggersErrorLogLevelDisabled Server.Types.TriggersErrorLogLevelEnabled) . fromEnv @Bool

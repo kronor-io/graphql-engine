@@ -108,6 +108,7 @@ buildGQLContext ::
   ( MonadError QErr m,
     MonadIO m
   ) =>
+  SchemaSampledFeatureFlags ->
   Options.InferFunctionPermissions ->
   Options.RemoteSchemaPermissions ->
   HashSet ExperimentalFeature ->
@@ -133,6 +134,7 @@ buildGQLContext ::
       SchemaRegistryAction
     )
 buildGQLContext
+  sampledFeatureFlags
   functionPermissions
   remoteSchemaPermissions
   experimentalFeatures
@@ -165,6 +167,7 @@ buildGQLContext
           (role,)
             <$> concurrentlyEIO
               ( buildRoleContext
+                  sampledFeatureFlags
                   (sqlGen, functionPermissions)
                   sources
                   allRemoteSchemas
@@ -183,37 +186,44 @@ buildGQLContext
                   customTypes
                   role
                   experimentalFeatures
+                  sampledFeatureFlags
               )
     let hasuraContexts = fst <$> contexts
         relayContexts = snd <$> contexts
 
-    (adminErrs, adminIntrospection) <-
+    adminIntrospection <-
       case HashMap.lookup adminRoleName hasuraContexts of
-        Just (_context, errors, introspection) -> pure (errors, introspection)
+        Just (_context, _errors, introspection) -> pure introspection
         Nothing -> throw500 "buildGQLContext failed to build for the admin role"
-    (unauthenticated, unauthenticatedRemotesErrors) <- unauthenticatedContext (sqlGen, functionPermissions) sources allRemoteSchemas experimentalFeatures remoteSchemaPermissions
+    (unauthenticated, unauthenticatedRemotesErrors) <- unauthenticatedContext (sqlGen, functionPermissions) sources allRemoteSchemas experimentalFeatures sampledFeatureFlags remoteSchemaPermissions
 
     writeToSchemaRegistryAction <-
       forM mSchemaRegistryContext $ \schemaRegistryCtx -> do
+        -- NOTE!: Where this code path is reached it's absolutely crucial that
+        -- we have a thread reading, otherwise we have an unbounded space leak
         res <- liftIO $ runExceptT $ PG.runTx' (_srpaMetadataDbPoolRef schemaRegistryCtx) selectNowQuery
         case res of
           Left err ->
-            pure $ \_ ->
+            pure $ \_ _ _ ->
               unLogger logger $ mkGenericLog @Text LevelWarn "schema-registry" ("failed to fetch the time from metadata db correctly: " <> showQErr err)
           Right now -> do
             let schemaRegistryMap = generateSchemaRegistryMap hasuraContexts
-                projectSchemaInfo = \metadataResourceVersion ->
+                projectSchemaInfo = \metadataResourceVersion inconsistentMetadata metadata ->
                   ProjectGQLSchemaInformation
                     schemaRegistryMap
-                    (IsMetadataInconsistent $ checkMdErrs adminErrs)
+                    (IsMetadataInconsistent $ checkMdErrs inconsistentMetadata)
                     (calculateSchemaSDLHash (generateSDL adminIntrospection) adminRoleName)
                     metadataResourceVersion
                     now
+                    metadata
             pure
-              $ \metadataResourceVersion ->
+              $ \metadataResourceVersion inconsistentMetadata metadata ->
                 STM.atomically
                   $ STM.writeTQueue (_srpaSchemaRegistryTQueueRef schemaRegistryCtx)
-                  $ projectSchemaInfo metadataResourceVersion
+                  -- NOTE!: this is a rare case where we'd like this to be a thunk
+                  -- because it is significant work we can avoid entirely in
+                  -- EE, where this queue is just drained and items discarded
+                  $ projectSchemaInfo metadataResourceVersion inconsistentMetadata metadata
 
     pure
       ( ( adminIntrospection,
@@ -230,7 +240,7 @@ buildGQLContext
         writeToSchemaRegistryAction
       )
     where
-      checkMdErrs = not . Set.null
+      checkMdErrs = not . null
 
       generateSchemaRegistryMap :: HashMap RoleName RoleContextValue -> SchemaRegistryMap
       generateSchemaRegistryMap mpr =
@@ -243,13 +253,14 @@ buildSchemaOptions ::
   HashSet ExperimentalFeature ->
   SchemaOptions
 buildSchemaOptions
-  ( SQLGenCtx stringifyNum dangerousBooleanCollapse optimizePermissionFilters bigqueryStringNumericInput,
+  ( SQLGenCtx stringifyNum dangerousBooleanCollapse remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput,
     functionPermsCtx
     )
   expFeatures =
     SchemaOptions
       { soStringifyNumbers = stringifyNum,
         soDangerousBooleanCollapse = dangerousBooleanCollapse,
+        soRemoteNullForwardingPolicy = remoteNullForwardingPolicy,
         soInferFunctionPermissions = functionPermsCtx,
         soOptimizePermissionFilters = optimizePermissionFilters,
         soIncludeUpdateManyFields =
@@ -264,13 +275,22 @@ buildSchemaOptions
           if EFHideStreamFields `Set.member` expFeatures
             then Options.Don'tIncludeStreamFields
             else Options.IncludeStreamFields,
-        soBigQueryStringNumericInput = bigqueryStringNumericInput
+        soBigQueryStringNumericInput = bigqueryStringNumericInput,
+        soIncludeGroupByAggregateFields =
+          if EFGroupByAggregations `Set.member` expFeatures
+            then Options.IncludeGroupByAggregateFields
+            else Options.ExcludeGroupByAggregateFields,
+        soPostgresArrays =
+          if EFDisablePostgresArrays `Set.member` expFeatures
+            then Options.DontUsePostgresArrays
+            else Options.UsePostgresArrays
       }
 
 -- | Build the @QueryHasura@ context for a given role.
 buildRoleContext ::
   forall m.
   (MonadError QErr m, MonadIO m) =>
+  SchemaSampledFeatureFlags ->
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   SourceCache ->
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
@@ -282,7 +302,7 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContext sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -296,6 +316,7 @@ buildRoleContext options sources remotes actions customTypes role remoteSchemaPe
               IncludeRemoteSourceRelationship
           )
           role
+          sampledFeatureFlags
   runMemoizeT $ do
     -- build all sources (`apolloFedTableParsers` contains all the parsers and
     -- type names, which are eligible for the `_Entity` Union)
@@ -306,7 +327,7 @@ buildRoleContext options sources remotes actions customTypes role remoteSchemaPe
     -- build all remote schemas
     -- we only keep the ones that don't result in a name conflict
     (remoteSchemaFields, !remoteSchemaErrors) <-
-      runRemoteSchema schemaContext
+      runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions)
         $ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationBackendFields role remoteSchemaPermsCtx
     let remotesQueryFields = concatMap piQuery remoteSchemaFields
         remotesMutationFields = concat $ mapMaybe piMutation remoteSchemaFields
@@ -438,8 +459,9 @@ buildRelayRoleContext ::
   AnnotatedCustomTypes ->
   RoleName ->
   Set.HashSet ExperimentalFeature ->
+  SchemaSampledFeatureFlags ->
   m (RoleContext GQLContext)
-buildRelayRoleContext options sources actions customTypes role expFeatures = do
+buildRelayRoleContext options sources actions customTypes role expFeatures schemaSampledFeatureFlags = do
   let schemaOptions = buildSchemaOptions options expFeatures
       -- TODO: At the time of writing this, remote schema queries are not supported in relay.
       -- When they are supported, we should get do what `buildRoleContext` does. Since, they
@@ -451,6 +473,7 @@ buildRelayRoleContext options sources actions customTypes role expFeatures = do
           -- introspection issues such as https://github.com/hasura/graphql-engine/issues/5144.
           ignoreRemoteRelationship
           role
+          schemaSampledFeatureFlags
   runMemoizeT do
     -- build all sources, and the node root
     (node, fieldsList) <- do
@@ -570,9 +593,10 @@ unauthenticatedContext ::
   SourceCache ->
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
   Set.HashSet ExperimentalFeature ->
+  SchemaSampledFeatureFlags ->
   Options.RemoteSchemaPermissions ->
   m (GQLContext, HashSet InconsistentMetadata)
-unauthenticatedContext options sources allRemotes expFeatures remoteSchemaPermsCtx = do
+unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatureFlags remoteSchemaPermsCtx = do
   let schemaOptions = buildSchemaOptions options expFeatures
       fakeSchemaContext =
         SchemaContext
@@ -590,6 +614,7 @@ unauthenticatedContext options sources allRemotes expFeatures remoteSchemaPermsC
               ExcludeRemoteSourceRelationship
           )
           fakeRole
+          schemaSampledFeatureFlags
       -- chosen arbitrarily to be as improbable as possible
       fakeRole = mkRoleNameSafe [NT.nonEmptyTextQQ|MyNameIsOzymandiasKingOfKingsLookOnMyWorksYeMightyAndDespair|]
 
@@ -601,7 +626,7 @@ unauthenticatedContext options sources allRemotes expFeatures remoteSchemaPermsC
       Options.DisableRemoteSchemaPermissions -> do
         -- Permissions are disabled, unauthenticated users have access to remote schemas.
         (remoteFields, remoteSchemaErrors) <-
-          runRemoteSchema fakeSchemaContext
+          runRemoteSchema fakeSchemaContext (soRemoteNullForwardingPolicy schemaOptions)
             $ buildAndValidateRemoteSchemas allRemotes [] [] fakeRole remoteSchemaPermsCtx
         pure
           ( fmap (fmap RFRemote) <$> concatMap piQuery remoteFields,
@@ -641,6 +666,7 @@ buildAndValidateRemoteSchemas ::
   Options.RemoteSchemaPermissions ->
   SchemaT
     ( SchemaContext,
+      Options.RemoteNullForwardingPolicy,
       MkTypename,
       CustomizeRemoteFieldName
     )
@@ -698,6 +724,7 @@ buildRemoteSchemaParser ::
   RemoteSchemaCtx ->
   SchemaT
     ( SchemaContext,
+      Options.RemoteNullForwardingPolicy,
       MkTypename,
       CustomizeRemoteFieldName
     )

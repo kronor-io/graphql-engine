@@ -8,7 +8,8 @@ import { isEmpty } from './components/Common/utils/jsUtils';
 import { stripTrailingSlash } from './components/Common/utils/urlUtils';
 
 import { SERVER_CONSOLE_MODE } from './constants';
-import { parseConsoleType, ConsoleType } from './utils/envUtils';
+import { ConsoleType, parseConsoleType } from './utils/envUtils';
+import { storybookGlobals } from './storybook/decorators/console-type/storybook-globals';
 
 export type LuxFeature =
   | 'DatadogIntegration'
@@ -88,6 +89,8 @@ type CloudServerEnv = {
   userRole: CloudUserRole;
   neonOAuthClientId?: string;
   neonRootDomain?: string;
+  slackOAuthClientId?: string;
+  slackRootDomain?: string;
   allowedLuxFeatures?: LuxFeature[];
   userId?: string;
   consoleSentryDsn?: string; // Corresponds to the HASURA_CONSOLE_SENTRY_DSN environment variable
@@ -134,9 +137,6 @@ export type CloudCliEnv = {
 type ProCliEnv = CloudCliEnv;
 type ProLiteCliEnv = CloudCliEnv;
 
-// Until this non-discriminated-union-based `EnvVars` exist, please keep the following spreadsheet
-// https://docs.google.com/spreadsheets/d/10feBESWKCfFuh7g9436Orp4i4fNoQxjnt5xxhrrdtJo/edit#gid=0
-// updated with all the env vars that the Console receives and their possible values. The spreadsheet acts as the source of truth for the environment variables, at the moment
 export type EnvVars = {
   nodeEnv?: string;
   apiHost?: string;
@@ -160,8 +160,11 @@ export type EnvVars = {
   userRole?: string;
   neonOAuthClientId?: string;
   neonRootDomain?: string;
+  slackOAuthClientId?: string;
+  slackRootDomain?: string;
   allowedLuxFeatures?: LuxFeature[];
   userId?: string;
+  userEmail?: string;
   cdnAssets?: boolean;
   consoleSentryDsn?: string; // Corresponds to the HASURA_CONSOLE_SENTRY_DSN environment variable
   launchDarklyClientId?: string;
@@ -215,6 +218,8 @@ const globals = {
   hasuraCloudProjectName: window.__env?.projectName,
   neonOAuthClientId: window.__env?.neonOAuthClientId,
   neonRootDomain: window.__env?.neonRootDomain,
+  slackOAuthClientId: window.__env?.slackOAuthClientId,
+  slackRootDomain: window.__env?.slackRootDomain,
   allowedLuxFeatures: window.__env?.allowedLuxFeatures || [],
   luxDataHost: window.__env?.luxDataHost
     ? stripTrailingSlash(window.__env.luxDataHost)
@@ -225,6 +230,7 @@ const globals = {
     : '',
   userRole: window.__env?.userRole || undefined,
   userId: window.__env?.userId || undefined,
+  userEmail: window.__env?.userEmail || undefined,
   consoleType: window.__env?.consoleType // FIXME : this check can be removed when the all CLI environments are set with the console type, some CLI environments could have empty consoleType
     ? parseConsoleType(window.__env?.consoleType)
     : ('' as ConsoleType),
@@ -267,4 +273,19 @@ if (globals.consoleMode === SERVER_CONSOLE_MODE) {
   }
 }
 
-export default globals;
+const globalsProxy = new Proxy(globals, {
+  get: (originalTarget, property) => {
+    // if running storybook, refer to the StorybookGlobals when the property matches a key of that object
+    // this allows us to manipulate certain properties without affecting the console
+    const target =
+      !!process.env.STORYBOOK && property in storybookGlobals
+        ? storybookGlobals
+        : originalTarget;
+
+    return Reflect.get(target, property);
+  },
+});
+
+const exportedGlobals = process.env.STORYBOOK ? globalsProxy : globals;
+
+export default exportedGlobals;

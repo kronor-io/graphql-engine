@@ -1,23 +1,16 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Hasura.LogicalModel.Metadata
   ( LogicalModelMetadata (..),
     LogicalModelName (..),
     WithLogicalModel (..),
-    lmmName,
-    lmmFields,
-    lmmDescription,
-    lmmSelectPermissions,
   )
 where
 
 import Autodocodec (Autodocodec (Autodocodec), HasCodec)
 import Autodocodec qualified as AC
-import Control.Lens (makeLenses)
 import Data.Aeson (FromJSON (parseJSON), ToJSON, (.!=), (.:), (.:?))
 import Data.Aeson qualified as J
-import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.HashMap.Strict.InsOrd.Autodocodec (sortedElemsCodec)
 import Hasura.LogicalModel.Types
 import Hasura.Prelude hiding (first)
@@ -31,13 +24,11 @@ import Hasura.RQL.Types.Roles (RoleName)
 -- | Description of a logical model for use in metadata (before schema cache)
 data LogicalModelMetadata (b :: BackendType) = LogicalModelMetadata
   { _lmmName :: LogicalModelName,
-    _lmmFields :: InsOrdHashMap.InsOrdHashMap (Column b) (LogicalModelField b),
+    _lmmFields :: LogicalModelFields b,
     _lmmDescription :: Maybe Text,
     _lmmSelectPermissions :: InsOrdHashMap RoleName (SelPermDef b)
   }
   deriving (Generic)
-
-makeLenses ''LogicalModelMetadata
 
 instance (Backend b) => HasCodec (LogicalModelMetadata b) where
   codec =

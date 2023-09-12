@@ -6,7 +6,7 @@ export const DataTypeToSQLTypeMap: Record<
   string[]
 > = {
   boolean: [],
-  string: ['char', 'text', 'varchar'],
+  string: ['char', 'text', 'varchar', 'nvarchar', 'sysname'],
   number: [
     'bigint',
     'bit',
@@ -23,6 +23,9 @@ export const DataTypeToSQLTypeMap: Record<
   json: [],
   float: ['float'],
 };
+
+export const DataTypeScalars = Object.values(DataTypeToSQLTypeMap).flat();
+
 export function adaptSQLDataType(
   sqlDataType: string
 ): TableColumn['consoleDataType'] {

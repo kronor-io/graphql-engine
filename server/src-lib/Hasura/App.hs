@@ -325,18 +325,18 @@ initBasicConnectionInfo
           }
       mkSourceConfig srcURL =
         PostgresConnConfiguration
-          { _pccConnectionInfo =
+          { pccConnectionInfo =
               PostgresSourceConnInfo
-                { _psciDatabaseUrl = srcURL,
-                  _psciPoolSettings = poolSettings,
-                  _psciUsePreparedStatements = usePreparedStatements,
-                  _psciIsolationLevel = isolationLevel,
-                  _psciSslConfiguration = Nothing
+                { psciDatabaseUrl = srcURL,
+                  psciPoolSettings = poolSettings,
+                  psciUsePreparedStatements = usePreparedStatements,
+                  psciIsolationLevel = isolationLevel,
+                  psciSslConfiguration = Nothing
                 },
-            _pccReadReplicas = Nothing,
-            _pccExtensionsSchema = defaultPostgresExtensionsSchema,
-            _pccConnectionTemplate = Nothing,
-            _pccConnectionSet = mempty
+            pccReadReplicas = Nothing,
+            pccExtensionsSchema = defaultPostgresExtensionsSchema,
+            pccConnectionTemplate = Nothing,
+            pccConnectionSet = mempty
           }
 
 -- | Creates a 'PG.ConnInfo' from a 'UrlConf' parameter.
@@ -407,10 +407,13 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
   -- Generate the instance id.
   instanceId <- liftIO generateInstanceId
 
+  let connectionContext :: J.Value
+      connectionContext = J.object ["source" J..= J.String "metadata"]
+
   -- Init metadata db pool.
   metadataDbPool <-
     allocate
-      (liftIO $ PG.initPGPool bciMetadataConnInfo soConnParams pgLogger)
+      (liftIO $ PG.initPGPool bciMetadataConnInfo connectionContext soConnParams pgLogger)
       (liftIO . PG.destroyPGPool)
 
   -- Migrate the catalog and fetch the metdata.
@@ -486,9 +489,11 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvWebSocketKeepAlive = soWebSocketKeepAlive,
           appEnvWebSocketConnectionInitTimeout = soWebSocketConnectionInitTimeout,
           appEnvGracefulShutdownTimeout = soGracefulShutdownTimeout,
-          appEnvCheckFeatureFlag = CheckFeatureFlag $ checkFeatureFlag env,
+          appEnvCheckFeatureFlag = ceCheckFeatureFlag env,
           appEnvSchemaPollInterval = soSchemaPollInterval,
           appEnvLicenseKeyCache = Nothing,
+          appEnvMaxTotalHeaderLength = soMaxTotalHeaderLength,
+          appEnvTriggersErrorLogLevelStatus = soTriggersErrorLogLevelStatus,
           appEnvInvalidTokens = invalidTokensRef
         }
     )
@@ -503,21 +508,25 @@ initialiseAppContext ::
   ServeOptions Hasura ->
   AppInit ->
   m (AppStateRef Hasura)
-initialiseAppContext env serveOptions@ServeOptions {..} AppInit {..} = do
+initialiseAppContext env serveOptions AppInit {..} = do
   appEnv@AppEnv {..} <- askAppEnv
   let cacheStaticConfig = buildCacheStaticConfig appEnv
       Loggers _ logger pgLogger = appEnvLoggers
-      sqlGenCtx = initSQLGenCtx soExperimentalFeatures soStringifyNum soDangerousBooleanCollapse
-      cacheDynamicConfig =
-        CacheDynamicConfig
-          soInferFunctionPermissions
-          soEnableRemoteSchemaPermissions
-          sqlGenCtx
-          soExperimentalFeatures
-          soDefaultNamingConvention
-          soMetadataDefaults
-          soApolloFederationStatus
-          soCloseWebsocketsOnMetadataChangeStatus
+
+  -- Build the RebuildableAppContext.
+  -- (See note [Hasura Application State].)
+  rebuildableAppCtxE <-
+    liftIO
+      $ runExceptT
+        ( buildRebuildableAppContext
+            (logger, appEnvManager)
+            serveOptions
+            appEnvCheckFeatureFlag
+            env
+        )
+  !rebuildableAppCtx <- onLeft rebuildableAppCtxE $ \e -> throwErrExit InvalidEnvironmentVariableOptionsError $ T.unpack $ qeError e
+
+  let cacheDynamicConfig = buildCacheDynamicConfig (lastBuiltAppContext rebuildableAppCtx)
 
   -- Create the schema cache
   rebuildableSchemaCache <-
@@ -531,12 +540,6 @@ initialiseAppContext env serveOptions@ServeOptions {..} AppInit {..} = do
       cacheDynamicConfig
       appEnvManager
       Nothing
-
-  -- Build the RebuildableAppContext.
-  -- (See note [Hasura Application State].)
-  rebuildableAppCtxE <- liftIO $ runExceptT (buildRebuildableAppContext (logger, appEnvManager) serveOptions env)
-  !rebuildableAppCtx <- onLeft rebuildableAppCtxE $ \e -> throwErrExit InvalidEnvironmentVariableOptionsError $ T.unpack $ qeError e
-
   -- Initialise the 'AppStateRef' from 'RebuildableSchemaCacheRef' and 'RebuildableAppContext'.
   initialiseAppStateRef aiTLSAllowListRef Nothing appEnvServerMetrics rebuildableSchemaCache rebuildableAppCtx
 
@@ -612,11 +615,10 @@ buildFirstSchemaCache
   httpManager
   mSchemaRegistryContext = do
     let cacheBuildParams = CacheBuildParams httpManager pgSourceResolver mssqlSourceResolver cacheStaticConfig
-        buildReason = CatalogSync
     result <-
       runExceptT
         $ runCacheBuild cacheBuildParams
-        $ buildRebuildableSchemaCacheWithReason buildReason logger env metadataWithVersion cacheDynamicConfig mSchemaRegistryContext
+        $ buildRebuildableSchemaCache logger env metadataWithVersion cacheDynamicConfig mSchemaRegistryContext
     result `onLeft` \err -> do
       -- TODO: we used to bundle the first schema cache build with the catalog
       -- migration, using the same error handler for both, meaning that an
@@ -655,6 +657,7 @@ initLockedEventsCtx =
 newtype AppM a = AppM (ReaderT AppEnv (TraceT IO) a)
   deriving newtype
     ( Functor,
+      MonadFail, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
       Applicative,
       Monad,
       MonadIO,
@@ -675,7 +678,7 @@ instance HasAppEnv AppM where
 
 instance HasFeatureFlagChecker AppM where
   checkFlag f = AppM do
-    CheckFeatureFlag runCheckFeatureFlag <- asks appEnvCheckFeatureFlag
+    CheckFeatureFlag {runCheckFeatureFlag} <- asks appEnvCheckFeatureFlag
     liftIO $ runCheckFeatureFlag f
 
 instance HasCacheStaticConfig AppM where
@@ -684,8 +687,10 @@ instance HasCacheStaticConfig AppM where
 instance MonadTrace AppM where
   newTraceWith c p n (AppM a) = AppM $ newTraceWith c p n a
   newSpanWith i n (AppM a) = AppM $ newSpanWith i n a
-  currentContext = AppM currentContext
   attachMetadata = AppM . attachMetadata
+
+instance MonadTraceContext AppM where
+  currentContext = AppM currentContext
 
 instance ProvidesNetwork AppM where
   askHTTPManager = asks appEnvManager
@@ -901,6 +906,7 @@ data ShutdownAction
 runHGEServer ::
   forall m impl.
   ( MonadIO m,
+    MonadFail m, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
     MonadFix m,
     MonadMask m,
     MonadStateless IO m,
@@ -909,7 +915,6 @@ runHGEServer ::
     HttpLog m,
     HasAppEnv m,
     HasCacheStaticConfig m,
-    HasFeatureFlagChecker m,
     ConsoleRenderer m,
     MonadVersionAPIWithExtraData m,
     MonadMetadataApiAuthorization m,
@@ -952,6 +957,7 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
           . Warp.setInstallShutdownHandler shutdownHandler
           . Warp.setBeforeMainLoop (for_ startupStatusHook id)
           . setForkIOWithMetrics
+          . Warp.setMaxTotalHeaderLength appEnvMaxTotalHeaderLength
           $ Warp.defaultSettings
 
       setForkIOWithMetrics :: Warp.Settings -> Warp.Settings
@@ -996,6 +1002,7 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
 mkHGEServer ::
   forall m impl.
   ( MonadIO m,
+    MonadFail m, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
     MonadFix m,
     MonadMask m,
     MonadStateless IO m,
@@ -1004,7 +1011,6 @@ mkHGEServer ::
     HttpLog m,
     HasAppEnv m,
     HasCacheStaticConfig m,
-    HasFeatureFlagChecker m,
     ConsoleRenderer m,
     MonadVersionAPIWithExtraData m,
     MonadMetadataApiAuthorization m,
@@ -1251,39 +1257,43 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
       schemaCache <- liftIO $ getSchemaCache appStateRef
       let allSources = HashMap.elems $ scSources schemaCache
       activeEventProcessingThreads <- liftIO $ newTVarIO 0
+      appCtx <- liftIO $ getAppContext appStateRef
+      let fetchInterval = _eeCtxFetchInterval $ acEventEngineCtx appCtx
+          fetchBatchSize = _eeCtxFetchSize $ acEventEngineCtx appCtx
+      unless (unrefine fetchBatchSize == 0 || fetchInterval == 0) $ do
+        -- Initialise the event processing thread
+        let eventsGracefulShutdownAction =
+              waitForProcessingAction
+                logger
+                "event_triggers"
+                (length <$> readTVarIO (leEvents lockedEventsCtx))
+                (EventTriggerShutdownAction (shutdownEventTriggerEvents allSources logger lockedEventsCtx))
+                (unrefine appEnvGracefulShutdownTimeout)
 
-      -- Initialise the event processing thread
-      let eventsGracefulShutdownAction =
-            waitForProcessingAction
-              logger
-              "event_triggers"
-              (length <$> readTVarIO (leEvents lockedEventsCtx))
-              (EventTriggerShutdownAction (shutdownEventTriggerEvents allSources logger lockedEventsCtx))
-              (unrefine appEnvGracefulShutdownTimeout)
+        -- Create logger for logging the statistics of events fetched
+        fetchedEventsStatsLogger <-
+          allocate
+            (createFetchedEventsStatsLogger logger)
+            (closeFetchedEventsStatsLogger logger)
 
-      -- Create logger for logging the statistics of events fetched
-      fetchedEventsStatsLogger <-
-        allocate
-          (createFetchedEventsStatsLogger logger)
-          (closeFetchedEventsStatsLogger logger)
-
-      unLogger logger $ mkGenericLog @Text LevelInfo "event_triggers" "starting workers"
-      void
-        $ C.forkManagedTWithGracefulShutdown
-          "processEventQueue"
-          logger
-          (C.ThreadShutdown (liftIO eventsGracefulShutdownAction))
-        $ processEventQueue
-          logger
-          fetchedEventsStatsLogger
-          appEnvManager
-          (getSchemaCache appStateRef)
-          (acEventEngineCtx <$> getAppContext appStateRef)
-          activeEventProcessingThreads
-          lockedEventsCtx
-          appEnvServerMetrics
-          (pmEventTriggerMetrics appEnvPrometheusMetrics)
-          appEnvEnableMaintenanceMode
+        unLogger logger $ mkGenericLog @Text LevelInfo "event_triggers" "starting workers"
+        void
+          $ C.forkManagedTWithGracefulShutdown
+            "processEventQueue"
+            logger
+            (C.ThreadShutdown (liftIO eventsGracefulShutdownAction))
+          $ processEventQueue
+            logger
+            fetchedEventsStatsLogger
+            appEnvManager
+            (getSchemaCache appStateRef)
+            (acEventEngineCtx <$> getAppContext appStateRef)
+            activeEventProcessingThreads
+            lockedEventsCtx
+            appEnvServerMetrics
+            (pmEventTriggerMetrics appEnvPrometheusMetrics)
+            appEnvEnableMaintenanceMode
+            appEnvTriggersErrorLogLevelStatus
 
     startAsyncActionsPollerThread logger lockedEventsCtx actionSubState = do
       AppEnv {..} <- lift askAppEnv
@@ -1355,6 +1365,7 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
           (pmScheduledTriggerMetrics appEnvPrometheusMetrics)
           (getSchemaCache appStateRef)
           lockedEventsCtx
+          appEnvTriggersErrorLogLevelStatus
 
 runInSeparateTx ::
   PG.TxE QErr a ->
@@ -1457,8 +1468,8 @@ telemetryNotice =
     <> "To read more or opt-out, visit https://hasura.io/docs/latest/graphql/core/guides/telemetry.html"
 
 mkPgSourceResolver :: PG.PGLogger -> SourceResolver ('Postgres 'Vanilla)
-mkPgSourceResolver pgLogger env _ config = runExceptT do
-  let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = _pccConnectionInfo config
+mkPgSourceResolver pgLogger env sourceName config = runExceptT do
+  let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = pccConnectionInfo config
   -- If the user does not provide values for the pool settings, then use the default values
   let (maxConns, idleTimeout, retries) = getDefaultPGPoolSettingIfNotExists poolSettings defaultPostgresPoolSettings
   urlText <- resolveUrlConf env urlConf
@@ -1468,23 +1479,27 @@ mkPgSourceResolver pgLogger env _ config = runExceptT do
           { PG.cpIdleTime = idleTimeout,
             PG.cpConns = maxConns,
             PG.cpAllowPrepare = allowPrepare,
-            PG.cpMbLifetime = _ppsConnectionLifetime =<< poolSettings,
-            PG.cpTimeout = _ppsPoolTimeout =<< poolSettings
+            PG.cpMbLifetime = ppsConnectionLifetime =<< poolSettings,
+            PG.cpTimeout = ppsPoolTimeout =<< poolSettings
           }
-  pgPool <- liftIO $ Q.initPGPool connInfo connParams pgLogger
+  let context = J.object [("source" J..= sourceName)]
+  pgPool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
   let pgExecCtx = mkPGExecCtx isoLevel pgPool NeverResizePool
-  pure $ PGSourceConfig pgExecCtx connInfo Nothing mempty (_pccExtensionsSchema config) mempty ConnTemplate_NotApplicable
+  pure $ PGSourceConfig pgExecCtx connInfo Nothing mempty (pccExtensionsSchema config) mempty ConnTemplate_NotApplicable
 
-mkMSSQLSourceResolver :: SourceResolver ('MSSQL)
+mkMSSQLSourceResolver :: SourceResolver 'MSSQL
 mkMSSQLSourceResolver env _name (MSSQLConnConfiguration connInfo _) = runExceptT do
-  let MSSQLConnectionInfo iConnString MSSQLPoolSettings {..} = connInfo
-      connOptions =
-        MSPool.ConnectionOptions
-          { _coConnections = fromMaybe defaultMSSQLMaxConnections _mpsMaxConnections,
-            _coStripes = 1,
-            _coIdleTime = _mpsIdleTimeout
-          }
+  let MSSQLConnectionInfo iConnString poolSettings isolationLevel = connInfo
+      connOptions = case poolSettings of
+        MSSQLPoolSettingsPool (MSSQLPoolConnectionSettings {..}) ->
+          MSPool.ConnectionOptionsPool
+            $ MSPool.PoolOptions
+              { poConnections = fromMaybe defaultMSSQLMaxConnections mpsMaxConnections,
+                poStripes = 1,
+                poIdleTime = mpsIdleTimeout
+              }
+        MSSQLPoolSettingsNoPool -> MSPool.ConnectionOptionsNoPool
   (connString, mssqlPool) <- createMSSQLPool iConnString connOptions env
-  let mssqlExecCtx = mkMSSQLExecCtx mssqlPool NeverResizePool
+  let mssqlExecCtx = mkMSSQLExecCtx isolationLevel mssqlPool NeverResizePool
       numReadReplicas = 0
   pure $ MSSQLSourceConfig connString mssqlExecCtx numReadReplicas

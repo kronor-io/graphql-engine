@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ViewPatterns #-}
 
 module Hasura.GraphQL.Schema.RemoteSpec (spec) where
@@ -32,6 +33,7 @@ import Hasura.RQL.IR.Root
 import Hasura.RQL.IR.Value
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Roles (adminRoleName)
+import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RemoteSchema.SchemaCache
 import Hasura.Session (BackendOnlyFieldAccess (..), SessionVariables, UserInfo (..), mkSessionVariable)
 import Language.GraphQL.Draft.Parser qualified as G
@@ -124,20 +126,22 @@ mkTestVariableValues vars = runIdentity
 
 buildQueryParsers ::
   RemoteSchemaIntrospection ->
+  RemoteSchemaCustomizer ->
   IO (P.FieldParser TestMonad (GraphQLField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable))
-buildQueryParsers introspection = do
+buildQueryParsers introspection customizer = do
   let introResult = IntrospectionResult introspection GName._Query Nothing Nothing
-      remoteSchemaInfo = RemoteSchemaInfo (ValidatedRemoteSchemaDef (EnvRecord "" N.nullURI) [] False 60 Nothing) identityCustomizer
+      remoteSchemaInfo = RemoteSchemaInfo (ValidatedRemoteSchemaDef (EnvRecord "" N.nullURI) [] False 60 Nothing) customizer
       remoteSchemaRels = mempty
       schemaContext =
         SchemaContext
           HasuraSchema
           ignoreRemoteRelationship
           adminRoleName
+          (SchemaSampledFeatureFlags [])
   RemoteSchemaParser query _ _ <-
     runError
       $ runMemoizeT
-      $ runRemoteSchema schemaContext
+      $ runRemoteSchema schemaContext Options.RemoteForwardAccurately
       $ buildRemoteParser introResult remoteSchemaRels remoteSchemaInfo
   pure
     $ head query
@@ -160,6 +164,24 @@ runQueryParser parser (varDefs, selSet) vars = runIdentity . runError $ do
     _ -> error "expecting only one field in the query"
   runTest (P.fParser parser field) `onLeft` (throw500 . fromErrorMessage)
 
+runWithSchemaCustomizer ::
+  -- | schema
+  Text ->
+  -- | query
+  Text ->
+  -- | variables
+  LBS.ByteString ->
+  -- | Schema customizer
+  RemoteSchemaCustomizer ->
+  IO (GraphQLField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)
+runWithSchemaCustomizer schema query variables customizer = do
+  parser <- buildQueryParsers (mkTestRemoteSchema schema) customizer
+  pure
+    $ runQueryParser
+      parser
+      (mkTestExecutableDocument query)
+      (mkTestVariableValues variables)
+
 run ::
   -- | schema
   Text ->
@@ -168,13 +190,8 @@ run ::
   -- | variables
   LBS.ByteString ->
   IO (GraphQLField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)
-run schema query variables = do
-  parser <- buildQueryParsers $ mkTestRemoteSchema schema
-  pure
-    $ runQueryParser
-      parser
-      (mkTestExecutableDocument query)
-      (mkTestVariableValues variables)
+run schema query variables =
+  runWithSchemaCustomizer schema query variables identityCustomizer
 
 -- actual test
 
@@ -183,8 +200,12 @@ spec = do
   testNoVarExpansionIfNoPreset
   testNoVarExpansionIfNoPresetUnlessTopLevelOptionalField
   testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullField
+  testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullFieldForObjectField
+  testAbsentValuesDontGetForwarded
+  testAbsentValuesWithDefault
   testPartialVarExpansionIfPreset
   testVariableSubstitutionCollision
+  testVariablesNullInlineWhenSchemaCustomized
 
 testNoVarExpansionIfNoPreset :: Spec
 testNoVarExpansionIfNoPreset = it "variables aren't expanded if there's no preset" $ do
@@ -237,7 +258,7 @@ query($a: A!) {
                    $ Variable
                      (VIRequired _a)
                      (G.TypeNamed (G.Nullability False) _A)
-                     (JSONValue $ J.Object $ KM.fromList [("b", J.Object $ KM.fromList [("c", J.Object $ KM.fromList [("i", J.Number 0)])])])
+                     (Just $ JSONValue $ J.Object $ KM.fromList [("b", J.Object $ KM.fromList [("c", J.Object $ KM.fromList [("i", J.Number 0)])])])
                )
 
 testNoVarExpansionIfNoPresetUnlessTopLevelOptionalField :: Spec
@@ -294,7 +315,7 @@ query($a: A) {
                )
 
 testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullField :: Spec
-testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullField = it "send null value in the input variable for nullable field" $ do
+testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullField = it "send null value in the input variable for nullable scalar field" $ do
   field <-
     run
       -- schema
@@ -325,6 +346,104 @@ query ($a: Int) {
                  G.VVariable
                    $ RemoteJSONValue
                      (G.TypeNamed (G.Nullability True) _Int)
+                     (J.Null)
+               )
+
+testAbsentValuesDontGetForwarded :: Spec
+testAbsentValuesDontGetForwarded = it "don't forward variables without values" $ do
+  field <-
+    run
+      -- schema
+      [raw|
+scalar Int
+
+type Query {
+  test(a: Int): Int
+}
+|]
+      -- query
+      [raw|
+query ($a: Int) {
+  test(a: $a)
+}
+|]
+      -- variables
+      [raw|
+{
+}
+|]
+  length (_fArguments field) `shouldBe` 0
+
+testAbsentValuesWithDefault :: Spec
+testAbsentValuesWithDefault = it "variable without value doesn't cause field with default to become null" $ do
+  field <-
+    run
+      -- schema
+      [raw|
+scalar Int
+
+type Query {
+  test(a: Int = 3): Int
+}
+|]
+      -- query
+      [raw|
+query ($a: Int) {
+  test(a: $a)
+}
+|]
+      -- variables
+      [raw|
+{
+}
+|]
+  -- Actually, even better would be if `_fArguments` would be empty.
+  head (toList (_fArguments field)) `shouldBe` G.VInt 3
+
+testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullFieldForObjectField :: Spec
+testNoVarExpansionIfNoPresetUnlessTopLevelOptionalFieldSendNullFieldForObjectField = it "send null value in the input variable for nullable object field " $ do
+  field <-
+    run
+      -- schema
+      [raw|
+scalar Int
+
+input A {
+  b: B
+}
+
+input B {
+  c: C
+}
+
+input C {
+  i: Int
+}
+
+type Query {
+  test(a: A): Int
+}
+|]
+      -- query
+      [raw|
+query($a: A) {
+  test(a: $a)
+}
+|]
+      -- variables
+      [raw|
+{
+  "a": null
+}
+|]
+  let arg = head $ HashMap.toList $ _fArguments field
+  arg
+    `shouldBe` ( _a,
+                 -- fieldOptional has peeled the variable; all we see is a JSON blob, and in doubt
+                 -- we repackage it as a newly minted JSON variable
+                 G.VVariable
+                   $ RemoteJSONValue
+                     (G.TypeNamed (G.Nullability True) _A)
                      (J.Null)
                )
 
@@ -437,6 +556,47 @@ query($a: [Int], $b: [String]) {
   "b": []
 }
 |]
+
+-- | Regression test for https://github.com/hasura/graphql-engine/issues/9757
+testVariablesNullInlineWhenSchemaCustomized :: Spec
+testVariablesNullInlineWhenSchemaCustomized = it "inline input variable null value for nullable scalar field when schema type is altered" $ do
+  field <-
+    runWithSchemaCustomizer
+      -- schema
+      [raw|
+scalar SomeInt
+scalar Int
+
+type Query {
+  test(a: SomeInt): Int
+}
+|]
+      -- query
+      [raw|
+query ($a: CustomInt) {
+  test(a: $a)
+}
+|]
+      -- variables
+      [raw|
+{
+  "a": null
+}
+|]
+      -- customizer
+      ( RemoteSchemaCustomizer
+          Nothing
+          (HashMap.singleton $$(G.litName "SomeInt") $$(G.litName "CustomInt"))
+          mempty
+      )
+
+  let arg = head $ HashMap.toList $ _fArguments field
+  arg
+    `shouldBe` ( _a,
+                 -- fieldOptional has peeled the variable;  Since the type is customized,
+                 -- null value is forwarded without variable
+                 G.VNull
+               )
 
 -- | Convenience function to focus on a 'G.VVariable' when pulling test values
 -- out in 'testVariableSubstitutionCollision'.

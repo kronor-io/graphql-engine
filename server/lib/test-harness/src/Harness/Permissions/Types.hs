@@ -4,8 +4,13 @@ module Harness.Permissions.Types
     insertPermission,
     SelectPermissionDetails (..),
     selectPermission,
+    LogicalModelSelectPermissionDetails (..),
+    logicalModelSelectPermission,
     UpdatePermissionDetails (..),
     updatePermission,
+    DeletePermissionDetails (..),
+    deletePermission,
+    InheritedRoleDetails (..),
   )
 where
 
@@ -17,8 +22,11 @@ import Hasura.Prelude
 -- tracking metadata API payload.
 data Permission
   = SelectPermission SelectPermissionDetails
+  | LogicalModelSelectPermission LogicalModelSelectPermissionDetails
   | UpdatePermission UpdatePermissionDetails
   | InsertPermission InsertPermissionDetails
+  | DeletePermission DeletePermissionDetails
+  | InheritedRole InheritedRoleDetails
   deriving (Eq, Show)
 
 data SelectPermissionDetails = SelectPermissionDetails
@@ -26,9 +34,19 @@ data SelectPermissionDetails = SelectPermissionDetails
     selectPermissionTable :: Text,
     selectPermissionRole :: Text,
     selectPermissionColumns :: [Text],
+    selectPermissionComputedFields :: [Text],
     selectPermissionRows :: Value,
     selectPermissionAllowAggregations :: Bool,
     selectPermissionLimit :: Value
+  }
+  deriving (Eq, Show)
+
+data LogicalModelSelectPermissionDetails = LogicalModelSelectPermissionDetails
+  { lmSelectPermissionSource :: Maybe Text,
+    lmSelectPermissionName :: Text,
+    lmSelectPermissionRole :: Text,
+    lmSelectPermissionColumns :: [Text],
+    lmSelectPermissionFilter :: Value
   }
   deriving (Eq, Show)
 
@@ -37,7 +55,8 @@ data UpdatePermissionDetails = UpdatePermissionDetails
     updatePermissionTable :: Text,
     updatePermissionRole :: Text,
     updatePermissionColumns :: [Text],
-    updatePermissionRows :: Value
+    updatePermissionRows :: Value,
+    updatePermissionValidationWebhook :: Maybe Text
   }
   deriving (Eq, Show)
 
@@ -46,7 +65,23 @@ data InsertPermissionDetails = InsertPermissionDetails
     insertPermissionTable :: Text,
     insertPermissionRole :: Text,
     insertPermissionColumns :: [Text],
-    insertPermissionRows :: Value
+    insertPermissionRows :: Value,
+    insertPermissionValidationWebhook :: Maybe Text
+  }
+  deriving (Eq, Show)
+
+data DeletePermissionDetails = DeletePermissionDetails
+  { deletePermissionSource :: Maybe Text,
+    deletePermissionTable :: Text,
+    deletePermissionRole :: Text,
+    deletePermissionRows :: Value,
+    deletePermissionValidationWebhook :: Maybe Text
+  }
+  deriving (Eq, Show)
+
+data InheritedRoleDetails = InheritedRoleDetails
+  { inheritedRoleName :: Text,
+    inheritedRoleRoleSet :: [Text]
   }
   deriving (Eq, Show)
 
@@ -57,9 +92,20 @@ selectPermission =
       selectPermissionTable = mempty,
       selectPermissionRole = "test-role",
       selectPermissionColumns = mempty,
+      selectPermissionComputedFields = mempty,
       selectPermissionRows = object [],
       selectPermissionAllowAggregations = False,
       selectPermissionLimit = Null
+    }
+
+logicalModelSelectPermission :: LogicalModelSelectPermissionDetails
+logicalModelSelectPermission =
+  LogicalModelSelectPermissionDetails
+    { lmSelectPermissionSource = Nothing,
+      lmSelectPermissionName = "",
+      lmSelectPermissionRole = "",
+      lmSelectPermissionColumns = [],
+      lmSelectPermissionFilter = object []
     }
 
 updatePermission :: UpdatePermissionDetails
@@ -69,7 +115,8 @@ updatePermission =
       updatePermissionTable = mempty,
       updatePermissionRole = "test-role",
       updatePermissionColumns = mempty,
-      updatePermissionRows = object []
+      updatePermissionRows = object [],
+      updatePermissionValidationWebhook = Nothing
     }
 
 insertPermission :: InsertPermissionDetails
@@ -79,5 +126,16 @@ insertPermission =
       insertPermissionTable = mempty,
       insertPermissionRole = "test-role",
       insertPermissionColumns = mempty,
-      insertPermissionRows = object []
+      insertPermissionRows = object [],
+      insertPermissionValidationWebhook = Nothing
+    }
+
+deletePermission :: DeletePermissionDetails
+deletePermission =
+  DeletePermissionDetails
+    { deletePermissionSource = Nothing,
+      deletePermissionTable = mempty,
+      deletePermissionRole = "test-role",
+      deletePermissionRows = object [],
+      deletePermissionValidationWebhook = Nothing
     }

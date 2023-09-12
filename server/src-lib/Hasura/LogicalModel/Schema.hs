@@ -3,24 +3,27 @@
 
 -- | Schema parsers for logical models
 module Hasura.LogicalModel.Schema
-  ( buildLogicalModelIR,
+  ( getSelPermInfoForLogicalModel,
+    buildLogicalModelIR,
     buildLogicalModelPermissions,
-    buildLogicalModelFields,
+    logicalModelOrderByArg,
+    logicalModelSelectionList,
+    logicalModelWhereArg,
     defaultLogicalModelArgs,
     defaultLogicalModelSelectionSet,
+    logicalModelFieldParsers,
   )
 where
 
-import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.List.NonEmpty qualified as NE
+import Data.Set qualified as S
 import Data.Text.Extended
 import Data.Text.NonEmpty (mkNonEmptyText)
 import Hasura.Base.Error
 import Hasura.GraphQL.Parser.Internal.Parser qualified as IP
 import Hasura.GraphQL.Schema.Backend
   ( BackendLogicalModelSelectSchema (..),
-    BackendNativeQuerySelectSchema (..),
     MonadBuildSchema,
     columnParser,
     scalarSelectionArgumentsParser,
@@ -31,23 +34,22 @@ import Hasura.GraphQL.Schema.Common
     AnnotatedFields,
     SchemaT,
     SelectArgs,
-    askNativeQueryInfo,
+    getRedactionExprForColumn,
     parsedSelectionsToFields,
     partialSQLExpToUnpreparedValue,
     retrieve,
     scRole,
-    textToName,
   )
 import Hasura.GraphQL.Schema.OrderBy
 import Hasura.GraphQL.Schema.Parser
-  ( FieldParser,
-    InputFieldsParser,
+  ( InputFieldsParser,
     Kind (..),
     Parser,
   )
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Select (defaultArgsParser)
 import Hasura.LogicalModel.Cache (LogicalModelInfo (..))
+import Hasura.LogicalModel.Common (getSelPermInfoForLogicalModel)
 import Hasura.LogicalModel.IR (LogicalModel (..))
 import Hasura.LogicalModel.Types
   ( LogicalModelField (..),
@@ -58,47 +60,31 @@ import Hasura.LogicalModel.Types
     LogicalModelTypeScalar (..),
   )
 import Hasura.Name qualified as Name
-import Hasura.NativeQuery.Cache (NativeQueryInfo (..))
 import Hasura.Prelude
 import Hasura.RQL.IR qualified as IR
-import Hasura.RQL.IR.BoolExp (gBoolExpTrue)
 import Hasura.RQL.Types.Backend (Backend, Column)
 import Hasura.RQL.Types.Column
-import Hasura.RQL.Types.Common (RelName (..), RelType (..), relNameToTxt)
+import Hasura.RQL.Types.Common (RelName (..))
 import Hasura.RQL.Types.Metadata.Object
-import Hasura.RQL.Types.Permission qualified as Permission
-import Hasura.RQL.Types.Relationships.Local (Nullable (..), RelInfo (..), RelTarget (..))
-import Hasura.RQL.Types.Roles (RoleName, adminRoleName)
+import Hasura.RQL.Types.Relationships.Local (Nullable (..))
+import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
-import Hasura.Table.Cache (SelPermInfo (..), _permSel)
+import Hasura.Table.Cache (SelPermInfo (..))
 import Language.GraphQL.Draft.Syntax qualified as G
 
--- | find list of columns we're allowed to access for this role
-getSelPermInfoForLogicalModel ::
-  RoleName ->
-  LogicalModelInfo b ->
-  Maybe (SelPermInfo b)
-getSelPermInfoForLogicalModel role logicalModel =
-  HashMap.lookup role (_lmiPermissions logicalModel) >>= _permSel
-
 -- | build select permissions for logical model
--- `admin` can always select everything
 logicalModelPermissions ::
   (Backend b) =>
   LogicalModelInfo b ->
   RoleName ->
-  IR.TablePermG b (IR.UnpreparedValue b)
+  Maybe (IR.TablePermG b (IR.UnpreparedValue b))
 logicalModelPermissions logicalModel roleName = do
-  if roleName == adminRoleName
-    then IR.TablePerm gBoolExpTrue Nothing
-    else case getSelPermInfoForLogicalModel roleName logicalModel of
-      Just selectPermissions ->
-        IR.TablePerm
-          { IR._tpFilter = fmap partialSQLExpToUnpreparedValue <$> spiFilter selectPermissions,
-            IR._tpLimit = spiLimit selectPermissions
-          }
-      Nothing -> IR.TablePerm gBoolExpTrue Nothing
+  getSelPermInfoForLogicalModel roleName logicalModel <&> \selectPermissions ->
+    IR.TablePerm
+      { IR._tpFilter = fmap partialSQLExpToUnpreparedValue <$> spiFilter selectPermissions,
+        IR._tpLimit = spiLimit selectPermissions
+      }
 
 -- | turn post-schema cache LogicalModelInfo into IR
 buildLogicalModelIR :: LogicalModelInfo b -> LogicalModel b
@@ -114,52 +100,48 @@ buildLogicalModelPermissions ::
   ( MonadBuildSchema b r m n
   ) =>
   LogicalModelInfo b ->
-  SchemaT r m (IR.TablePermG b (IR.UnpreparedValue b))
+  SchemaT r m (Maybe (IR.TablePermG b (IR.UnpreparedValue b)))
 buildLogicalModelPermissions logicalModel = do
   roleName <- retrieve scRole
 
   pure $ logicalModelPermissions logicalModel roleName
 
--- in order to construct meaningful IR, we can only parse a Logical Model
--- in the context of it's use, therefore we must pass in any information on
--- relationships (and then,
-buildLogicalModelFields ::
-  forall b r m n.
-  ( MonadBuildSchema b r m n,
-    BackendLogicalModelSelectSchema b
-  ) =>
-  InsOrdHashMap RelName (RelInfo b) ->
-  Nullable ->
-  LogicalModelInfo b ->
-  SchemaT
-    r
-    m
-    ( Maybe
-        ( P.Parser 'P.Output n (AnnotatedFields b),
-          P.InputFieldsParser n (IR.SelectArgsG b (IR.UnpreparedValue b))
-        )
-    )
-buildLogicalModelFields relationshipInfo nullability logicalModel = runMaybeT $ do
-  selectionSetParser <- MaybeT $ logicalModelSelectionList @b @r @m @n relationshipInfo nullability logicalModel
-  logicalModelsArgsParser <- lift $ logicalModelArguments @b @r @m @n logicalModel
-
-  pure (selectionSetParser, logicalModelsArgsParser)
-
 logicalModelColumnsForRole ::
+  (Backend b) =>
   RoleName ->
   LogicalModelInfo b ->
-  Maybe (Permission.PermColSpec b)
-logicalModelColumnsForRole role logicalModel =
-  if role == adminRoleName
-    then -- if admin, assume all columns are OK
-      pure Permission.PCStar
-    else -- find list of columns we're allowed to access for this role
+  [(Column b, LogicalModelField b, IR.AnnRedactionExpUnpreparedValue b)]
+logicalModelColumnsForRole roleName logicalModel =
+  case getSelPermInfoForLogicalModel roleName logicalModel of
+    Just selectPermissions ->
+      _lmiFields logicalModel
+        & InsOrdHashMap.toList
+        & mapMaybe
+          ( \(column, lmField) ->
+              -- Only columns that have redaction expressions are selectable
+              -- (because then they are defined in spiCols in selectPermissions)
+              (column,lmField,) <$> getRedactionExprForColumn selectPermissions column
+          )
+    Nothing -> []
 
-      HashMap.lookup role (_lmiPermissions logicalModel)
-        >>= _permSel
-        <&> Permission.PCCols
-        . HashMap.keys
-        . spiCols
+-- just the field parsers themselves
+-- we use them (plus relationships etc) to make the Native Query / Stored
+-- Procedure types
+-- for now this is not memoized so please don't call it from
+-- `parseLogicalModelField`, and instead call a top-level parser
+logicalModelFieldParsers ::
+  forall b r m n.
+  ( MonadBuildSchema b r m n
+  ) =>
+  S.Set RelName ->
+  LogicalModelInfo b ->
+  SchemaT r m [(IP.FieldParser MetadataObjId n (AnnotatedField b))]
+logicalModelFieldParsers knownRelNames logicalModel = do
+  roleName <- retrieve scRole
+  let allowedColumns = logicalModelColumnsForRole roleName logicalModel
+
+  -- we filter out parsers that return 'Nothing' as those we are no permitted to see.
+  catMaybes <$> traverse (\(column, lmField, redactionExp) -> parseLogicalModelField knownRelNames column lmField redactionExp) allowedColumns
 
 -- | this seems like it works on luck, ie that everything is really just Text
 -- underneath
@@ -172,14 +154,14 @@ columnToRelName column =
 -- object/array information.
 parseLogicalModelField ::
   forall b r m n.
-  ( MonadBuildSchema b r m n,
-    BackendNativeQuerySelectSchema b
+  ( MonadBuildSchema b r m n
   ) =>
-  InsOrdHashMap RelName (RelInfo b) ->
+  S.Set RelName ->
   Column b ->
   LogicalModelField b ->
+  IR.AnnRedactionExpUnpreparedValue b ->
   SchemaT r m (Maybe (IP.FieldParser MetadataObjId n (AnnotatedField b)))
-parseLogicalModelField relationshipInfo column logimoField = runMaybeT do
+parseLogicalModelField knownRelNames column logimoField redactionExp = runMaybeT do
   case logimoField of
     ( LogicalModelField
         { lmfDescription,
@@ -188,59 +170,56 @@ parseLogicalModelField relationshipInfo column logimoField = runMaybeT do
       ) -> do
         columnName <- G.mkName (toTxt column) `onNothing` throw500 (column <<> " is not a valid GraphQL name")
 
-        -- We have not yet worked out what providing permissions here enables
-        let caseBoolExpUnpreparedValue = Nothing
-            columnType = ColumnScalar lmtsScalar
+        let columnType = ColumnScalar lmtsScalar
             pathArg = scalarSelectionArgumentsParser columnType
 
         field <- lift $ columnParser columnType (G.Nullability lmtsNullable)
 
         pure
           $! P.selection columnName (G.Description <$> lmfDescription) pathArg field
-          <&> IR.mkAnnColumnField column columnType caseBoolExpUnpreparedValue
+          <&> IR.mkAnnColumnField column columnType redactionExp
     ( LogicalModelField
         { lmfType =
             LogicalModelTypeReference
-              (LogicalModelTypeReferenceC {lmtrNullable, lmtrReference})
+              (LogicalModelTypeReferenceC {})
         }
       ) -> do
+        -- we have no use for logical model object fields atm, but we don't
+        -- want to explode if they're set up for relationships (as that used to
+        -- be allowed)
         relName <- columnToRelName @b column `onNothing` throw500 (column <<> " is not a valid relationship name")
 
-        -- lookup the reference in the data source
-        relationship <-
-          InsOrdHashMap.lookup relName relationshipInfo
-            `onNothing` throw500
-              ( "Unexpected relationship name "
+        if S.member relName knownRelNames
+          then hoistMaybe Nothing -- a relationships exists with this name, gently ignore it to ensure backwards compat
+          else
+            throw500
+              ( "Unexpected logical model object field '"
                   <> toTxt relName
-                  <> ". Expecting one of: ["
-                  <> commaSeparated (map relNameToTxt (InsOrdHashMap.keys relationshipInfo))
-                  <> "]."
+                  <> "'."
               )
-        MaybeT $ logicalModelObjectRelationshipField @b @r @m @n lmtrReference (nullableFromBool lmtrNullable) relationship
     ( LogicalModelField
         { lmfType =
             LogicalModelTypeArray
               ( LogicalModelTypeArrayC
                   { lmtaArray =
-                      LogicalModelTypeReference (LogicalModelTypeReferenceC {lmtrReference, lmtrNullable = innerNullability}),
-                    lmtaNullable = arrayNullability
+                      LogicalModelTypeReference (LogicalModelTypeReferenceC {})
                   }
                 )
         }
       ) -> do
-        -- we currently ignore nullability and assume the field is
-        -- non-nullable, as are the contents
+        -- we have no use for logical model array fields atm, but we don't
+        -- want to explode if they're set up for relationships (as that used to
+        -- be allowed)
         relName <- columnToRelName @b column `onNothing` throw500 (column <<> " is not a valid relationship name")
-        -- lookup the reference in the data source
 
-        relationship <- InsOrdHashMap.lookup relName relationshipInfo `onNothing` throw500 (relName <<> " is not a known relationship")
-
-        MaybeT
-          $ logicalModelArrayRelationshipField @b @r @m @n
-            lmtrReference
-            (nullableFromBool arrayNullability)
-            (nullableFromBool innerNullability)
-            relationship
+        if S.member relName knownRelNames
+          then hoistMaybe Nothing -- a relationships exists with this name, gently ignore it to ensure backwards compat
+          else
+            throw500
+              ( "Unexpected logical model array field '"
+                  <> toTxt relName
+                  <> "'."
+              )
     ( LogicalModelField
         { lmfType =
             LogicalModelTypeArray
@@ -256,44 +235,24 @@ parseLogicalModelField relationshipInfo column logimoField = runMaybeT do
       ) ->
         throw500 "Nested arrays are not currently implemented"
 
-nullableFromBool :: Bool -> Nullable
-nullableFromBool True = Nullable
-nullableFromBool False = NotNullable
-
 defaultLogicalModelSelectionSet ::
   forall b r m n.
-  ( MonadBuildSchema b r m n,
-    BackendNativeQuerySelectSchema b
+  ( MonadBuildSchema b r m n
   ) =>
-  InsOrdHashMap RelName (RelInfo b) ->
   LogicalModelInfo b ->
   SchemaT r m (Maybe (Parser 'Output n (AnnotatedFields b)))
-defaultLogicalModelSelectionSet relationshipInfo logicalModel = runMaybeT do
+defaultLogicalModelSelectionSet logicalModel = runMaybeT do
   roleName <- retrieve scRole
 
-  selectableColumns <- hoistMaybe $ logicalModelColumnsForRole roleName logicalModel
-
-  let isSelectable column =
-        case selectableColumns of
-          Permission.PCStar -> True
-          Permission.PCCols cols -> column `elem` cols
-
-  let fieldName = getLogicalModelName (_lmiName logicalModel)
-
-  -- which columns are we allowed to access given permissions?
-  let allowedColumns =
-        filter
-          (isSelectable . fst)
-          (InsOrdHashMap.toList (_lmiFields logicalModel))
-
-  let description = G.Description <$> _lmiDescription logicalModel
-
+  let allowedColumns = logicalModelColumnsForRole roleName logicalModel
+      fieldName = getLogicalModelName (_lmiName logicalModel)
+      description = G.Description <$> _lmiDescription logicalModel
       -- We entirely ignore Relay for now.
       implementsInterfaces = mempty
 
-  lift $ P.memoizeOn 'defaultLogicalModelSelectionSet (InsOrdHashMap.toList relationshipInfo, fieldName) do
+  lift $ P.memoizeOn 'defaultLogicalModelSelectionSet fieldName do
     -- we filter out parsers that return 'Nothing' as those we are no permitted to see.
-    parsers <- catMaybes <$> traverse (uncurry (parseLogicalModelField relationshipInfo)) allowedColumns
+    parsers <- catMaybes <$> traverse (\(column, lmField, redactionExp) -> parseLogicalModelField mempty column lmField redactionExp) allowedColumns
 
     pure
       $ P.selectionSetObject fieldName description parsers implementsInterfaces
@@ -301,12 +260,11 @@ defaultLogicalModelSelectionSet relationshipInfo logicalModel = runMaybeT do
 
 logicalModelSelectionList ::
   (MonadBuildSchema b r m n, BackendLogicalModelSelectSchema b) =>
-  InsOrdHashMap RelName (RelInfo b) ->
   Nullable ->
   LogicalModelInfo b ->
   SchemaT r m (Maybe (Parser 'Output n (AnnotatedFields b)))
-logicalModelSelectionList relationshipInfo nullability logicalModel =
-  fmap nullabilityModifier <$> logicalModelSelectionSet relationshipInfo logicalModel
+logicalModelSelectionList nullability logicalModel =
+  fmap nullabilityModifier <$> logicalModelSelectionSet logicalModel
   where
     nullabilityModifier =
       case nullability of
@@ -370,14 +328,17 @@ logicalModelDistinctArg ::
   ( MonadBuildSchema b r m n
   ) =>
   LogicalModelInfo b ->
-  SchemaT r m (InputFieldsParser n (Maybe (NonEmpty (Column b))))
+  SchemaT r m (InputFieldsParser n (Maybe (NonEmpty (IR.AnnDistinctColumn b (IR.UnpreparedValue b)))))
 logicalModelDistinctArg logicalModel = do
+  roleName <- retrieve scRole
+  let selectPermissions = getSelPermInfoForLogicalModel roleName logicalModel
+
   let name = getLogicalModelName (_lmiName logicalModel)
 
   tCase <- retrieve $ _rscNamingConvention . _siCustomization @b
 
   let maybeColumnDefinitions =
-        traverse definitionFromTypeRow (InsOrdHashMap.keys (_lmiFields logicalModel))
+        traverse (definitionFromTypeRow selectPermissions) (InsOrdHashMap.keys (_lmiFields logicalModel))
           >>= NE.nonEmpty
 
   case (,) <$> G.mkName "_enum_name" <*> maybeColumnDefinitions of
@@ -398,8 +359,9 @@ logicalModelDistinctArg logicalModel = do
               (P.fieldOptional distinctOnName distinctOnDesc . P.nullable . P.list)
         pure $ maybeDistinctOnColumns >>= NE.nonEmpty
   where
-    definitionFromTypeRow :: Column b -> Maybe (P.Definition P.EnumValueInfo, Column b)
-    definitionFromTypeRow name' = do
+    definitionFromTypeRow :: Maybe (SelPermInfo b) -> Column b -> Maybe (P.Definition P.EnumValueInfo, IR.AnnDistinctColumn b (IR.UnpreparedValue b))
+    definitionFromTypeRow maybeSelectPermissions name' = do
+      selectPermissions <- maybeSelectPermissions
       columnName <- G.mkName (toTxt name')
 
       let definition =
@@ -410,7 +372,10 @@ logicalModelDistinctArg logicalModel = do
                 dDirectives = mempty,
                 dInfo = P.EnumValueInfo
               }
-      pure (definition, name')
+
+      let redactionExp = fromMaybe IR.NoRedaction $ getRedactionExprForColumn selectPermissions name'
+
+      pure (definition, IR.AnnDistinctColumn name' redactionExp)
 
 defaultLogicalModelArgs ::
   forall b r m n.
@@ -425,97 +390,3 @@ defaultLogicalModelArgs logicalModel = do
   distinctParser <- logicalModelDistinctArg logicalModel
 
   defaultArgsParser whereParser orderByParser distinctParser
-
--- | Field parsers for a logical model object relationship
-logicalModelObjectRelationshipField ::
-  forall b r m n.
-  ( BackendNativeQuerySelectSchema b,
-    MonadBuildSchema b r m n
-  ) =>
-  LogicalModelName ->
-  Nullable ->
-  RelInfo b ->
-  SchemaT r m (Maybe (FieldParser n (AnnotatedField b)))
-logicalModelObjectRelationshipField logicalModelName nullability ri | riType ri == ObjRel = runMaybeT do
-  case riTarget ri of
-    RelTargetNativeQuery nativeQueryName -> do
-      nativeQueryInfo <- askNativeQueryInfo nativeQueryName
-
-      -- not sure if this the correct way to report mismatches, or if it
-      -- even possible for this to be an issue at this point
-      when
-        (logicalModelName /= _lmiName (_nqiReturns nativeQueryInfo))
-        ( throw500
-            $ "Expected object relationship to return "
-            <> toTxt logicalModelName
-            <> " but it returns "
-            <> toTxt (_lmiName (_nqiReturns nativeQueryInfo))
-            <> "."
-        )
-
-      relFieldName <- lift $ textToName $ relNameToTxt $ riName ri
-
-      let objectRelDesc = Just $ G.Description "An object relationship"
-
-      nativeQueryParser <-
-        MaybeT $ selectNativeQueryObject nativeQueryInfo relFieldName objectRelDesc
-
-      -- this only affects the generated GraphQL type
-      let nullabilityModifier =
-            case nullability of
-              Nullable -> id
-              NotNullable -> IP.nonNullableField
-
-      pure
-        $ nullabilityModifier
-        $ nativeQueryParser
-        <&> \selectExp ->
-          IR.AFObjectRelation (IR.AnnRelationSelectG (riName ri) (riMapping ri) nullability selectExp)
-    RelTargetTable _otherTableName -> do
-      throw500 "Object relationships from logical models to tables are not implemented"
-logicalModelObjectRelationshipField _ _ _ =
-  throw500 "the target logical model expected an object relationship, but this was an array"
-
--- | Field parsers for a logical model relationship
-logicalModelArrayRelationshipField ::
-  forall b r m n.
-  ( BackendNativeQuerySelectSchema b,
-    MonadBuildSchema b r m n
-  ) =>
-  LogicalModelName ->
-  Nullable ->
-  Nullable ->
-  RelInfo b ->
-  SchemaT r m (Maybe (FieldParser n (AnnotatedField b)))
-logicalModelArrayRelationshipField logicalModelName arrayNullability innerNullability ri | riType ri == ArrRel = runMaybeT do
-  case riTarget ri of
-    RelTargetNativeQuery nativeQueryName -> do
-      nativeQueryInfo <- askNativeQueryInfo nativeQueryName
-      relFieldName <- lift $ textToName $ relNameToTxt $ riName ri
-
-      -- not sure if this the correct way to report mismatches, or if it
-      -- even possible for this to be an issue at this point
-      when
-        (logicalModelName /= _lmiName (_nqiReturns nativeQueryInfo))
-        ( throw500
-            $ "Expected array relationship to return "
-            <> toTxt logicalModelName
-            <> " but it returns "
-            <> toTxt (_lmiName (_nqiReturns nativeQueryInfo))
-            <> "."
-        )
-
-      let objectRelDesc = Just $ G.Description "An array relationship"
-
-      nativeQueryParser <-
-        MaybeT $ selectNativeQuery nativeQueryInfo relFieldName arrayNullability objectRelDesc
-      pure
-        $ nativeQueryParser
-        <&> \selectExp ->
-          IR.AFArrayRelation
-            $ IR.ASSimple
-            $ IR.AnnRelationSelectG (riName ri) (riMapping ri) innerNullability selectExp
-    RelTargetTable _otherTableName -> do
-      throw500 "Array relationships from logical models to tables are not implemented"
-logicalModelArrayRelationshipField _ _ _ _ =
-  throw500 "the target logical model expected an array relationship, but this was an object"

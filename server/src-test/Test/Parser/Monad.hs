@@ -64,12 +64,15 @@ defaultSchemaOptions =
   SchemaOptions
     { soStringifyNumbers = Options.Don'tStringifyNumbers,
       soDangerousBooleanCollapse = Options.Don'tDangerouslyCollapseBooleans,
+      soRemoteNullForwardingPolicy = Options.RemoteForwardAccurately,
       soInferFunctionPermissions = Options.InferFunctionPermissions,
       soOptimizePermissionFilters = Options.Don'tOptimizePermissionFilters,
       soIncludeUpdateManyFields = Options.IncludeUpdateManyFields,
       soIncludeAggregationPredicates = Options.IncludeAggregationPredicates,
       soIncludeStreamFields = Options.IncludeStreamFields,
-      soBigQueryStringNumericInput = Options.EnableBigQueryStringNumericInput
+      soBigQueryStringNumericInput = Options.EnableBigQueryStringNumericInput,
+      soIncludeGroupByAggregateFields = Options.IncludeGroupByAggregateFields,
+      soPostgresArrays = Options.UsePostgresArrays
     }
 
 instance Has NamingCase SchemaEnvironment where
@@ -100,7 +103,8 @@ instance Has SchemaContext SchemaEnvironment where
       SchemaContext
         { scSchemaKind = HasuraSchema,
           scRemoteRelationshipParserBuilder = ignoreRemoteRelationship,
-          scRole = adminRoleName
+          scRole = adminRoleName,
+          scSampledFeatureFlags = SchemaSampledFeatureFlags []
         }
 
   modifier :: (SchemaContext -> SchemaContext) -> SchemaEnvironment -> SchemaEnvironment

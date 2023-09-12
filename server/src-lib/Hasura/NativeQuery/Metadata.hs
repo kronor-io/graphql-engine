@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Metadata representation of a native query in the metadata,
@@ -7,36 +5,30 @@
 module Hasura.NativeQuery.Metadata
   ( NativeQueryName (..),
     NativeQueryMetadata (..),
-    nqmArguments,
-    nqmObjectRelationships,
-    nqmCode,
-    nqmDescription,
-    nqmReturns,
-    nqmArrayRelationships,
-    nqmRootFieldName,
     ArgumentName (..),
     InterpolatedItem (..),
     InterpolatedQuery (..),
     parseInterpolatedQuery,
     module Hasura.NativeQuery.Types,
+    WithNativeQuery (..),
   )
 where
 
 import Autodocodec
 import Autodocodec qualified as AC
-import Control.Lens (makeLenses)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON (parseJSON), ToJSON, (.!=), (.:), (.:?))
+import Data.Aeson qualified as J
 import Data.HashMap.Strict.InsOrd.Autodocodec (sortedElemsCodec)
 import Data.Text.Extended qualified as T
-import Hasura.LogicalModel.Types
+import Hasura.LogicalModelResolver.Metadata (LogicalModelIdentifier)
 import Hasura.NativeQuery.InterpolatedQuery
 import Hasura.NativeQuery.Types (NativeQueryName (..), NullableScalarType (..))
 import Hasura.Prelude hiding (first)
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendTag (backendPrefix)
 import Hasura.RQL.Types.BackendType
-import Hasura.RQL.Types.Common (RelName)
-import Hasura.RQL.Types.Relationships.Local (RelDef (..), RelManualNativeQueryConfig (..))
+import Hasura.RQL.Types.Common (RelName, SourceName, ToAesonPairs (toAesonPairs), defaultSource)
+import Hasura.RQL.Types.Relationships.Local (RelDef (..), RelManualConfig (..))
 
 -- | copy pasta'd from Hasura.RQL.Types.Metadata.Common, forgive me Padre i did
 -- not have the heart for the Real Fix.
@@ -48,10 +40,10 @@ type Relationships = InsOrdHashMap RelName
 data NativeQueryMetadata (b :: BackendType) = NativeQueryMetadata
   { _nqmRootFieldName :: NativeQueryName,
     _nqmCode :: InterpolatedQuery ArgumentName,
-    _nqmReturns :: LogicalModelName,
+    _nqmReturns :: LogicalModelIdentifier b,
     _nqmArguments :: HashMap ArgumentName (NullableScalarType b),
-    _nqmArrayRelationships :: Relationships (RelDef (RelManualNativeQueryConfig b)),
-    _nqmObjectRelationships :: Relationships (RelDef (RelManualNativeQueryConfig b)),
+    _nqmArrayRelationships :: Relationships (RelDef (RelManualConfig b)),
+    _nqmObjectRelationships :: Relationships (RelDef (RelManualConfig b)),
     _nqmDescription :: Maybe Text
   }
   deriving (Generic)
@@ -105,4 +97,26 @@ deriving via
   instance
     (Backend b) => (ToJSON (NativeQueryMetadata b))
 
-makeLenses ''NativeQueryMetadata
+-- | A wrapper to tie something to a particular native query. Specifically, it
+-- assumes the underlying '_wlmInfo' is represented as an object, and adds two
+-- keys to that object: @source@ and @root_field_name@.
+data WithNativeQuery a = WithNativeQuery
+  { _wnqSource :: SourceName,
+    _wnqName :: NativeQueryName,
+    _wnqInfo :: a
+  }
+  deriving stock (Eq, Show)
+
+-- | something to note here: if the `a` contains a `name` or `source` key then
+-- this won't work anymore.
+instance (FromJSON a) => FromJSON (WithNativeQuery a) where
+  parseJSON = J.withObject "NativeQuery" \obj -> do
+    _wnqSource <- obj .:? "source" .!= defaultSource
+    _wnqName <- obj .: "name"
+    _wnqInfo <- J.parseJSON (J.Object obj)
+
+    pure WithNativeQuery {..}
+
+instance (ToAesonPairs a) => ToJSON (WithNativeQuery a) where
+  toJSON (WithNativeQuery source name info) =
+    J.object $ ("source", J.toJSON source) : ("name", J.toJSON name) : toAesonPairs info

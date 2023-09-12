@@ -13,6 +13,7 @@ module Hasura.RQL.Types.Metadata
     dropFunctionInMetadata,
     dropPermissionInMetadata,
     dropLogicalModelPermissionInMetadata,
+    dropInlineLogicalModelPermissionInMetadata,
     dropRelationshipInMetadata,
     dropNativeQueryRelationshipInMetadata,
     dropRemoteRelationshipInMetadata,
@@ -59,9 +60,13 @@ import Data.Monoid (Dual (..), Endo (..))
 import Hasura.Function.Cache
 import Hasura.Function.Metadata (FunctionMetadata (..))
 import Hasura.Incremental qualified as Inc
-import Hasura.LogicalModel.Metadata (LogicalModelMetadata, LogicalModelName, lmmSelectPermissions)
+import Hasura.LogicalModel.Lenses (lmmSelectPermissions)
+import Hasura.LogicalModel.Metadata (LogicalModelMetadata, LogicalModelName)
+import Hasura.LogicalModelResolver.Lenses (ilmmSelectPermissions)
+import Hasura.LogicalModelResolver.Metadata (InlineLogicalModelMetadata (..))
 import Hasura.Metadata.DTO.MetadataV3 (MetadataV3 (..))
-import Hasura.NativeQuery.Metadata (NativeQueryMetadata, NativeQueryName, nqmArrayRelationships)
+import Hasura.NativeQuery.Lenses (nqmArrayRelationships)
+import Hasura.NativeQuery.Metadata (NativeQueryMetadata, NativeQueryName)
 import Hasura.Prelude
 import Hasura.RQL.Types.Allowlist
 import Hasura.RQL.Types.ApiLimit
@@ -430,6 +435,14 @@ dropLogicalModelPermissionInMetadata ::
   RoleName -> PermType -> LogicalModelMetadata b -> LogicalModelMetadata b
 dropLogicalModelPermissionInMetadata rn = \case
   PTSelect -> lmmSelectPermissions %~ InsOrdHashMap.delete rn
+  PTInsert -> error "Not implemented yet"
+  PTDelete -> error "Not implemented yet"
+  PTUpdate -> error "Not implemented yet"
+
+dropInlineLogicalModelPermissionInMetadata ::
+  RoleName -> PermType -> InlineLogicalModelMetadata b -> InlineLogicalModelMetadata b
+dropInlineLogicalModelPermissionInMetadata rn = \case
+  PTSelect -> ilmmSelectPermissions %~ InsOrdHashMap.delete rn
   PTInsert -> error "Not implemented yet"
   PTDelete -> error "Not implemented yet"
   PTUpdate -> error "Not implemented yet"

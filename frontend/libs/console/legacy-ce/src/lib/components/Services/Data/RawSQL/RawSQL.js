@@ -42,11 +42,26 @@ import { unsupportedRawSQLDrivers } from './utils';
 import { nativeDrivers } from '../../../../features/DataSource';
 import { useRunSQL } from './hooks/useRunSQL';
 import { useFireNotification } from '../../../../new-components/Notifications';
+import _push from '../push';
+import { hasuraToast } from '../../../../new-components/Toasts';
 
 const checkChangeLang = (sql, selectedDriver) => {
   return (
     !sql?.match(/(?:\$\$\s+)?language\s+plpgsql/i) && selectedDriver === 'citus'
   );
+};
+
+const checkTextLength = sql => {
+  const LIMIT = 5000;
+  if (sql.length > LIMIT) {
+    hasuraToast({
+      type: 'warning',
+      title: 'SQL query wont be saved in local storage',
+      message: `Only SQL queries with less than ${LIMIT} characters will be saved.`,
+    });
+    return false;
+  }
+  return true;
 };
 
 /**
@@ -151,7 +166,9 @@ const RawSQL = ({
       }
     }
     return () => {
-      setLSItem(LS_KEYS.rawSQLKey, sqlText);
+      if (checkTextLength(sqlText)) {
+        setLSItem(LS_KEYS.rawSQLKey, sqlText);
+      }
     };
   }, [dispatch, sql, sqlText]);
 
@@ -176,9 +193,10 @@ const RawSQL = ({
     if (!sqlText) {
       setLSItem(LS_KEYS.rawSQLKey, '');
       return;
+    } else if (checkTextLength(sqlText)) {
+      // set SQL to LS
+      setLSItem(LS_KEYS.rawSQLKey, sqlText);
     }
-    // set SQL to LS
-    setLSItem(LS_KEYS.rawSQLKey, sqlText);
 
     // check migration mode global
     if (migrationMode) {
@@ -205,9 +223,11 @@ const RawSQL = ({
           selectedDriver
         )
       );
+      dispatch(_push('/data/sql'));
       return;
     }
     dispatch(executeSQL(false, '', statementTimeout, selectedDatabase));
+    dispatch(_push('/data/sql'));
   };
 
   const getMigrationWarningModal = () => {
@@ -629,16 +649,32 @@ RawSQL.propTypes = {
   statementTimeout: PropTypes.string.isRequired,
 };
 
-const mapStateToProps = state => ({
-  ...state.rawSQL,
-  migrationMode: state.main.migrationMode,
-  currentSchema: state.tables.currentSchema,
-  allSchemas: state.tables.allSchemas,
-  serverVersion: state.main.serverVersion ? state.main.serverVersion : '',
-  sources: getDataSources(state),
-  currentDataSource: state.tables.currentDataSource,
-  metadataSources: state.metadata.metadataObject.sources,
-});
+const mapStateToProps = state => {
+  const nativeSources = state.metadata.metadataObject.sources.filter(source =>
+    nativeDrivers.includes(source.kind)
+  );
+
+  const sources = getDataSources(state).filter(source =>
+    nativeDrivers.includes(source.driver)
+  );
+
+  const currentDataSource = sources.find(
+    source => source.name === state.tables.currentDataSource
+  )
+    ? state.tables.currentDataSource
+    : sources?.[0]?.name || '';
+
+  return {
+    ...state.rawSQL,
+    migrationMode: state.main.migrationMode,
+    currentSchema: state.tables.currentSchema,
+    allSchemas: state.tables.allSchemas,
+    serverVersion: state.main.serverVersion ? state.main.serverVersion : '',
+    sources,
+    currentDataSource,
+    metadataSources: nativeSources,
+  };
+};
 
 const rawSQLConnector = connect => connect(mapStateToProps)(RawSQL);
 

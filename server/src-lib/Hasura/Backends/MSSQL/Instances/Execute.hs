@@ -15,8 +15,10 @@ module Hasura.Backends.MSSQL.Instances.Execute
   )
 where
 
+import Control.Exception.Lifted (bracket_)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson.Extended qualified as J
+import Data.Environment qualified as Env
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.HashSet qualified as Set
@@ -40,6 +42,8 @@ import Hasura.EncJSON
 import Hasura.GraphQL.Execute.Backend
 import Hasura.GraphQL.Execute.Subscription.Plan
 import Hasura.GraphQL.Namespace (RootFieldAlias (..), RootFieldMap)
+import Hasura.GraphQL.Parser.Variable qualified as G
+import Hasura.Logging qualified as L
 import Hasura.Prelude
 import Hasura.QueryTags (QueryTagsComment)
 import Hasura.RQL.IR
@@ -51,6 +55,7 @@ import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Session
 import Language.GraphQL.Draft.Syntax qualified as G
+import Network.HTTP.Client as HTTP
 import Network.HTTP.Types qualified as HTTP
 
 instance BackendExecute 'MSSQL where
@@ -113,17 +118,61 @@ msDBQueryPlan userInfo sourceName sourceConfig qrf _ _ = do
             pure result
       mssqlRunReadOnly (_mscExecCtx sourceConfig) (fmap withNoStatistics queryTx)
 
+-- Runs the query in "SHOWPLAN_TEXT" mode, which instead plans the query, but
+-- does not execute it.
+--
+-- This does not work for prepared statements, so we have to use a different
+-- translation strategy. We first convert the query to an unprepared style,
+-- populating it with references to variables instead of the values themselves.
+--
+-- We then declare all these variables, but do not set their values, and run the
+-- query in SHOWPLAN_TEXT mode. We have to do this as a single transaction, so
+-- we concatenate them all together.
+--
+-- The variables are all declared as type `NVARCHAR(MAX)`, which seems to work
+-- even when we need to use them in another context, e.g. an integer.
 runShowplan ::
-  (MonadIO m) =>
+  (MonadIO m, MonadBaseControl IO m) =>
   ODBC.Query ->
   Tx.TxET QErr m [Text]
 runShowplan query = Tx.withTxET defaultMSSQLTxErrorHandler do
-  Tx.unitQuery "SET SHOWPLAN_TEXT ON"
-  texts <- Tx.multiRowQuery query
-  Tx.unitQuery "SET SHOWPLAN_TEXT OFF"
-  -- we don't need to use 'finally' here - if an exception occurs,
-  -- the connection is removed from the resource pool in 'withResource'.
-  pure texts
+  bracket_ setShowplanOn setShowplanOff
+    . Tx.multiRowQuery
+    . ODBC.rawUnescapedText
+    $ mconcat paramDeclarations
+    <> "\n-- QUERY START --\n"
+    <> unparameterizedQueryWithVariables
+    <> "\n-- QUERY END --\n"
+  where
+    setShowplanOn = Tx.unitQuery "SET SHOWPLAN_TEXT ON"
+    setShowplanOff = Tx.unitQuery "SET SHOWPLAN_TEXT OFF"
+    paramDeclarations =
+      zipWith
+        (\paramIndex paramType -> "DECLARE @" <> tshow paramIndex <> " " <> paramType <> ";\n")
+        [1 :: Int ..]
+        (reverse reversedParameterTypes)
+    -- we build up the SQL and parameter type list with a counter so we can use
+    -- a fresh variable for each parameter
+    unparameterizedQueryWithVariables :: Text
+    reversedParameterTypes :: [Text]
+    (unparameterizedQueryWithVariables, _, reversedParameterTypes) =
+      foldl
+        ( \(text, paramIndex, reversedParamTypes) part -> case part of
+            ODBC.TextPart t -> (text <> t, paramIndex, reversedParamTypes)
+            ODBC.ValuePart v ->
+              case paramType of
+                Just t -> (text <> "@" <> tshow paramIndex, paramIndex + 1, t : reversedParamTypes)
+                Nothing -> (text <> ODBC.renderValue v, paramIndex, reversedParamTypes)
+              where
+                -- Copying from the ODBC library, we only use parameters for
+                -- a couple of types; everything else is inlined into the query.
+                paramType = case v of
+                  ODBC.TextValue {} -> Just "VARCHAR(MAX)"
+                  ODBC.BinaryValue {} -> Just "VARBINARY(MAX)"
+                  _ -> Nothing
+        )
+        ("", 1 :: Int, [])
+        (ODBC.queryParts query)
 
 msDBQueryExplain ::
   (MonadError QErr m) =>
@@ -137,8 +186,12 @@ msDBQueryExplain ::
   m (AB.AnyBackend DBStepInfo)
 msDBQueryExplain fieldName userInfo sourceName sourceConfig qrf _ _ = do
   let sessionVariables = _uiSession userInfo
-  statement <- qwdQuery <$> planQuery sessionVariables qrf
-  let query = toQueryPretty (fromSelect statement)
+  queryPlan <- planQuery sessionVariables qrf
+  select <-
+    case queryPlan of
+      QueryWithDDL [] s [] -> pure s
+      _ -> throw400 NotSupported "queries which require multiple steps cannot be explained"
+  let query = toQueryPretty (fromSelect select)
       queryString = ODBC.renderQuery query
       odbcQuery = OnBaseMonad
         $ mssqlRunReadOnly
@@ -249,6 +302,9 @@ msDBMutationPlan ::
   ( MonadError QErr m,
     MonadReader QueryTagsComment m
   ) =>
+  Env.Environment ->
+  HTTP.Manager ->
+  L.Logger L.Hasura ->
   UserInfo ->
   Options.StringifyNumbers ->
   SourceName ->
@@ -256,8 +312,9 @@ msDBMutationPlan ::
   MutationDB 'MSSQL Void (UnpreparedValue 'MSSQL) ->
   [HTTP.Header] ->
   Maybe G.Name ->
+  Maybe (HashMap G.Name (G.Value G.Variable)) ->
   m (DBStepInfo 'MSSQL)
-msDBMutationPlan userInfo stringifyNum sourceName sourceConfig mrf _headers _gName = do
+msDBMutationPlan _env _manager _logger userInfo stringifyNum sourceName sourceConfig mrf _headers _gName _maybeSelSetArgs = do
   go <$> case mrf of
     MDBInsert annInsert -> executeInsert userInfo stringifyNum sourceConfig annInsert
     MDBDelete annDelete -> executeDelete userInfo stringifyNum sourceConfig annDelete

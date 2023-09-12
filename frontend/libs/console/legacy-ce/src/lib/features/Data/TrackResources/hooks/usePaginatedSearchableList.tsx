@@ -5,20 +5,22 @@ import { paginate, search } from '../utils';
 
 export function usePaginatedSearchableList<TData extends { id: string }>({
   data,
-  searchFn,
+  filterFn,
+  defaultQuery,
 }: {
   data: TData[];
-  searchFn: (searchText: string, item: TData) => boolean;
+  filterFn: (searchText: string, item: TData) => boolean;
+  defaultQuery?: string;
 }) {
   const [pageNumber, setPageNumber] = useState(DEFAULT_PAGE_NUMBER);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [searchText, setSearchText] = useState('');
+  const [searchText, setSearchText] = useState(defaultQuery ?? '');
 
   const searchIsActive = !!searchText.length;
 
   const filteredData = React.useMemo(
-    () => search<TData>({ data, searchText, searchFn }),
-    [data, searchFn, searchText]
+    () => search<TData>({ data, searchText, filterFn }),
+    [data, filterFn, searchText]
   );
 
   const { data: paginatedData, totalPages } = React.useMemo(
@@ -28,17 +30,17 @@ export function usePaginatedSearchableList<TData extends { id: string }>({
 
   const rowsToBeChecked = searchIsActive ? filteredData : paginatedData;
 
-  const checkData = useCheckRows(rowsToBeChecked, data);
+  const checkData = useCheckRows(rowsToBeChecked, filteredData, data);
 
-  const checkedItems = React.useMemo(
+  const getCheckedItems = React.useCallback(
     () => data.filter(d => checkData.checkedIds.includes(d.id)),
     [checkData.checkedIds, data]
   );
 
-  const handleSearch = React.useCallback(
-    (searchQuery: string) => setSearchText(searchQuery),
-    []
-  );
+  const handleSearch = React.useCallback((searchQuery: string) => {
+    setPageNumber(DEFAULT_PAGE_NUMBER);
+    setSearchText(searchQuery);
+  }, []);
 
   const incrementPage = React.useCallback(() => {
     setPageNumber(currentPage =>
@@ -52,6 +54,14 @@ export function usePaginatedSearchableList<TData extends { id: string }>({
     );
   }, []);
 
+  const goToFirstPage = React.useCallback(() => {
+    setPageNumber(() => 1);
+  }, []);
+
+  const goToLastPage = React.useCallback(() => {
+    setPageNumber(() => totalPages);
+  }, [totalPages]);
+
   return {
     pageNumber,
     setPageNumber,
@@ -59,14 +69,16 @@ export function usePaginatedSearchableList<TData extends { id: string }>({
     setPageSize,
     incrementPage,
     decrementPage,
+    goToFirstPage,
+    goToLastPage,
     totalPages,
     searchIsActive,
     handleSearch,
     checkData,
     filteredData,
     paginatedData,
-    checkedItems,
-    dataSize: data.length,
+    getCheckedItems,
+    dataSize: filteredData.length,
   };
 }
 

@@ -16,6 +16,7 @@ where
 
 import Control.Monad.Trans.Control qualified as MT
 import Data.Aeson qualified as J
+import Data.Environment qualified as Env
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.IntMap qualified as IntMap
@@ -23,7 +24,7 @@ import Data.Sequence qualified as Seq
 import Database.PG.Query qualified as PG
 import Hasura.Backends.Postgres.Connection.MonadTx
 import Hasura.Backends.Postgres.Execute.ConnectionTemplate (QueryContext (..), QueryOperationType (..))
-import Hasura.Backends.Postgres.Execute.Insert (convertToSQLTransaction)
+import Hasura.Backends.Postgres.Execute.Insert (convertToSQLTransaction, validateInsertInput, validateInsertRows)
 import Hasura.Backends.Postgres.Execute.Mutation qualified as PGE
 import Hasura.Backends.Postgres.Execute.Prepare
   ( PlanningSt (..),
@@ -38,7 +39,7 @@ import Hasura.Backends.Postgres.Execute.Types
 import Hasura.Backends.Postgres.SQL.DML qualified as S
 import Hasura.Backends.Postgres.SQL.Types qualified as Postgres
 import Hasura.Backends.Postgres.SQL.Value qualified as Postgres
-import Hasura.Backends.Postgres.Translate.Select (PostgresAnnotatedFieldJSON)
+import Hasura.Backends.Postgres.Translate.Select (PostgresTranslateSelect)
 import Hasura.Backends.Postgres.Translate.Select qualified as DS
 import Hasura.Backends.Postgres.Types.Function qualified as Postgres
 import Hasura.Backends.Postgres.Types.Update qualified as Postgres
@@ -67,17 +68,15 @@ import Hasura.GraphQL.Namespace
     RootFieldMap,
   )
 import Hasura.GraphQL.Namespace qualified as G
+import Hasura.GraphQL.Parser.Variable qualified as G
+import Hasura.Logging qualified as L
 import Hasura.Prelude
 import Hasura.QueryTags
   ( QueryTagsComment (..),
     emptyQueryTagsComment,
   )
 import Hasura.RQL.IR
-import Hasura.RQL.IR.Delete qualified as IR
-import Hasura.RQL.IR.Insert qualified as IR
-import Hasura.RQL.IR.Returning qualified as IR
-import Hasura.RQL.IR.Select qualified as IR
-import Hasura.RQL.IR.Update qualified as IR
+import Hasura.RQL.IR qualified as IR
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column
@@ -90,11 +89,13 @@ import Hasura.RQL.Types.Common
     JsonAggSelect (..),
     SourceName,
   )
+import Hasura.RQL.Types.Permission (ValidateInput (..), ValidateInputHttpDefinition (..))
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Session (UserInfo (..))
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
+import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types qualified as HTTP
 
 data PreparedSql = PreparedSql
@@ -105,7 +106,7 @@ data PreparedSql = PreparedSql
 
 instance
   ( Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind
+    PostgresTranslateSelect pgKind
   ) =>
   BackendExecute ('Postgres pgKind)
   where
@@ -127,8 +128,9 @@ pgDBQueryPlan ::
   forall pgKind m.
   ( MonadError QErr m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
-    MonadReader QueryTagsComment m
+    PostgresTranslateSelect pgKind,
+    MonadReader QueryTagsComment m,
+    MonadIO m
   ) =>
   UserInfo ->
   SourceName ->
@@ -150,14 +152,15 @@ pgDBQueryPlan userInfo sourceName sourceConfig qrf reqHeaders operationName = do
             $ QueryContext operationName
             $ QueryOperationType G.OperationTypeQuery
      in applyConnectionTemplateResolverNonAdmin connectionTemplateResolver userInfo reqHeaders queryContext
-  let preparedSQLWithQueryTags = appendPreparedSQLWithQueryTags (irToRootFieldPlan planVals preparedQuery) queryTagsComment
+  rootFieldPlan <- irToRootFieldPlan userInfo planVals preparedQuery
+  let preparedSQLWithQueryTags = appendPreparedSQLWithQueryTags rootFieldPlan queryTagsComment
   let (action, preparedSQL) = mkCurPlanTx userInfo preparedSQLWithQueryTags
 
   pure $ DBStepInfo @('Postgres pgKind) sourceName sourceConfig preparedSQL (fmap withNoStatistics action) resolvedConnectionTemplate
 
 -- | Used by the @dc-postgres-agent to compile a query.
 pgDBQueryPlanSimple ::
-  (MonadError QErr m) =>
+  (MonadError QErr m, MonadIO m) =>
   UserInfo ->
   QueryTagsComment ->
   QueryDB ('Postgres 'Vanilla) Void (UnpreparedValue ('Postgres 'Vanilla)) ->
@@ -165,8 +168,9 @@ pgDBQueryPlanSimple ::
 pgDBQueryPlanSimple userInfo queryTagsComment query = do
   (preparedQuery, PlanningSt {_psPrepped = planVals}) <-
     flip runStateT initPlanningSt $ traverse (prepareWithPlan userInfo) query
+  rootFieldPlan <- irToRootFieldPlan userInfo planVals preparedQuery
   let preparedSQLWithQueryTags =
-        appendPreparedSQLWithQueryTags (irToRootFieldPlan planVals preparedQuery) queryTagsComment
+        appendPreparedSQLWithQueryTags rootFieldPlan queryTagsComment
   let (action, preparedSQL) = mkCurPlanTx userInfo preparedSQLWithQueryTags
   pure (action, preparedSQL)
 
@@ -174,7 +178,8 @@ pgDBQueryExplain ::
   forall pgKind m.
   ( MonadError QErr m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind
+    PostgresTranslateSelect pgKind,
+    MonadIO m
   ) =>
   RootFieldAlias ->
   UserInfo ->
@@ -186,8 +191,8 @@ pgDBQueryExplain ::
   m (AB.AnyBackend DBStepInfo)
 pgDBQueryExplain fieldName userInfo sourceName sourceConfig rootSelection reqHeaders operationName = do
   preparedQuery <- traverse (prepareWithoutPlan userInfo) rootSelection
-  let PreparedSql querySQL _ = irToRootFieldPlan mempty preparedQuery
-      textSQL = PG.getQueryText querySQL
+  PreparedSql querySQL _ <- irToRootFieldPlan userInfo mempty preparedQuery
+  let textSQL = PG.getQueryText querySQL
       -- CAREFUL!: an `EXPLAIN ANALYZE` here would actually *execute* this
       -- query, maybe resulting in privilege escalation:
       withExplain = "EXPLAIN " <> textSQL
@@ -236,14 +241,23 @@ convertDelete ::
   forall pgKind m.
   ( MonadError QErr m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
-    MonadReader QueryTagsComment m
+    PostgresTranslateSelect pgKind,
+    MonadReader QueryTagsComment m,
+    MonadIO m,
+    Tracing.MonadTrace m
   ) =>
+  Env.Environment ->
+  HTTP.Manager ->
+  L.Logger L.Hasura ->
   UserInfo ->
   IR.AnnDelG ('Postgres pgKind) Void (UnpreparedValue ('Postgres pgKind)) ->
   Options.StringifyNumbers ->
+  [HTTP.Header] ->
+  Maybe (HashMap G.Name (G.Value G.Variable)) ->
   m (OnBaseMonad (PG.TxET QErr) EncJSON)
-convertDelete userInfo deleteOperation stringifyNum = do
+convertDelete env manager logger userInfo deleteOperation stringifyNum reqHeaders selSetArguments = do
+  for_ (_adValidateInput deleteOperation) $ \(VIHttp ValidateInputHttpDefinition {..}) -> do
+    PGE.validateDeleteMutation env manager logger userInfo _vihdUrl _vihdHeaders _vihdTimeout _vihdForwardClientHeaders reqHeaders deleteOperation selSetArguments
   queryTags <- ask
   preparedDelete <- traverse (prepareWithoutPlan userInfo) deleteOperation
   pure
@@ -255,14 +269,23 @@ convertUpdate ::
   forall pgKind m.
   ( MonadError QErr m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
-    MonadReader QueryTagsComment m
+    PostgresTranslateSelect pgKind,
+    MonadReader QueryTagsComment m,
+    MonadIO m,
+    Tracing.MonadTrace m
   ) =>
+  Env.Environment ->
+  HTTP.Manager ->
+  L.Logger L.Hasura ->
   UserInfo ->
   IR.AnnotatedUpdateG ('Postgres pgKind) Void (UnpreparedValue ('Postgres pgKind)) ->
   Options.StringifyNumbers ->
+  [HTTP.Header] ->
+  Maybe (HashMap G.Name (G.Value G.Variable)) ->
   m (OnBaseMonad (PG.TxET QErr) EncJSON)
-convertUpdate userInfo updateOperation stringifyNum = do
+convertUpdate env manager logger userInfo updateOperation stringifyNum reqHeaders selSetArguments = do
+  for_ (_auValidateInput updateOperation) $ \(VIHttp ValidateInputHttpDefinition {..}) -> do
+    PGE.validateUpdateMutation env manager logger userInfo _vihdUrl _vihdHeaders _vihdTimeout _vihdForwardClientHeaders reqHeaders updateOperation selSetArguments
   queryTags <- ask
   preparedUpdate <- traverse (prepareWithoutPlan userInfo) updateOperation
   if Postgres.updateVariantIsEmpty $ IR._auUpdateVariant updateOperation
@@ -276,15 +299,25 @@ convertUpdate userInfo updateOperation stringifyNum = do
 convertInsert ::
   forall pgKind m.
   ( MonadError QErr m,
+    MonadIO m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
-    MonadReader QueryTagsComment m
+    PostgresTranslateSelect pgKind,
+    MonadReader QueryTagsComment m,
+    Tracing.MonadTrace m
   ) =>
+  Env.Environment ->
+  HTTP.Manager ->
+  L.Logger L.Hasura ->
   UserInfo ->
   IR.AnnotatedInsert ('Postgres pgKind) Void (UnpreparedValue ('Postgres pgKind)) ->
   Options.StringifyNumbers ->
+  [HTTP.Header] ->
   m (OnBaseMonad (PG.TxET QErr) EncJSON)
-convertInsert userInfo insertOperation stringifyNum = do
+convertInsert env manager logger userInfo insertOperation stringifyNum reqHeaders = do
+  -- Validate insert data
+  (_, res) <- flip runStateT InsOrdHashMap.empty $ validateInsertInput env manager logger userInfo (IR._aiData insertOperation) reqHeaders
+  for_ res $ \(rows, VIHttp ValidateInputHttpDefinition {..}) -> do
+    validateInsertRows env manager logger userInfo _vihdUrl _vihdHeaders _vihdTimeout _vihdForwardClientHeaders reqHeaders rows
   queryTags <- ask
   preparedInsert <- traverse (prepareWithoutPlan userInfo) insertOperation
   pure
@@ -298,8 +331,9 @@ convertFunction ::
   forall pgKind m.
   ( MonadError QErr m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
-    MonadReader QueryTagsComment m
+    PostgresTranslateSelect pgKind,
+    MonadReader QueryTagsComment m,
+    MonadIO m
   ) =>
   UserInfo ->
   JsonAggSelect ->
@@ -316,7 +350,8 @@ convertFunction userInfo jsonAggSelect unpreparedQuery = do
         case jsonAggSelect of
           JASMultipleRows -> QDBMultipleRows
           JASSingleObject -> QDBSingleRow
-  let preparedSQLWithQueryTags = appendPreparedSQLWithQueryTags (irToRootFieldPlan planVals $ queryResultFn preparedQuery) queryTags
+  rootFieldPlan <- irToRootFieldPlan userInfo planVals $ queryResultFn preparedQuery
+  let preparedSQLWithQueryTags = appendPreparedSQLWithQueryTags rootFieldPlan queryTags
   pure
     $! fst
     $ mkCurPlanTx userInfo preparedSQLWithQueryTags -- forget (Maybe PreparedSql)
@@ -324,10 +359,15 @@ convertFunction userInfo jsonAggSelect unpreparedQuery = do
 pgDBMutationPlan ::
   forall pgKind m.
   ( MonadError QErr m,
+    MonadIO m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
-    MonadReader QueryTagsComment m
+    PostgresTranslateSelect pgKind,
+    MonadReader QueryTagsComment m,
+    Tracing.MonadTrace m
   ) =>
+  Env.Environment ->
+  HTTP.Manager ->
+  L.Logger L.Hasura ->
   UserInfo ->
   Options.StringifyNumbers ->
   SourceName ->
@@ -335,8 +375,9 @@ pgDBMutationPlan ::
   MutationDB ('Postgres pgKind) Void (UnpreparedValue ('Postgres pgKind)) ->
   [HTTP.Header] ->
   Maybe G.Name ->
+  Maybe (HashMap G.Name (G.Value G.Variable)) ->
   m (DBStepInfo ('Postgres pgKind))
-pgDBMutationPlan userInfo stringifyNum sourceName sourceConfig mrf reqHeaders operationName = do
+pgDBMutationPlan env manager logger userInfo stringifyNum sourceName sourceConfig mrf reqHeaders operationName selSetArguments = do
   resolvedConnectionTemplate <-
     let connectionTemplateResolver =
           connectionTemplateConfigResolver (_pscConnectionTemplateConfig sourceConfig)
@@ -346,9 +387,9 @@ pgDBMutationPlan userInfo stringifyNum sourceName sourceConfig mrf reqHeaders op
             $ QueryOperationType G.OperationTypeMutation
      in applyConnectionTemplateResolverNonAdmin connectionTemplateResolver userInfo reqHeaders queryContext
   go resolvedConnectionTemplate <$> case mrf of
-    MDBInsert s -> convertInsert userInfo s stringifyNum
-    MDBUpdate s -> convertUpdate userInfo s stringifyNum
-    MDBDelete s -> convertDelete userInfo s stringifyNum
+    MDBInsert s -> convertInsert env manager logger userInfo s stringifyNum reqHeaders
+    MDBUpdate s -> convertUpdate env manager logger userInfo s stringifyNum reqHeaders selSetArguments
+    MDBDelete s -> convertDelete env manager logger userInfo s stringifyNum reqHeaders selSetArguments
     MDBFunction returnsSet s -> convertFunction userInfo returnsSet s
   where
     go resolvedConnectionTemplate v =
@@ -367,7 +408,7 @@ pgDBLiveQuerySubscriptionPlan ::
   ( MonadError QErr m,
     MonadIO m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
+    PostgresTranslateSelect pgKind,
     MonadReader QueryTagsComment m
   ) =>
   UserInfo ->
@@ -384,8 +425,8 @@ pgDBLiveQuerySubscriptionPlan userInfo _sourceName sourceConfig namespace unprep
       $ for unpreparedAST
       $ traverse (PGL.resolveMultiplexedValue (_uiSession userInfo))
   subscriptionQueryTagsComment <- ask
-  let multiplexedQuery = PGL.mkMultiplexedQuery $ InsOrdHashMap.mapKeys _rfaAlias preparedAST
-      multiplexedQueryWithQueryTags =
+  multiplexedQuery <- PGL.mkMultiplexedQuery userInfo $ InsOrdHashMap.mapKeys _rfaAlias preparedAST
+  let multiplexedQueryWithQueryTags =
         multiplexedQuery {PGL.unMultiplexedQuery = appendSQLWithQueryTags (PGL.unMultiplexedQuery multiplexedQuery) subscriptionQueryTagsComment}
       roleName = _uiRole userInfo
       parameterizedPlan = ParameterizedSubscriptionQueryPlan roleName multiplexedQueryWithQueryTags
@@ -430,7 +471,7 @@ pgDBStreamingSubscriptionPlan ::
   ( MonadError QErr m,
     MonadIO m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind,
+    PostgresTranslateSelect pgKind,
     MonadReader QueryTagsComment m
   ) =>
   UserInfo ->
@@ -445,8 +486,8 @@ pgDBStreamingSubscriptionPlan userInfo _sourceName sourceConfig (rootFieldAlias,
     flip runStateT mempty
       $ traverse (PGL.resolveMultiplexedValue (_uiSession userInfo)) unpreparedAST
   subscriptionQueryTagsComment <- ask
-  let multiplexedQuery = PGL.mkStreamingMultiplexedQuery (G._rfaAlias rootFieldAlias, preparedAST)
-      multiplexedQueryWithQueryTags =
+  multiplexedQuery <- PGL.mkStreamingMultiplexedQuery userInfo (G._rfaAlias rootFieldAlias, preparedAST)
+  let multiplexedQueryWithQueryTags =
         multiplexedQuery {PGL.unMultiplexedQuery = appendSQLWithQueryTags (PGL.unMultiplexedQuery multiplexedQuery) subscriptionQueryTagsComment}
       roleName = _uiRole userInfo
       parameterizedPlan = ParameterizedSubscriptionQueryPlan roleName multiplexedQueryWithQueryTags
@@ -538,21 +579,25 @@ mkCurPlanTx userInfo ps@(PreparedSql q prepMap) =
 -- convert a query from an intermediate representation to... another
 irToRootFieldPlan ::
   ( Backend ('Postgres pgKind),
-    DS.PostgresAnnotatedFieldJSON pgKind
+    PostgresTranslateSelect pgKind,
+    MonadIO m,
+    MonadError QErr m
   ) =>
+  UserInfo ->
   PrepArgMap ->
   QueryDB ('Postgres pgKind) Void S.SQLExp ->
-  PreparedSql
-irToRootFieldPlan prepped = \case
-  QDBMultipleRows s -> mkPreparedSql (DS.selectQuerySQL JASMultipleRows) s
-  QDBSingleRow s -> mkPreparedSql (DS.selectQuerySQL JASSingleObject) s
-  QDBAggregation s -> mkPreparedSql DS.selectAggregateQuerySQL s
-  QDBConnection s -> mkPreparedSql DS.connectionSelectQuerySQL s
-  QDBStreamMultipleRows s -> mkPreparedSql DS.selectStreamQuerySQL s
+  m PreparedSql
+irToRootFieldPlan userInfo prepped = \case
+  QDBMultipleRows s -> mkPreparedSql (DS.selectQuerySQL userInfo JASMultipleRows) s
+  QDBSingleRow s -> mkPreparedSql (DS.selectQuerySQL userInfo JASSingleObject) s
+  QDBAggregation s -> mkPreparedSql (DS.selectAggregateQuerySQL userInfo) s
+  QDBConnection s -> mkPreparedSql (DS.connectionSelectQuerySQL userInfo) s
+  QDBStreamMultipleRows s -> mkPreparedSql (DS.selectStreamQuerySQL userInfo) s
   where
-    mkPreparedSql :: (t -> PG.Query) -> t -> PreparedSql
-    mkPreparedSql f simpleSel =
-      PreparedSql (f simpleSel) prepped
+    mkPreparedSql :: (Monad m) => (t -> m PG.Query) -> t -> m PreparedSql
+    mkPreparedSql f simpleSel = do
+      query <- f simpleSel
+      pure $ PreparedSql query prepped
 
 -- Append Query Tags to the Prepared SQL
 appendPreparedSQLWithQueryTags :: PreparedSql -> QueryTagsComment -> PreparedSql
@@ -576,7 +621,8 @@ pgDBRemoteRelationshipPlan ::
   forall pgKind m.
   ( MonadError QErr m,
     Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind
+    PostgresTranslateSelect pgKind,
+    MonadIO m
   ) =>
   UserInfo ->
   SourceName ->

@@ -251,7 +251,9 @@ mkDefaultRelationshipParser ::
   SchemaT r m (Maybe (InputFieldsParser n (Maybe (IR.AnnotatedInsertField b (IR.UnpreparedValue b)))))
 mkDefaultRelationshipParser backendInsertAction xNestedInserts relationshipInfo = runMaybeT do
   otherTableName <- case riTarget relationshipInfo of
-    RelTargetNativeQuery _ -> error "mkDefaultRelationshipParser RelTargetNativeQuery"
+    RelTargetNativeQuery _ ->
+      -- Native Queries do not support mutations atm
+      hoistMaybe Nothing
     RelTargetTable tn -> pure tn
   let relName = riName relationshipInfo
   otherTableInfo <- askTableInfo otherTableName
@@ -366,7 +368,8 @@ mkInsertObject objects tableInfo backendInsert insertPerms updatePerms =
       _aiPrimaryKey = primaryKey,
       _aiExtraTableMetadata = extraTableMetadata,
       _aiPresetValues = presetValues,
-      _aiBackendInsert = backendInsert
+      _aiBackendInsert = backendInsert,
+      _aiValidateInput = ipiValidateInput insertPerms
     }
   where
     table = tableInfoName tableInfo
@@ -417,7 +420,7 @@ deleteFromTable scenario tableInfo fieldName description = runMaybeT $ do
     pure
       $ P.setFieldParserOrigin (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName))
       $ P.subselection fieldName description whereArg selection
-      <&> mkDeleteObject (tableInfoName tableInfo) columns deletePerms (Just tCase)
+      <&> mkDeleteObject (tableInfoName tableInfo) columns deletePerms (Just tCase) False
       . fmap IR.MOutMultirowFields
 
 -- | Construct a root field, normally called delete_tablename_by_pk, that can be used to delete an
@@ -454,7 +457,7 @@ deleteFromTableByPk scenario tableInfo fieldName description = runMaybeT $ do
   pure
     $ P.setFieldParserOrigin (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName))
     $ P.subselection fieldName description pkArgs selection
-    <&> mkDeleteObject (tableInfoName tableInfo) columns deletePerms (Just tCase)
+    <&> mkDeleteObject (tableInfoName tableInfo) columns deletePerms (Just tCase) True
     . fmap IR.MOutSinglerowObject
 
 mkDeleteObject ::
@@ -463,15 +466,18 @@ mkDeleteObject ::
   [ColumnInfo b] ->
   DelPermInfo b ->
   Maybe NamingCase ->
+  Bool ->
   (AnnBoolExp b (IR.UnpreparedValue b), IR.MutationOutputG b (IR.RemoteRelationshipField IR.UnpreparedValue) (IR.UnpreparedValue b)) ->
   IR.AnnDelG b (IR.RemoteRelationshipField IR.UnpreparedValue) (IR.UnpreparedValue b)
-mkDeleteObject table columns deletePerms tCase (whereExp, mutationOutput) =
+mkDeleteObject table columns deletePerms tCase isDeleteByPK (whereExp, mutationOutput) =
   IR.AnnDel
     { IR._adTable = table,
       IR._adWhere = (permissionFilter, whereExp),
       IR._adOutput = mutationOutput,
       IR._adAllCols = columns,
-      IR._adNamingConvention = tCase
+      IR._adNamingConvention = tCase,
+      IR._adValidateInput = dpiValidateInput deletePerms,
+      IR._adIsDeleteByPk = isDeleteByPK
     }
   where
     permissionFilter = fmap partialSQLExpToUnpreparedValue <$> dpiFilter deletePerms
@@ -537,11 +543,12 @@ primaryKeysArguments tableInfo = runMaybeT $ do
     $ fmap (BoolAnd . toList)
     . sequenceA
     <$> for columns \columnInfo -> do
+      let redactionExp = fromMaybe NoRedaction $ getRedactionExprForColumn selectPerms (ciColumn columnInfo)
       field <- columnParser (ciType columnInfo) (G.Nullability False)
       pure
         $ BoolField
-        . AVColumn columnInfo
+        . AVColumn columnInfo redactionExp
         . pure
-        . AEQ True
+        . AEQ NonNullableComparison
         . IR.mkParameter
         <$> P.field (ciName columnInfo) (ciDescription columnInfo) field

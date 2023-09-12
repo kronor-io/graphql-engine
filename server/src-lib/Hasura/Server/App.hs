@@ -96,7 +96,7 @@ import Hasura.Server.AppStateRef
   )
 import Hasura.Server.Auth (AuthMode (..), UserAuthentication (..))
 import Hasura.Server.Compression
-import Hasura.Server.Init hiding (checkFeatureFlag)
+import Hasura.Server.Init
 import Hasura.Server.Limits
 import Hasura.Server.Logging
 import Hasura.Server.Middleware (corsMiddleware)
@@ -124,7 +124,6 @@ import Web.Spock.Core qualified as Spock
 data HandlerCtx = HandlerCtx
   { hcAppContext :: AppContext,
     hcSchemaCache :: RebuildableSchemaCache,
-    hcSchemaCacheVersion :: SchemaCacheVer,
     hcUser :: UserInfo,
     hcReqHeaders :: [HTTP.Header],
     hcRequestId :: RequestId,
@@ -143,6 +142,7 @@ newtype Handler m a = Handler (ReaderT HandlerCtx (ExceptT QErr m) a)
       MonadBaseControl b,
       MonadReader HandlerCtx,
       MonadError QErr,
+      Tracing.MonadTraceContext,
       MonadTrace,
       HasAppEnv,
       HasCacheStaticConfig,
@@ -350,11 +350,11 @@ mkSpockAction appStateRef qErrEncoder qErrModifier apiHandler = do
         authInfo <- onLeft authenticationResp (logErrorAndResp Nothing requestId req (reqBody, Nothing) False origHeaders (ExtraUserInfo Nothing) . qErrModifier)
         let (userInfo, _, authHeaders, extraUserInfo) = authInfo
         appContext <- liftIO $ getAppContext appStateRef
-        (schemaCache, schemaCacheVer) <- liftIO $ getRebuildableSchemaCacheWithVersion appStateRef
+        schemaCache <- liftIO $ getRebuildableSchemaCacheWithVersion appStateRef
         pure
           ( userInfo,
             authHeaders,
-            HandlerCtx appContext schemaCache schemaCacheVer userInfo headers requestId ipAddress appEnvLicenseKeyCache,
+            HandlerCtx appContext schemaCache userInfo headers requestId ipAddress appEnvLicenseKeyCache,
             shouldIncludeInternal (_uiRole userInfo) acResponseInternalErrorsConfig,
             extraUserInfo
           )
@@ -490,7 +490,6 @@ v1MetadataHandler ::
     MonadEventLogCleanup m,
     HasAppEnv m,
     HasCacheStaticConfig m,
-    HasFeatureFlagChecker m,
     ProvidesNetwork m,
     MonadGetPolicies m,
     UserInfoM m
@@ -569,11 +568,10 @@ v1Alpha1GQHandler queryType query = do
   AppContext {..} <- asks hcAppContext
   userInfo <- asks hcUser
   schemaCache <- lastBuiltSchemaCache <$> asks hcSchemaCache
-  schemaCacheVer <- asks hcSchemaCacheVersion
   reqHeaders <- asks hcReqHeaders
   ipAddress <- asks hcSourceIpAddress
   requestId <- asks hcRequestId
-  GH.runGQBatched acEnvironment acSQLGenCtx schemaCache schemaCacheVer acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId acResponseInternalErrorsConfig userInfo ipAddress reqHeaders queryType query
+  GH.runGQBatched acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId acResponseInternalErrorsConfig userInfo ipAddress reqHeaders queryType query
 
 v1GQHandler ::
   ( MonadIO m,
@@ -737,11 +735,10 @@ configApiGetHandler appStateRef = do
     $ do
       AppEnv {..} <- lift askAppEnv
       AppContext {..} <- liftIO $ getAppContext appStateRef
-      let (CheckFeatureFlag checkFeatureFlag) = appEnvCheckFeatureFlag
       featureFlagSettings <-
         traverse
-          (\ff -> (,) ff <$> liftIO (checkFeatureFlag ff))
-          (HashMap.elems (getFeatureFlags featureFlags))
+          (\(ff, desc) -> (ff,desc,) <$> liftIO (runCheckFeatureFlag appEnvCheckFeatureFlag ff))
+          (listKnownFeatureFlags appEnvCheckFeatureFlag)
       mkSpockAction appStateRef encodeQErr id
         $ mkGetHandler
         $ do
@@ -759,6 +756,7 @@ configApiGetHandler appStateRef = do
                   acEnabledAPIs
                   acDefaultNamingConvention
                   featureFlagSettings
+                  acApolloFederationStatus
           return (emptyHttpLogGraphQLInfo, JSONResp $ HttpResponse (encJFromJValue res) [])
 
 data HasuraApp = HasuraApp
@@ -770,6 +768,7 @@ data HasuraApp = HasuraApp
 mkWaiApp ::
   forall m impl.
   ( MonadIO m,
+    MonadFail m, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
     MonadFix m,
     MonadStateless IO m,
     LA.Forall (LA.Pure m),
@@ -778,7 +777,6 @@ mkWaiApp ::
     HttpLog m,
     HasAppEnv m,
     HasCacheStaticConfig m,
-    HasFeatureFlagChecker m,
     UserAuthentication m,
     MonadMetadataApiAuthorization m,
     E.MonadGQLExecutionCheck m,
@@ -828,7 +826,6 @@ httpApp ::
     HttpLog m,
     HasAppEnv m,
     HasCacheStaticConfig m,
-    HasFeatureFlagChecker m,
     UserAuthentication m,
     MonadMetadataApiAuthorization m,
     E.MonadGQLExecutionCheck m,
@@ -918,7 +915,6 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
         AppContext {..} <- liftIO $ getAppContext appStateRef
         endpoints <- liftIO $ scEndpoints <$> getSchemaCache appStateRef
         schemaCache <- lastBuiltSchemaCache <$> asks hcSchemaCache
-        schemaCacheVer <- asks hcSchemaCacheVersion
         requestId <- asks hcRequestId
         userInfo <- asks hcUser
         reqHeaders <- asks hcReqHeaders
@@ -934,7 +930,7 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
               Spock.PATCH -> pure EP.PATCH
               other -> throw400 BadRequest $ "Method " <> tshow other <> " not supported."
             _ -> throw400 BadRequest $ "Nonstandard method not allowed for REST endpoints"
-        fmap JSONResp <$> runCustomEndpoint acEnvironment acSQLGenCtx schemaCache schemaCacheVer acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId userInfo reqHeaders ipAddress req endpoints
+        fmap JSONResp <$> runCustomEndpoint acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId userInfo reqHeaders ipAddress req endpoints
 
   -- See Issue #291 for discussion around restified feature
   Spock.hookRouteAll ("api" <//> "rest" <//> Spock.wildcard) $ \wildcard -> do

@@ -1,14 +1,39 @@
-import { useMetadataMigration } from '../../MetadataAPI';
 import { useCallback } from 'react';
-import {
-  MetadataSelectors,
-  useInvalidateMetadata,
-  useMetadata,
-} from '../../hasura-metadata-api';
-import type { TrackableTable } from '../TrackResources/types';
-import { MetadataMigrationOptions } from '../../MetadataAPI/hooks/useMetadataMigration';
 import { transformErrorResponse } from '../../ConnectDBRedesign/utils';
+import { allowedMetadataTypes, useMetadataMigration } from '../../MetadataAPI';
+import { MetadataMigrationOptions } from '../../MetadataAPI/hooks/useMetadataMigration';
+import { MetadataSelectors, useMetadata } from '../../hasura-metadata-api';
 import { BulkKeepGoingResponse } from '../../hasura-metadata-types';
+import type { TrackableTable } from '../TrackResources/types';
+
+type GetTrackTablesPayloadArgs = {
+  dataSourceName: string;
+  tables: TrackableTable[];
+  driver: string | undefined;
+};
+
+export const getTrackTablesPayload = ({
+  dataSourceName,
+  tables,
+  driver,
+}: GetTrackTablesPayloadArgs) => {
+  return {
+    type: `${driver}_track_tables` as allowedMetadataTypes,
+    args: {
+      allow_warnings: true,
+      tables: tables.map(trackableTable => {
+        const { logical_model, ...configuration } =
+          trackableTable.configuration || {};
+        return {
+          table: trackableTable.table,
+          source: dataSourceName,
+          configuration,
+          logical_model,
+        };
+      }),
+    },
+  };
+};
 
 export const useTrackTables = ({
   dataSourceName,
@@ -18,13 +43,9 @@ export const useTrackTables = ({
     driver: MetadataSelectors.findSource(dataSourceName)(m)?.kind,
     resource_version: m.resource_version,
   }));
-
-  const invalidateMetadata = useInvalidateMetadata();
-
   const { mutate, ...rest } = useMetadataMigration<BulkKeepGoingResponse>({
     ...globalMutateOptions,
     onSuccess: (data, variables, ctx) => {
-      invalidateMetadata();
       globalMutateOptions?.onSuccess?.(data, variables, ctx);
     },
     errorTransform: transformErrorResponse,
@@ -32,25 +53,20 @@ export const useTrackTables = ({
 
   const trackTables = useCallback(
     ({
-      tablesToBeTracked,
+      tables,
       ...mutateOptions
     }: {
-      tablesToBeTracked: TrackableTable[];
+      tables: TrackableTable[];
     } & MetadataMigrationOptions<BulkKeepGoingResponse>) => {
+      const payload = getTrackTablesPayload({
+        dataSourceName,
+        tables,
+        driver,
+      });
+
       mutate(
         {
-          query: {
-            type: `${driver}_track_tables`,
-            resource_version,
-            args: {
-              allow_warnings: true,
-              tables: tablesToBeTracked.map(trackableTable => ({
-                table: trackableTable.table,
-                source: dataSourceName,
-                configuration: trackableTable.configuration,
-              })),
-            },
-          },
+          query: payload,
         },
         mutateOptions
       );
@@ -60,10 +76,10 @@ export const useTrackTables = ({
 
   const untrackTables = useCallback(
     ({
-      tablesToBeUntracked,
+      tables,
       ...mutateOptions
     }: {
-      tablesToBeUntracked: TrackableTable[];
+      tables: TrackableTable[];
     } & MetadataMigrationOptions) => {
       mutate(
         {
@@ -72,7 +88,7 @@ export const useTrackTables = ({
             resource_version,
             args: {
               allow_warnings: true,
-              tables: tablesToBeUntracked.map(untrackableTable => ({
+              tables: tables.map(untrackableTable => ({
                 table: untrackableTable.table,
                 source: dataSourceName,
                 configuration: untrackableTable.configuration,
@@ -89,6 +105,7 @@ export const useTrackTables = ({
   return {
     trackTables,
     untrackTables,
+    getTrackTablesPayload,
     ...rest,
   };
 };

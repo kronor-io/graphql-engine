@@ -305,7 +305,7 @@ fromOrderBys top moffset morderBys =
 fromOrderBy :: OrderBy -> Printer
 fromOrderBy OrderBy {..} =
   "("
-    <+> fromFieldName orderByFieldName
+    <+> fromExpression orderByExpression
     <+> ") "
     <+> fromOrder orderByOrder
     <+> fromNullsOrder orderByNullsOrder
@@ -469,6 +469,11 @@ fromNullAggregate = \case
 fromAggregate :: Aggregate -> Printer
 fromAggregate =
   \case
+    -- There's no reason why we'd be aggregating a ValueExpression /unless/
+    -- that ValueExpression is a reserved GraphQL name like __typename. In
+    -- which case, we don't want to run it through the aggregation function;
+    -- we just want to return the value.
+    OpAggregate _ (ValueExpression (TypedValue ty val)) -> fromValue ty val
     CountAggregate countable -> "COUNT(" <+> fromCountable countable <+> ")"
     OpAggregate text arg ->
       UnsafeTextPrinter text <+> "(" <+> fromExpression arg <+> ")"
@@ -480,10 +485,8 @@ fromAggregate =
               ", "
               ( map
                   ( \(alias, arg) ->
-                      UnsafeTextPrinter text
-                        <+> "("
-                        <+> fromExpression arg
-                        <+> ") AS "
+                      fromAggregate (OpAggregate text arg)
+                        <+> " AS "
                         <+> fromNameText alias
                   )
                   (toList args)
@@ -492,15 +495,15 @@ fromAggregate =
         <+> ")"
     TextAggregate text -> fromExpression (ValueExpression (TypedValue StringScalarType (StringValue text)))
 
-fromCountable :: Countable FieldName -> Printer
+fromCountable :: Countable Expression -> Printer
 fromCountable =
   \case
     StarCountable -> "*"
     NonNullFieldCountable fields ->
-      SepByPrinter ", " (map fromFieldName (toList fields))
+      SepByPrinter ", " (map fromExpression (toList fields))
     DistinctCountable fields ->
       "DISTINCT "
-        <+> SepByPrinter ", " (map fromFieldName (toList fields))
+        <+> SepByPrinter ", " (map fromExpression (toList fields))
 
 fromWhere :: Where -> Printer
 fromWhere =

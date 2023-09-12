@@ -37,6 +37,12 @@ export const TestPostgresForm: StoryObj<typeof ConnectPostgresForm> = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
+    const databaseUrlOption = await canvas.findByTestId(
+      'configuration.connectionInfo.databaseUrl.connectionType-databaseUrl'
+    );
+    await expect(databaseUrlOption).toBeInTheDocument();
+    await userEvent.click(databaseUrlOption);
+
     // verify if all the fields are present (in oss mode)
 
     await userEvent.type(
@@ -266,6 +272,7 @@ export const TestPostgresForm: StoryObj<typeof ConnectPostgresForm> = {
                 prefix: 'type_names_prefix',
                 suffix: 'type_names_suffix',
               },
+              namingConvention: 'hasura-default',
             },
           })
         );

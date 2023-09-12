@@ -7,7 +7,6 @@ extra-source-files: README.md
 
 common common-all
   ghc-options:
-    -Werror
     -- Taken from https://medium.com/mercury-bank/enable-all-the-warnings-a0517bc081c3
     -Weverything
     -Wno-missing-exported-signatures
@@ -96,6 +95,7 @@ library
     Test.API.ConcurrentBulkSpec
     Test.API.ExplainSpec
     Test.API.GraphQL.ContentLengthSpec
+    Test.API.Metadata.BulkAtomicSpec
     Test.API.Metadata.BulkKeepGoingSpec
     Test.API.Metadata.ComputedFieldsSpec
     Test.API.Metadata.InconsistentSpec
@@ -115,6 +115,10 @@ library
     Test.Auth.Authorization.DisableRootFields.SelectPermission.EnableAllRootFieldsSpec
     Test.Auth.Authorization.DisableRootFields.SelectPermission.EnablePKSpec
     Test.Auth.Authorization.DisableRootFields.SelectPermission.RelationshipSpec
+    Test.Auth.Authorization.InheritedRoles.ColumnRedaction.BigquerySpec
+    Test.Auth.Authorization.InheritedRoles.ColumnRedaction.NotSupportedSpec
+    Test.Auth.Authorization.InheritedRoles.ColumnRedaction.SqlserverSpec
+    Test.Auth.Authorization.InheritedRoles.ColumnRedactionSpec
     Test.DataConnector.AggregateQuerySpec
     Test.DataConnector.MetadataApiSpec
     Test.DataConnector.MockAgent.AggregateQuerySpec
@@ -135,11 +139,14 @@ library
     Test.Databases.BigQuery.Queries.SpatialTypesSpec
     Test.Databases.BigQuery.Queries.TypeInterpretationSpec
     Test.Databases.BigQuery.Schema.ComputedFields.TableSpec
+    Test.Databases.Postgres.ArraySpec
     Test.Databases.Postgres.BackendOnlyPermissionsSpec
     Test.Databases.Postgres.DataValidation.PermissionSpec
+    Test.Databases.Postgres.DataValidation.RemoteSourcePermissionPredicateSpec
     Test.Databases.Postgres.JsonbSpec
     Test.Databases.Postgres.TimestampSpec
     Test.Databases.Postgres.UniqueConstraintsSpec
+    Test.Databases.SQLServer.ConnectionPoolSpec
     Test.Databases.SQLServer.DefaultValues.OnConflictSpec
     Test.Databases.SQLServer.InsertVarcharColumnSpec
     Test.Databases.SQLServer.VarcharLiteralsSpec
@@ -165,12 +172,17 @@ library
     Test.Mutations.Delete.FieldSpec
     Test.Mutations.Delete.NestedFieldSpec
     Test.Mutations.Delete.PrimaryKeySpec
+    Test.Mutations.Delete.ValidationSpec
     Test.Mutations.Insert.MultipleSpec
+    Test.Mutations.Insert.NestedSpec
     Test.Mutations.Insert.SingleSpec
+    Test.Mutations.Insert.ValidationSpec
     Test.Mutations.MultiplePerRequest.UpdateManySpec
     Test.Mutations.Update.FieldSpec
     Test.Mutations.Update.PrimaryKeySpec
+    Test.Mutations.Update.ValidationSpec
     Test.Mutations.Upsert.OnConflictSpec
+    Test.NamingConventionsSpec
     Test.PortedFromPytest.TestGraphQLQueryBasicCitus
     Test.PortedFromPytest.TestGraphQLQueryFunctions
     Test.Queries.AggregationSpec
@@ -182,10 +194,12 @@ library
     Test.Queries.Errors.NoQueriesAvailableSpec
     Test.Queries.FilterSearch.AggregationPredicatesSpec
     Test.Queries.FilterSearch.FilterSearchSpec
-    Test.Queries.NativeQueriesSpec
+    Test.Queries.NativeQueries.ProOnlySpec
+    Test.Queries.NativeQueries.NativeQueriesSpec
     Test.Queries.NestedObjectSpec
     Test.Queries.Paginate.LimitSpec
     Test.Queries.Paginate.OffsetSpec
+    Test.Queries.PermissionsKnowAboutColumnNullabilitySpec
     Test.Queries.Relationship.PermissionRootReferenceSpec
     Test.Queries.Simple.JSONSpec
     Test.Queries.Simple.ObjectQueriesSpec
@@ -211,11 +225,12 @@ library
     Test.Regression.NullRemoteRelationship8345Spec
     Test.Regression.NullsOrderParsing8780Spec
     Test.Regression.ObjectRelationshipsLimit7936Spec
+    Test.Regression.OptimizePermissionFiltersSpec
     Test.Regression.RemoteRelationshipStringifyNum8387Spec
     Test.Regression.RootExistElementAliasing9457Spec
+    Test.Regression.SqlServerIdentifierQuotingSpec
     Test.Regression.StreamConflictSpec
     Test.Regression.UsingTheSameFunctionForRootFieldAndComputedField8643Spec
-    Test.Regression.SqlServerIdentifierQuotingSpec
     Test.ScheduledEvents.ScheduledEventsInvalidEnvVarSpec
     Test.Schema.ComputedFields.AggregationSpec
     Test.Schema.ComputedFields.ScalarSpec

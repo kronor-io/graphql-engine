@@ -13,7 +13,6 @@ import Data.Aeson
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.HashMap.Strict qualified as HashMap
-import Data.Text qualified as T
 import Data.Text.Extended
 import Hasura.Backends.Postgres.SQL.Types hiding (TableName)
 import Hasura.Backends.Postgres.Types.BoolExp
@@ -55,7 +54,7 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
     parseOperations :: ColumnReference ('Postgres pgKind) -> Value -> m [OpExpG ('Postgres pgKind) v]
     parseOperations column = \case
       Object o -> mapM (parseOperation column . first K.toText) (KM.toList o)
-      val -> pure . AEQ False <$> rhsParser columnType val
+      val -> pure . AEQ NullableComparison <$> rhsParser columnType val
       where
         columnType = CollectableTypeScalar $ columnReferenceType column
 
@@ -104,11 +103,12 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
         "_niregex" -> parseNIRegex
         "$is_null" -> parseIsNull
         "_is_null" -> parseIsNull
+        -- arrays and jsonb type
+        "_contains" -> guardTypeToArrayOrJsonb >> ABackendSpecific . AContains <$> parseOne
+        "$contains" -> guardTypeToArrayOrJsonb >> ABackendSpecific . AContains <$> parseOne
+        "_contained_in" -> guardTypeToArrayOrJsonb >> ABackendSpecific . AContainedIn <$> parseOne
+        "$contained_in" -> guardTypeToArrayOrJsonb >> ABackendSpecific . AContainedIn <$> parseOne
         -- jsonb type
-        "_contains" -> guardType [PGJSONB] >> ABackendSpecific . AContains <$> parseOne
-        "$contains" -> guardType [PGJSONB] >> ABackendSpecific . AContains <$> parseOne
-        "_contained_in" -> guardType [PGJSONB] >> ABackendSpecific . AContainedIn <$> parseOne
-        "$contained_in" -> guardType [PGJSONB] >> ABackendSpecific . AContainedIn <$> parseOne
         "_has_key" -> guardType [PGJSONB] >> ABackendSpecific . AHasKey <$> parseWithTy (ColumnScalar PGText)
         "$has_key" -> guardType [PGJSONB] >> ABackendSpecific . AHasKey <$> parseWithTy (ColumnScalar PGText)
         "_has_keys_any" -> guardType [PGJSONB] >> ABackendSpecific . AHasKeysAny <$> parseManyWithType (ColumnScalar PGText)
@@ -169,10 +169,13 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
         x -> throw400 UnexpectedPayload $ "Unknown operator: " <> x
       where
         colTy = columnReferenceType column
+        colNonNullable = case fromMaybe True $ columnReferenceNullable column of
+          True -> NullableComparison
+          False -> NonNullableComparison
 
         parseIsNull = bool ANISNOTNULL ANISNULL <$> parseVal -- is null
-        parseEq = AEQ False <$> parseOne -- equals
-        parseNe = ANE False <$> parseOne -- <>
+        parseEq = AEQ colNonNullable <$> parseOne -- equals
+        parseNe = ANE colNonNullable <$> parseOne -- <>
         parseIn = AIN <$> parseManyWithType colTy -- in an array
         parseNin = ANIN <$> parseManyWithType colTy -- not in an array
         parseGt = AGT <$> parseOne -- >
@@ -240,7 +243,7 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
               from <- withPathK "from" $ parseOneNoSess colTy fromVal
               useSpheroid <- withPathK "use_spheroid" $ parseOneNoSess (ColumnScalar PGBoolean) sphVal
               return $ ASTDWithinGeog $ DWithinGeogOp dist from useSpheroid
-            _ -> throwError $ buildMsg colTy [PGGeometry, PGGeography]
+            _ -> throwError $ invalidTypeMessage (dquoteList [PGGeometry, PGGeography])
 
         decodeAndValidateRhsCol :: Value -> m (RootOrCurrentColumn ('Postgres pgKind))
         decodeAndValidateRhsCol v = case v of
@@ -288,16 +291,26 @@ parseBoolExpOperations rhsParser rootFieldInfoMap fim columnRef value = do
 
         parseManyWithType ty = rhsParser (CollectableTypeArray ty) val
 
-        guardType validTys =
-          unless (isScalarColumnWhere (`elem` validTys) colTy)
+        guardTypeToArrayOrJsonb = guardTypeWhere isArrayOrJsonb "an array or JSONB"
+          where
+            isArrayOrJsonb = \case
+              PGArray _ -> True
+              PGJSONB -> True
+              _ -> False
+
+        guardType validTypes = guardTypeWhere (`elem` validTypes) (dquoteList validTypes)
+
+        guardTypeWhere isValid messageOnError =
+          unless (isScalarColumnWhere isValid colTy)
             $ throwError
-            $ buildMsg colTy validTys
-        buildMsg ty expTys =
+            $ invalidTypeMessage messageOnError
+
+        invalidTypeMessage expectedColumnType =
           err400 UnexpectedPayload
             $ " is of type "
-            <> ty
+            <> colTy
             <<> "; this operator works only on columns of type "
-            <> T.intercalate "/" (map dquote expTys)
+            <> expectedColumnType
 
         parseVal :: (FromJSON a) => m a
         parseVal = decodeValue val
@@ -324,7 +337,7 @@ buildComputedFieldBooleanExp boolExpResolver rhsParser rootFieldInfoMap colInfoM
       AnnComputedFieldBoolExp _cfiXComputedFieldInfo _cfiName _cffName computedFieldFunctionArgs
         <$> case _cfiReturnType of
           CFRScalar scalarType ->
-            CFBEScalar
+            CFBEScalar NoRedaction
               <$> parseBoolExpOperations (_berpValueParser rhsParser) rootFieldInfoMap colInfoMap (ColumnReferenceComputedField _cfiName scalarType) colVal
           CFRSetofTable table -> do
             tableBoolExp <- decodeValue colVal

@@ -34,6 +34,8 @@ import Control.Lens (Lens', (.~), (^?))
 import Data.Aeson
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.Environment qualified as Env
+import Data.Has
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.HashSet qualified as HS
@@ -42,7 +44,8 @@ import Data.Text.Extended
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.LogicalModel.Common (logicalModelFieldsToFieldInfo)
-import Hasura.LogicalModel.Types (LogicalModelField (..), LogicalModelName)
+import Hasura.LogicalModel.Fields (LogicalModelFieldsRM)
+import Hasura.LogicalModel.Types (LogicalModelField (..), LogicalModelLocation)
 import Hasura.Prelude
 import Hasura.RQL.DDL.Permission.Internal
 import Hasura.RQL.IR.BoolExp
@@ -181,8 +184,8 @@ We've a table "user" tracked by hasura and a role "public"
   mutation operations are visible by default.
 -}
 procSetObj ::
-  forall b m.
-  (QErrM m, BackendMetadata b) =>
+  forall b m r.
+  (QErrM m, BackendMetadata b, MonadReader r m, Has (ScalarTypeParsingContext b) r) =>
   SourceName ->
   TableName b ->
   FieldInfoMap (FieldInfo b) ->
@@ -234,19 +237,23 @@ buildPermInfo ::
   ( BackendMetadata b,
     QErrM m,
     TableCoreInfoRM b m,
-    GetAggregationPredicatesDeps b
+    LogicalModelFieldsRM b m,
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
+  Env.Environment ->
   SourceName ->
   TableName b ->
   FieldInfoMap (FieldInfo b) ->
   RoleName ->
   PermDefPermission b perm ->
   m (WithDeps (PermInfo perm b))
-buildPermInfo x1 x2 x3 roleName = \case
+buildPermInfo e x1 x2 x3 roleName = \case
   SelPerm' p -> buildSelPermInfo x1 x2 x3 roleName p
-  InsPerm' p -> buildInsPermInfo x1 x2 x3 p
-  UpdPerm' p -> buildUpdPermInfo x1 x2 x3 p
-  DelPerm' p -> buildDelPermInfo x1 x2 x3 p
+  InsPerm' p -> buildInsPermInfo e x1 x2 x3 p
+  UpdPerm' p -> buildUpdPermInfo e x1 x2 x3 p
+  DelPerm' p -> buildDelPermInfo e x1 x2 x3 p
 
 -- | Given the logical model's definition and the permissions as defined in the
 -- logical model's metadata, try to construct the permission definition.
@@ -254,15 +261,18 @@ buildLogicalModelPermInfo ::
   ( BackendMetadata b,
     QErrM m,
     TableCoreInfoRM b m,
-    GetAggregationPredicatesDeps b
+    LogicalModelFieldsRM b m,
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
   SourceName ->
-  LogicalModelName ->
+  LogicalModelLocation ->
   InsOrdHashMap.InsOrdHashMap (Column b) (LogicalModelField b) ->
   PermDefPermission b perm ->
   m (WithDeps (PermInfo perm b))
-buildLogicalModelPermInfo sourceName logicalModelName fieldInfoMap = \case
-  SelPerm' p -> buildLogicalModelSelPermInfo sourceName logicalModelName fieldInfoMap p
+buildLogicalModelPermInfo sourceName logicalModelLocation fieldInfoMap = \case
+  SelPerm' p -> buildLogicalModelSelPermInfo sourceName logicalModelLocation fieldInfoMap p
   InsPerm' _ -> error "Not implemented yet"
   UpdPerm' _ -> error "Not implemented yet"
   DelPerm' _ -> error "Not implemented yet"
@@ -337,18 +347,22 @@ runDropPerm permType (DropPerm source table role) = do
   return successMsg
 
 buildInsPermInfo ::
-  forall b m.
+  forall b m r.
   ( QErrM m,
     TableCoreInfoRM b m,
+    LogicalModelFieldsRM b m,
     BackendMetadata b,
-    GetAggregationPredicatesDeps b
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
+  Env.Environment ->
   SourceName ->
   TableName b ->
   FieldInfoMap (FieldInfo b) ->
   InsPerm b ->
   m (WithDeps (InsPermInfo b))
-buildInsPermInfo source tn fieldInfoMap (InsPerm checkCond set mCols backendOnly) =
+buildInsPermInfo env source tn fieldInfoMap (InsPerm checkCond set mCols backendOnly validateInput) =
   withPathK "permission" $ do
     (be, beDeps) <- withPathK "check" $ procBoolExp source tn fieldInfoMap checkCond
     (setColsSQL, setHdrs, setColDeps) <- procSetObj source tn fieldInfoMap set
@@ -357,7 +371,7 @@ buildInsPermInfo source tn fieldInfoMap (InsPerm checkCond set mCols backendOnly
       $ do
         indexedForM insCols $ \col -> do
           -- Check that all columns specified do in fact exist and are columns
-          _ <- askColumnType fieldInfoMap col relInInsErr
+          assertColumnExists fieldInfoMap relInInsErr col
           -- Check that the column is insertable
           ci <- askColInfo fieldInfoMap col ""
           unless (_cmIsInsertable $ ciMutability ci)
@@ -373,7 +387,9 @@ buildInsPermInfo source tn fieldInfoMap (InsPerm checkCond set mCols backendOnly
         deps = mkParentDep @b source tn Seq.:<| beDeps <> setColDeps <> Seq.fromList insColDeps
         insColsWithoutPresets = HS.fromList insCols `HS.difference` HashMap.keysSet setColsSQL
 
-    return (InsPermInfo insColsWithoutPresets be setColsSQL backendOnly reqHdrs, deps)
+    resolvedValidateInput <- for validateInput (traverse (resolveWebhook env))
+
+    return (InsPermInfo insColsWithoutPresets be setColsSQL backendOnly reqHdrs resolvedValidateInput, deps)
   where
     allInsCols = map structuredColumnInfoColumn $ filter (_cmIsInsertable . structuredColumnInfoMutability) $ getCols fieldInfoMap
     insCols = interpColSpec allInsCols (fromMaybe PCStar mCols)
@@ -443,18 +459,21 @@ validateAllowedRootFields sourceName tableName roleName SelPerm {..} = do
 -- native query's metadata, try to construct the @SELECT@ permission
 -- definition.
 buildLogicalModelSelPermInfo ::
-  forall b m.
+  forall b m r.
   ( QErrM m,
     TableCoreInfoRM b m,
+    LogicalModelFieldsRM b m,
     BackendMetadata b,
-    GetAggregationPredicatesDeps b
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
   SourceName ->
-  LogicalModelName ->
+  LogicalModelLocation ->
   InsOrdHashMap.InsOrdHashMap (Column b) (LogicalModelField b) ->
   SelPerm b ->
   m (WithDeps (SelPermInfo b))
-buildLogicalModelSelPermInfo source logicalModelName logicalModelFieldMap sp = withPathK "permission" do
+buildLogicalModelSelPermInfo source logicalModelLocation logicalModelFieldMap sp = withPathK "permission" do
   let columns :: [Column b]
       columns = interpColSpec (lmfName <$> InsOrdHashMap.elems logicalModelFieldMap) (spColumns sp)
 
@@ -463,7 +482,7 @@ buildLogicalModelSelPermInfo source logicalModelName logicalModelFieldMap sp = w
   -- filter out the non-scalars.
   (spiFilter, boolExpDeps) <-
     withPathK "filter"
-      $ procLogicalModelBoolExp source logicalModelName (logicalModelFieldsToFieldInfo logicalModelFieldMap) (spFilter sp)
+      $ procLogicalModelBoolExp source logicalModelLocation (logicalModelFieldsToFieldInfo logicalModelFieldMap) (spFilter sp)
 
   let -- What parts of the metadata are interesting when computing the
       -- permissions? These dependencies bubble all the way up to
@@ -472,9 +491,9 @@ buildLogicalModelSelPermInfo source logicalModelName logicalModelFieldMap sp = w
       deps :: Seq SchemaDependency
       deps =
         mconcat
-          [ Seq.singleton (mkLogicalModelParentDep @b source logicalModelName),
+          [ Seq.singleton (mkLogicalModelParentDep @b source logicalModelLocation),
             boolExpDeps,
-            fmap (mkLogicalModelColDep @b DRUntyped source logicalModelName)
+            fmap (mkLogicalModelColDep @b DRUntyped source logicalModelLocation)
               $ Seq.fromList columns
           ]
 
@@ -493,11 +512,11 @@ buildLogicalModelSelPermInfo source logicalModelName logicalModelFieldMap sp = w
       --
       -- TODO: do we care about inherited roles? We don't seem to set this to
       -- anything other than 'Nothing' for in 'buildSelPermInfo' either.
-      spiCols :: HashMap (Column b) (Maybe (AnnColumnCaseBoolExpPartialSQL b))
-      spiCols = HashMap.fromList (map (,Nothing) columns)
+      spiCols :: HashMap (Column b) (AnnRedactionExpPartialSQL b)
+      spiCols = HashMap.fromList (map (,NoRedaction) columns)
 
       -- Native queries don't have computed fields.
-      spiComputedFields :: HashMap ComputedFieldName (Maybe (AnnColumnCaseBoolExpPartialSQL b))
+      spiComputedFields :: HashMap ComputedFieldName (AnnRedactionExpPartialSQL b)
       spiComputedFields = mempty
 
   let -- We don't need something like validateAllowedRootFields because we
@@ -515,11 +534,14 @@ buildLogicalModelSelPermInfo source logicalModelName logicalModelFieldMap sp = w
   return (SelPermInfo {..}, deps)
 
 buildSelPermInfo ::
-  forall b m.
+  forall b m r.
   ( QErrM m,
     TableCoreInfoRM b m,
+    LogicalModelFieldsRM b m,
     BackendMetadata b,
-    GetAggregationPredicatesDeps b
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
   SourceName ->
   TableName b ->
@@ -539,8 +561,7 @@ buildSelPermInfo source tableName fieldInfoMap roleName sp = withPathK "permissi
   void
     $ withPathK "columns"
     $ indexedForM pgCols
-    $ \pgCol ->
-      askColumnType fieldInfoMap pgCol autoInferredErr
+    $ assertColumnExists fieldInfoMap autoInferredErr
 
   -- validate computed fields
   validComputedFields <-
@@ -571,8 +592,8 @@ buildSelPermInfo source tableName fieldInfoMap roleName sp = withPathK "permissi
     when (value < 0)
       $ throw400 NotSupported "unexpected negative value"
 
-  let spiCols = HashMap.fromList $ map (,Nothing) pgCols
-      spiComputedFields = HS.toMap (HS.fromList validComputedFields) $> Nothing
+  let spiCols = HashMap.fromList $ map (,NoRedaction) pgCols
+      spiComputedFields = HS.toMap (HS.fromList validComputedFields) $> NoRedaction
 
   (spiAllowedQueryRootFields, spiAllowedSubscriptionRootFields) <-
     validateAllowedRootFields source tableName roleName sp
@@ -584,18 +605,22 @@ buildSelPermInfo source tableName fieldInfoMap roleName sp = withPathK "permissi
     autoInferredErr = "permissions for relationships are automatically inferred"
 
 buildUpdPermInfo ::
-  forall b m.
+  forall b m r.
   ( QErrM m,
     TableCoreInfoRM b m,
+    LogicalModelFieldsRM b m,
     BackendMetadata b,
-    GetAggregationPredicatesDeps b
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
+  Env.Environment ->
   SourceName ->
   TableName b ->
   FieldInfoMap (FieldInfo b) ->
   UpdPerm b ->
   m (WithDeps (UpdPermInfo b))
-buildUpdPermInfo source tn fieldInfoMap (UpdPerm colSpec set fltr check backendOnly) = do
+buildUpdPermInfo env source tn fieldInfoMap (UpdPerm colSpec set fltr check backendOnly validateInput) = do
   (be, beDeps) <-
     withPathK "filter"
       $ procBoolExp source tn fieldInfoMap fltr
@@ -610,7 +635,7 @@ buildUpdPermInfo source tn fieldInfoMap (UpdPerm colSpec set fltr check backendO
     $ indexedForM updCols
     $ \updCol -> do
       -- Check that all columns specified do in fact exist and are columns
-      _ <- askColumnType fieldInfoMap updCol relInUpdErr
+      assertColumnExists fieldInfoMap relInUpdErr updCol
       -- Check that the column is updatable
       ci <- askColInfo fieldInfoMap updCol ""
       unless (_cmIsUpdatable $ ciMutability ci)
@@ -625,32 +650,37 @@ buildUpdPermInfo source tn fieldInfoMap (UpdPerm colSpec set fltr check backendO
       depHeaders = getDependentHeaders fltr
       reqHeaders = depHeaders `HS.union` (HS.fromList setHeaders)
       updColsWithoutPreSets = HS.fromList updCols `HS.difference` HashMap.keysSet setColsSQL
-
-  return (UpdPermInfo updColsWithoutPreSets tn be (fst <$> checkExpr) setColsSQL backendOnly reqHeaders, deps)
+  resolvedValidateInput <- for validateInput (traverse (resolveWebhook env))
+  return (UpdPermInfo updColsWithoutPreSets tn be (fst <$> checkExpr) setColsSQL backendOnly reqHeaders resolvedValidateInput, deps)
   where
     allUpdCols = map structuredColumnInfoColumn $ filter (_cmIsUpdatable . structuredColumnInfoMutability) $ getCols fieldInfoMap
     updCols = interpColSpec allUpdCols colSpec
     relInUpdErr = "Only table columns can have update permissions defined, not relationships or other field types"
 
 buildDelPermInfo ::
-  forall b m.
+  forall b m r.
   ( QErrM m,
     TableCoreInfoRM b m,
+    LogicalModelFieldsRM b m,
     BackendMetadata b,
-    GetAggregationPredicatesDeps b
+    GetAggregationPredicatesDeps b,
+    MonadReader r m,
+    Has (ScalarTypeParsingContext b) r
   ) =>
+  Env.Environment ->
   SourceName ->
   TableName b ->
   FieldInfoMap (FieldInfo b) ->
   DelPerm b ->
   m (WithDeps (DelPermInfo b))
-buildDelPermInfo source tn fieldInfoMap (DelPerm fltr backendOnly) = do
+buildDelPermInfo env source tn fieldInfoMap (DelPerm fltr backendOnly validateInput) = do
   (be, beDeps) <-
     withPathK "filter"
       $ procBoolExp source tn fieldInfoMap fltr
   let deps = mkParentDep @b source tn Seq.:<| beDeps
       depHeaders = getDependentHeaders fltr
-  return (DelPermInfo tn be backendOnly depHeaders, deps)
+  resolvedValidateInput <- for validateInput (traverse (resolveWebhook env))
+  return (DelPermInfo tn be backendOnly depHeaders resolvedValidateInput, deps)
 
 data SetPermComment b = SetPermComment
   { apSource :: SourceName,

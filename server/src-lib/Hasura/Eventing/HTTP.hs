@@ -59,6 +59,7 @@ import Data.SerializableBlob qualified as SB
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
+import Data.URL.Template (mkPlainTemplate, printTemplate)
 import Hasura.HTTP
 import Hasura.Logging
 import Hasura.Prelude
@@ -67,6 +68,7 @@ import Hasura.RQL.Types.Common (ResolvedWebhook (..))
 import Hasura.RQL.Types.EventTrigger
 import Hasura.RQL.Types.Eventing
 import Hasura.RQL.Types.Headers
+import Hasura.Server.Types (TriggersErrorLogLevelStatus, isTriggersErrorLogLevelEnabled)
 import Hasura.Session (SessionVariables)
 import Hasura.Tracing
 import Network.HTTP.Client.Transformable qualified as HTTP
@@ -107,7 +109,7 @@ data HTTPErr (a :: TriggerTypes)
 instance J.ToJSON (HTTPErr a) where
   toJSON err = toObj $ case err of
     (HClient httpException) ->
-      ("client", J.toJSON httpException)
+      ("client", getHttpExceptionJson (ShowErrorInfo True) httpException)
     (HStatus resp) ->
       ("status", J.toJSON resp)
     (HOther e) -> ("internal", J.toJSON e)
@@ -142,7 +144,7 @@ mkHTTPResp resp =
     respBody = HTTP.responseBody resp
     decodeBS = TE.decodeUtf8With TE.lenientDecode
     decodeHeader' (hdrName, hdrVal) =
-      HeaderConf (decodeBS $ CI.original hdrName) (HVValue (decodeBS hdrVal))
+      HeaderConf (decodeBS $ CI.original hdrName) (HVValue $ mkPlainTemplate (decodeBS hdrVal))
 
 data RequestDetails = RequestDetails
   { _rdOriginalRequest :: HTTP.Request,
@@ -191,7 +193,7 @@ instance J.ToJSON (HTTPRespExtra a) where
         Just name -> ["event_name" J..= name]
         Nothing -> []
       getValue val = case val of
-        HVValue txt -> J.String txt
+        HVValue txt -> J.String (printTemplate txt)
         HVEnv txt -> J.String txt
       getRedactedHeaders =
         J.Object
@@ -206,11 +208,13 @@ instance J.ToJSON (HTTPRespExtra a) where
         Nothing -> updateReqDetail v "original_request"
         Just _ -> updateReqDetail v "transformed_request"
 
-instance ToEngineLog (HTTPRespExtra 'EventType) Hasura where
-  toEngineLog resp = (LevelInfo, eventTriggerLogType, J.toJSON resp)
+data HTTPRespExtraLog a = HTTPRespExtraLog {_hrelLevel :: !LogLevel, _hrelpayload :: HTTPRespExtra a}
 
-instance ToEngineLog (HTTPRespExtra 'ScheduledType) Hasura where
-  toEngineLog resp = (LevelInfo, scheduledTriggerLogType, J.toJSON resp)
+instance ToEngineLog (HTTPRespExtraLog 'EventType) Hasura where
+  toEngineLog (HTTPRespExtraLog level resp) = (level, eventTriggerLogType, J.toJSON resp)
+
+instance ToEngineLog (HTTPRespExtraLog 'ScheduledType) Hasura where
+  toEngineLog (HTTPRespExtraLog level resp) = (level, scheduledTriggerLogType, J.toJSON resp)
 
 isNetworkError :: HTTPErr a -> Bool
 isNetworkError = \case
@@ -250,6 +254,25 @@ instance J.ToJSON HTTPReq where
 instance ToEngineLog HTTPReq Hasura where
   toEngineLog req = (LevelInfo, eventTriggerLogType, J.toJSON req)
 
+logHTTPForTriggers ::
+  ( MonadReader r m,
+    Has (Logger Hasura) r,
+    MonadIO m,
+    ToEngineLog (HTTPRespExtraLog a) Hasura
+  ) =>
+  Either (HTTPErr a) (HTTPResp a) ->
+  ExtraLogContext ->
+  RequestDetails ->
+  Text ->
+  [HeaderConf] ->
+  TriggersErrorLogLevelStatus ->
+  m ()
+logHTTPForTriggers eitherResp extraLogCtx reqDetails webhookVarName logHeaders triggersErrorLogLevelStatus = do
+  logger :: Logger Hasura <- asks getter
+  case (eitherResp, isTriggersErrorLogLevelEnabled triggersErrorLogLevelStatus) of
+    (Left _, True) -> unLogger logger $ HTTPRespExtraLog LevelError $ HTTPRespExtra eitherResp extraLogCtx reqDetails webhookVarName logHeaders
+    (_, _) -> unLogger logger $ HTTPRespExtraLog LevelInfo $ HTTPRespExtra eitherResp extraLogCtx reqDetails webhookVarName logHeaders
+
 logHTTPForET ::
   ( MonadReader r m,
     Has (Logger Hasura) r,
@@ -260,10 +283,9 @@ logHTTPForET ::
   RequestDetails ->
   Text ->
   [HeaderConf] ->
+  TriggersErrorLogLevelStatus ->
   m ()
-logHTTPForET eitherResp extraLogCtx reqDetails webhookVarName logHeaders = do
-  logger :: Logger Hasura <- asks getter
-  unLogger logger $ HTTPRespExtra eitherResp extraLogCtx reqDetails webhookVarName logHeaders
+logHTTPForET = logHTTPForTriggers
 
 logHTTPForST ::
   ( MonadReader r m,
@@ -275,10 +297,9 @@ logHTTPForST ::
   RequestDetails ->
   Text ->
   [HeaderConf] ->
+  TriggersErrorLogLevelStatus ->
   m ()
-logHTTPForST eitherResp extraLogCtx reqDetails webhookVarName logHeaders = do
-  logger :: Logger Hasura <- asks getter
-  unLogger logger $ HTTPRespExtra eitherResp extraLogCtx reqDetails webhookVarName logHeaders
+logHTTPForST = logHTTPForTriggers
 
 runHTTP :: (MonadIO m) => HTTP.Manager -> HTTP.Request -> m (Either (HTTPErr a) (HTTPResp a))
 runHTTP manager req = do
@@ -410,7 +431,7 @@ decodeHeader headerInfos (hdrName, hdrVal) =
          in name'
       mehi = find (\hi -> getName hi == name) headerInfos
    in case mehi of
-        Nothing -> HeaderConf name (HVValue (decodeBS hdrVal))
+        Nothing -> HeaderConf name (HVValue $ mkPlainTemplate (decodeBS hdrVal))
         Just ehi -> ehiHeaderConf ehi
   where
     decodeBS = TE.decodeUtf8With TE.lenientDecode
@@ -437,7 +458,7 @@ getRetryAfterHeaderFromResp resp =
           (\(HeaderConf name _) -> CI.mk name == retryAfterHeader)
           (hrsHeaders resp)
    in case mHeader of
-        Just (HeaderConf _ (HVValue value)) -> Just value
+        Just (HeaderConf _ (HVValue value)) -> Just $ printTemplate value
         _ -> Nothing
 
 parseRetryHeaderValue :: Text -> Maybe Int

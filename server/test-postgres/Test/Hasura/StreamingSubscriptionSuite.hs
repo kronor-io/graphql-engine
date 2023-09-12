@@ -67,7 +67,7 @@ buildStreamingSubscriptionSuite = do
 
   let pgConnInfo = PG.ConnInfo 1 $ PG.CDDatabaseURI $ txtToBs pgUrlText
 
-  pgPool <- PG.initPGPool pgConnInfo PG.defaultConnParams print
+  pgPool <- PG.initPGPool pgConnInfo J.Null PG.defaultConnParams print
 
   let pgContext = mkPGExecCtx PG.ReadCommitted pgPool NeverResizePool
       dbSourceConfig = PGSourceConfig pgContext pgConnInfo Nothing (pure ()) defaultPostgresExtensionsSchema mempty ConnTemplate_NotApplicable
@@ -174,6 +174,7 @@ streamingSubscriptionPollingSpec srcConfig = do
           dummyPromMetrics
           (pure GranularMetricsOff)
           emptyOperationNamesMap
+          Nothing
           Nothing
 
       mkSubscriber sId =
@@ -384,7 +385,7 @@ streamingSubscriptionPollingSpec srcConfig = do
       let logger :: Logger Hasura = Logger $ \l -> do
             let (logLevel, logType :: EngineLogType Hasura, logDetail) = toEngineLog l
             t <- liftIO $ getFormattedTime Nothing
-            liftIO $ putStrLn $ LBS.toString $ J.encode $ EngineLog t logLevel logType logDetail
+            liftIO $ putStrLn $ LBS.toString $ J.encode $ EngineLog t logLevel logType logDetail Nothing Nothing
 
           subOptions = mkSubscriptionsOptions Nothing Nothing
           addStreamSubQuery subscriberMetadata reqId =
@@ -404,6 +405,7 @@ streamingSubscriptionPollingSpec srcConfig = do
               subscriptionQueryPlan
               (pure GranularMetricsOff)
               (const (pure ()))
+              Nothing
 
       it "concurrently adding two subscribers should retain both of them in the poller map" $ do
         -- Adding two subscribers that query identical queries should be adding them into the same

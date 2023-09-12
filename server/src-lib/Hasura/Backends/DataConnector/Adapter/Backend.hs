@@ -4,9 +4,11 @@ module Hasura.Backends.DataConnector.Adapter.Backend
   ( CustomBooleanOperator (..),
     columnTypeToScalarType,
     parseValue,
+    lookupGraphQLType,
   )
 where
 
+import Control.Lens (view)
 import Data.Aeson qualified as J
 import Data.Aeson.Extended (ToJSONKeyValue (..))
 import Data.Aeson.Key (fromText)
@@ -21,14 +23,14 @@ import Data.Text.Extended ((<<>))
 import Hasura.Backends.DataConnector.API qualified as API
 import Hasura.Backends.DataConnector.Adapter.Types qualified as DC
 import Hasura.Backends.DataConnector.Adapter.Types.Mutations qualified as DC
-import Hasura.Base.Error (Code (ValidationFailed), QErr, runAesonParser, throw400)
+import Hasura.Base.Error (Code (ValidationFailed), QErr, runAesonParser, throw400, throw500)
 import Hasura.Prelude
-import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.Types.Backend (Backend (..), ComputedFieldReturnType, HasSourceConfiguration (..), SupportedNamingCase (..), XDisable, XEnable)
 import Hasura.RQL.Types.BackendType (BackendSourceKind (DataConnectorKind), BackendType (DataConnector))
 import Hasura.RQL.Types.Column (ColumnType (..))
 import Hasura.RQL.Types.ResizePool
 import Language.GraphQL.Draft.Syntax qualified as G
+import Witch qualified
 
 -- | An alias for '()' indicating that a particular associated type has not yet
 -- been implemented for the 'DataConnector' backend.
@@ -100,14 +102,14 @@ instance Backend 'DataConnector where
           insertOp funtionName resultTypeName =
             HashMap.insertWith HashMap.union funtionName
               $ HashMap.singleton
-                (DC.mkScalarType _scCapabilities typeName)
-                (DC.mkScalarType _scCapabilities resultTypeName)
+                (Witch.from typeName)
+                (Witch.from resultTypeName)
 
   textToScalarValue :: Maybe Text -> ScalarValue 'DataConnector
   textToScalarValue = error "textToScalarValue: not implemented for the Data Connector backend."
 
-  parseScalarValue :: ScalarType 'DataConnector -> J.Value -> Either QErr (ScalarValue 'DataConnector)
-  parseScalarValue type' value = runAesonParser (parseValue type') value
+  parseScalarValue :: API.ScalarTypesCapabilities -> ScalarType 'DataConnector -> J.Value -> Either QErr (ScalarValue 'DataConnector)
+  parseScalarValue ctx type' value = runAesonParser (parseValue ctx type') value
 
   scalarValueToJSON :: ScalarValue 'DataConnector -> J.Value
   scalarValueToJSON = id
@@ -163,16 +165,27 @@ instance Backend 'DataConnector where
 
   defaultTriggerOnReplication = Nothing
 
+  getColVals _ _ _ _ _ _ = throw500 "getColVals: not implemented for the Data Connector backend"
+
+  backendSupportsNestedObjects = pure ()
+
+  sourceSupportsSchemalessTables =
+    view $ DC.scCapabilities . API.cDataSchema . API.dscSupportsSchemalessTables
+
 instance HasSourceConfiguration 'DataConnector where
   type SourceConfig 'DataConnector = DC.SourceConfig
   type SourceConnConfiguration 'DataConnector = DC.ConnSourceConfig
+  type ScalarTypeParsingContext 'DataConnector = API.ScalarTypesCapabilities
+
   sourceConfigNumReadReplicas = const 0 -- not supported
   sourceConfigConnectonTemplateEnabled = const False -- not supported
+  sourceSupportsColumnRedaction DC.SourceConfig {..} =
+    _scCapabilities & API._cQueries >>= API._qcRedaction & isJust
   sourceConfigBackendSourceKind DC.SourceConfig {..} = DataConnectorKind _scDataConnectorName
 
 data CustomBooleanOperator a = CustomBooleanOperator
   { _cboName :: Text,
-    _cboRHS :: Maybe (Either (RootOrCurrentColumn 'DataConnector) a) -- TODO turn Either into a specific type
+    _cboRHS :: Maybe a
   }
   deriving stock (Eq, Generic, Foldable, Functor, Traversable, Show)
 
@@ -183,11 +196,11 @@ instance (Hashable a) => Hashable (CustomBooleanOperator a)
 instance (J.ToJSON a) => ToJSONKeyValue (CustomBooleanOperator a) where
   toJSONKeyValue CustomBooleanOperator {..} = (fromText _cboName, J.toJSON _cboRHS)
 
-parseValue :: DC.ScalarType -> J.Value -> J.Parser J.Value
-parseValue type' val =
-  case (type', val) of
-    (_, J.Null) -> pure J.Null
-    (DC.ScalarType _ graphQLType, value) -> case graphQLType of
+parseValue :: API.ScalarTypesCapabilities -> DC.ScalarType -> J.Value -> J.Parser J.Value
+parseValue ctx type' val =
+  case val of
+    J.Null -> pure J.Null
+    value -> case lookupGraphQLType ctx type' of
       Nothing -> pure value
       Just DC.GraphQLInt -> (J.Number . fromIntegral) <$> J.parseJSON @Int value
       Just DC.GraphQLFloat -> (J.Number . fromFloatDigits) <$> J.parseJSON @Double value
@@ -196,6 +209,10 @@ parseValue type' val =
       Just DC.GraphQLID -> J.String <$> parseID value
   where
     parseID value = J.parseJSON @Text value <|> tshow <$> J.parseJSON @Int value
+
+lookupGraphQLType :: API.ScalarTypesCapabilities -> DC.ScalarType -> Maybe DC.GraphQLType
+lookupGraphQLType capabilities type' =
+  API._stcGraphQLType =<< HashMap.lookup (Witch.from type') (API.unScalarTypesCapabilities capabilities)
 
 columnTypeToScalarType :: ColumnType 'DataConnector -> DC.ScalarType
 columnTypeToScalarType = \case

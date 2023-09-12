@@ -1,4 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Hasura.RQL.Types.SchemaCacheTypes
@@ -24,14 +23,13 @@ module Hasura.RQL.Types.SchemaCacheTypes
 where
 
 import Data.Aeson
-import Data.Aeson.TH
 import Data.Aeson.Types
 import Data.Functor.Const
 import Data.Text qualified as T
 import Data.Text.Extended
 import Data.Text.NonEmpty
 import Hasura.Base.Error
-import Hasura.LogicalModel.Types (LogicalModelName)
+import Hasura.LogicalModel.Types (LogicalModelLocation, LogicalModelName)
 import Hasura.NativeQuery.Types (NativeQueryName)
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp (PartialSQLExp)
@@ -68,7 +66,7 @@ instance (Backend b) => Hashable (TableObjId b)
 data LogicalModelObjId (b :: BackendType)
   = LMOPerm RoleName PermType
   | LMOCol (Column b)
-  | LMOInnerLogicalModel LogicalModelName
+  | LMOReferencedLogicalModel LogicalModelName
   deriving (Generic)
 
 deriving stock instance (Backend b) => Eq (LogicalModelObjId b)
@@ -79,7 +77,7 @@ instance (Backend b) => Hashable (LogicalModelObjId b)
 -- used to track dependencies between items in the resolved schema. For
 -- instance, we use `NQOCol` along with `TOCol` from `TableObjId` to ensure
 -- that the two columns that join an array relationship actually exist.
-newtype NativeQueryObjId (b :: BackendType)
+data NativeQueryObjId (b :: BackendType)
   = NQOCol (Column b)
   deriving (Generic)
 
@@ -108,7 +106,7 @@ data SourceObjId (b :: BackendType)
   | SOIStoredProcedure (FunctionName b)
   | SOIStoredProcedureObj (FunctionName b) (StoredProcedureObjId b)
   | SOILogicalModel LogicalModelName
-  | SOILogicalModelObj LogicalModelName (LogicalModelObjId b)
+  | SOILogicalModelObj LogicalModelLocation (LogicalModelObjId b)
   deriving (Eq, Generic)
 
 instance (Backend b) => Hashable (SourceObjId b)
@@ -148,7 +146,7 @@ reportSchemaObj = \case
           "logical model column " <> toTxt lm <> "." <> toTxt cn
         SOILogicalModelObj lm (LMOPerm rn pt) ->
           "permission " <> toTxt lm <> "." <> roleNameToTxt rn <> "." <> permTypeToCode pt
-        SOILogicalModelObj lm (LMOInnerLogicalModel inner) ->
+        SOILogicalModelObj lm (LMOReferencedLogicalModel inner) ->
           "inner logical model " <> toTxt lm <> "." <> toTxt inner
         SOITableObj tn (TOCol cn) ->
           "column " <> toTxt tn <> "." <> toTxt cn
@@ -212,7 +210,7 @@ data DependencyReason
   | DRRemoteRelationship
   | DRParentRole
   | DRLogicalModel
-  | DRInnerLogicalModel
+  | DRReferencedLogicalModel
   deriving (Show, Eq, Generic)
 
 instance Hashable DependencyReason
@@ -236,7 +234,7 @@ reasonToTxt = \case
   DRRemoteRelationship -> "remote_relationship"
   DRParentRole -> "parent_role"
   DRLogicalModel -> "logical_model"
-  DRInnerLogicalModel -> "inner_logical_model"
+  DRReferencedLogicalModel -> "inner_logical_model"
 
 instance ToJSON DependencyReason where
   toJSON = String . reasonToTxt
@@ -247,7 +245,9 @@ data SchemaDependency = SchemaDependency
   }
   deriving (Show, Eq, Generic)
 
-$(deriveToJSON hasuraJSON ''SchemaDependency)
+instance ToJSON SchemaDependency where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON
 
 instance Hashable SchemaDependency
 
