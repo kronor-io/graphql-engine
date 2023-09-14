@@ -52,7 +52,7 @@ import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Aeson.Lens qualified as JL
+-- import Data.Aeson.Lens qualified as JL
 import Data.Has
 import Data.HashMap.Strict qualified as HashMap
 import Data.SerializableBlob qualified as SB
@@ -446,24 +446,7 @@ processEventQueue logger statsLogger httpMgr getSchemaCache getEventEngineCtx ac
 
     -- \| Extract a trace context from an event trigger payload.
     extractEventContext :: forall io. (MonadIO io) => J.Value -> io (Maybe Tracing.TraceContext)
-    extractEventContext e = do
-      let traceIdMaybe =
-            Tracing.traceIdFromHex
-              . txtToBs
-              =<< e
-              ^? JL.key "trace_context" . JL.key "trace_id" . JL._String
-      for traceIdMaybe $ \traceId -> do
-        freshSpanId <- Tracing.randomSpanId
-        let parentSpanId =
-              Tracing.spanIdFromHex
-                . txtToBs
-                =<< e
-                ^? JL.key "trace_context" . JL.key "span_id" . JL._String
-            samplingState =
-              Tracing.samplingStateFromHeader
-                $ e
-                ^? JL.key "trace_context" . JL.key "sampling_state" . JL._String
-        pure $ Tracing.TraceContext traceId freshSpanId parentSpanId samplingState Tracing.emptyTraceState
+    extractEventContext _ = pure Nothing
 
     processEvent ::
       forall io r b.

@@ -60,6 +60,7 @@ import Network.HTTP.Client qualified as HTTP
 import Network.Wai.Handler.Warp (HostPreference)
 import Network.WebSockets.Connection qualified as WebSockets
 import Refined (NonNegative, Refined)
+import OpenTelemetry.Trace.Core qualified as OpenTelemetry
 
 --------------------------------------------------------------------------------
 -- application state
@@ -145,7 +146,8 @@ data AppEnv = AppEnv
     appEnvMaxTotalHeaderLength :: Int,
     appEnvTriggersErrorLogLevelStatus :: TriggersErrorLogLevelStatus,
     -- Kronor Stuff
-    appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID)
+    appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID),
+    appEnvTracer :: OpenTelemetry.Tracer
   }
 
 -- | Represents the Dynamic Hasura State, these field are mutable and can be changed

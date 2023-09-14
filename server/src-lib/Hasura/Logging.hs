@@ -83,8 +83,7 @@ import Data.Time.LocalTime qualified as Time
 import Hasura.Base.Error (QErr)
 import Hasura.Prelude
 import Hasura.Tracing.Class qualified as Tracing
-import Hasura.Tracing.Context
-import Hasura.Tracing.TraceId
+import Hasura.Tracing.Context qualified as Tracing
 import System.Log.FastLogger qualified as FL
 import Witch qualified
 
@@ -277,12 +276,13 @@ data EngineLog impl = EngineLog
   { _elTimestamp :: !FormattedTime,
     _elLevel :: !LogLevel,
     _elType :: !(EngineLogType impl),
-    _elDetail :: !J.Value,
-    -- | The trace context in which this log message was emitted, if any. See 'unLoggerTracing'.
-    _elTraceId :: !(Maybe TraceId),
-    -- | The span context in which this log message was emitted, if any. See 'unLoggerTracing'.
-    _elSpanId :: !(Maybe SpanId)
+    _elDetail :: !J.Value
   }
+  -- \| The trace context in which this log message was emitted, if any. See 'unLoggerTracing'.
+  -- _elTraceId :: !(Maybe TraceId),
+  -- \| The span context in which this log message was emitted, if any. See 'unLoggerTracing'.
+  -- _elSpanId :: !(Maybe SpanId)
+
   deriving stock (Generic)
 
 deriving instance (Show (EngineLogType impl)) => Show (EngineLog impl)
@@ -442,14 +442,21 @@ mkLogger (LoggerCtx loggerSet serverLogLevel timeGetter enabledLogTypes logsExpo
   -- where tracing isn't actually supported.  We decided this was fine, and
   -- actually might end up being useful as a way for OSS users to correlate
   -- logs that are part of the same operation
-  cxt <- Tracing.currentContext
-  let mbCurrentSpan = tcCurrentSpan <$> cxt
-      mbCurrentTrace = tcCurrentTrace <$> cxt
+  mCtxt <- Tracing.currentContext
   localTime <- liftIO timeGetter
   let (logLevel, logTy, logDet) = toEngineLog l
   when (logLevel >= serverLogLevel && isLogTypeEnabled enabledLogTypes logTy) $ liftIO do
-    let logLine = EngineLog localTime logLevel logTy logDet mbCurrentTrace mbCurrentSpan
-    FL.pushLogStrLn loggerSet $ FL.toLogStr (J.encode logLine)
+    let logLine = EngineLog localTime logLevel logTy logDet
+
+    jsonLogLine <- case mCtxt of
+      Nothing -> return $ J.encode logLine
+      Just ctx -> do
+        loggableFields <- Tracing.toLoggableFields ctx
+        case (J.toJSON logLine, loggableFields) of
+          (J.Object o, J.Object lo) -> return $ J.encode $ J.Object $ o <> lo
+          _ -> return $ J.encode loggableFields
+
+    FL.pushLogStrLn loggerSet $ FL.toLogStr jsonLogLine
     logsExporter >>= \f -> f logLine
 
 nullLogger :: Logger Hasura

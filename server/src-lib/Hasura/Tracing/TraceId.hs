@@ -1,6 +1,7 @@
 module Hasura.Tracing.TraceId
   ( -- * TraceId
     TraceId,
+    fixedTraceId,
     randomTraceId,
     traceIdFromBytes,
     traceIdToBytes,
@@ -9,6 +10,7 @@ module Hasura.Tracing.TraceId
 
     -- * SpanId
     SpanId,
+    fixedSpanId,
     randomSpanId,
     spanIdFromBytes,
     spanIdToBytes,
@@ -26,7 +28,7 @@ import Data.Serialize qualified as Serialize
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
 import Hasura.Prelude
-import System.Random.Stateful qualified as Random
+-- import System.Random.Stateful qualified as Random
 
 --------------------------------------------------------------------------------
 -- TraceId
@@ -53,16 +55,21 @@ instance Show TraceId where
 traceIdBytes :: Int
 traceIdBytes = 16
 
+fixedTraceId :: TraceId
+fixedTraceId = TraceId 0 0
+
 randomTraceId :: (MonadIO m) => m TraceId
-randomTraceId = liftIO do
-  (w1, w2) <-
-    flip Random.applyAtomicGen Random.globalStdGen $ \gen0 ->
-      let (!w1, !gen1) = Random.random gen0
-          (!w2, !gen2) = Random.random gen1
-       in ((w1, w2), gen2)
-  if w1 .|. w2 == 0
-    then randomTraceId
-    else pure $ TraceId w1 w2
+randomTraceId = return $ fixedTraceId
+  
+-- liftIO do
+--   (w1, w2) <-
+--     flip Random.applyAtomicGen Random.globalStdGen $ \gen0 ->
+--       let (!w1, !gen1) = Random.random gen0
+--           (!w2, !gen2) = Random.random gen1
+--        in ((w1, w2), gen2)
+--   if w1 .|. w2 == 0
+--     then randomTraceId
+--     else pure $ TraceId w1 w2
 
 -- | Create a 'TraceId' from a 'ByteString'.
 --
@@ -118,12 +125,16 @@ instance Show SpanId where
 spanIdBytes :: Int
 spanIdBytes = 8
 
+fixedSpanId :: SpanId
+fixedSpanId = SpanId 0
+
 randomSpanId :: (MonadIO m) => m SpanId
-randomSpanId = liftIO do
-  w <- Random.uniformM Random.globalStdGen
-  if w == 0
-    then randomSpanId
-    else pure $ SpanId w
+randomSpanId = return $ fixedSpanId
+-- liftIO do
+--   w <- Random.uniformM Random.globalStdGen
+--   if w == 0
+--     then randomSpanId
+--     else pure $ SpanId w
 
 -- | Create a 'SpanId' from a 'ByteString'.
 --

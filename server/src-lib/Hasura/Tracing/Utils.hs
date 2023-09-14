@@ -15,8 +15,11 @@ import Hasura.Prelude
 import Hasura.RQL.Types.SourceConfiguration (HasSourceConfiguration (..))
 import Hasura.Tracing.Class
 import Hasura.Tracing.Context
-import Hasura.Tracing.Propagator (HttpPropagator, inject)
+import Hasura.Tracing.Propagator (HttpPropagator)
 import Network.HTTP.Client.Transformable qualified as HTTP
+import OpenTelemetry.Trace.Core qualified as OpenTelemetry
+import OpenTelemetry.Context.ThreadLocal qualified as OpenTelemetry
+import OpenTelemetry.Propagator qualified as Propagator
 
 -- | Wrap the execution of an HTTP request in a span in the current
 -- trace. Despite its name, this function does not start a new trace, and the
@@ -33,17 +36,26 @@ traceHTTPRequest ::
   -- | a function that takes the traced request and executes it
   (HTTP.Request -> m a) ->
   m a
-traceHTTPRequest propagator req f = do
+traceHTTPRequest _propagator req f = do
   let method = bsToTxt (view HTTP.method req)
       uri = view HTTP.url req
   newSpan (method <> " " <> uri) do
-    let reqBytes = HTTP.getReqSize req
-    attachMetadata [("request_body_bytes", fromString (show reqBytes))]
-    headers <- fmap (maybe [] toHeaders) currentContext
-    f $ over HTTP.headers (headers <>) req
-  where
-    toHeaders :: TraceContext -> [HTTP.Header]
-    toHeaders context = inject propagator context []
+    maybeTraceContext <- currentContext
+    case maybeTraceContext of
+      Nothing -> f req
+      Just traceContext -> do
+        let propagator = OpenTelemetry.getTracerProviderPropagators $ OpenTelemetry.getTracerTracerProvider $ tcTracer traceContext
+        let reqBytes = HTTP.getReqSize req
+        context <- liftIO OpenTelemetry.getContext
+        headers <- Propagator.inject propagator context []
+        attachMetadata [
+            ("http.request.body.size", fromString (show reqBytes))
+          , ("http.request.method", method)
+          , ("http.request.uri", uri)
+          , ("span.type", "http")
+          , ("span.kind", "client") 
+          ]
+        f $ over HTTP.headers (headers <>) req
 
 attachSourceConfigAttributes :: forall b m. (HasSourceConfiguration b, MonadTrace m) => SourceConfig b -> m ()
 attachSourceConfigAttributes sourceConfig = do

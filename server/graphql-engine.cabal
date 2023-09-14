@@ -490,6 +490,12 @@ common lib-depends
 
                      -- debounce logs
                      , fold-debounce
+                     
+                     -- opentelemetry
+                     , hs-opentelemetry-sdk
+                     , hs-opentelemetry-api
+                     , hs-opentelemetry-instrumentation-wai
+
   if !flag(profiling)
     -- ghc-heap-view can't be built with profiling
     build-depends:     ghc-heap-view
@@ -1044,6 +1050,7 @@ library
                      -- Kronor additions
                      , Kronor.ApiLimitsEnforcer
                      , Kronor.TokenValidator
+                     , Kronor.OpenTelemetryReporter
 
 executable graphql-engine
   import: common-all, common-exe

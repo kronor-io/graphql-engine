@@ -142,7 +142,8 @@ setTraceContextInTx :: (MonadIO m) => Maybe Tracing.TraceContext -> PG.TxET QErr
 setTraceContextInTx = \case
   Nothing -> pure ()
   Just ctx -> do
-    let sql = PG.fromText $ "SET LOCAL \"hasura.tracecontext\" = " <> toSQLTxt (S.SELit . encodeToStrictText . toJSON $ ctx)
+    loggableFields <- liftIO $ Tracing.toLoggableFields ctx
+    let sql = PG.fromText $ "SET LOCAL \"hasura.tracecontext\" = " <> toSQLTxt (S.SELit . encodeToStrictText $ loggableFields)
     PG.unitQE defaultTxErrorHandler sql () False
 
 -- | Inject the trace context as a transaction-local variable,

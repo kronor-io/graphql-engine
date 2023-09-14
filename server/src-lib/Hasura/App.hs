@@ -174,6 +174,7 @@ import Web.Spock.Core qualified as Spock
 -- Kronor imports
 import Kronor.ApiLimitsEnforcer qualified as Kronor
 import Kronor.TokenValidator qualified as Kronor
+import Kronor.OpenTelemetryReporter qualified as Kronor
 
 --------------------------------------------------------------------------------
 -- Error handling (move to another module!)
@@ -457,6 +458,9 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
   -- Kronor Stuff
   invalidTokensRef <- liftIO $ STM.newTVarIO mempty
   void $ Kronor.startInvalidTokensListenerThread logger metadataDbPool 5000 invalidTokensRef
+  (tracer, _) <- allocate
+    (liftIO (Kronor.initializeTracer env))
+    (\(_, provider) -> liftIO $ Kronor.shutdownTracer provider)
 
   pure
     ( AppInit
@@ -496,7 +500,8 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvLicenseKeyCache = Nothing,
           appEnvMaxTotalHeaderLength = soMaxTotalHeaderLength,
           appEnvTriggersErrorLogLevelStatus = soTriggersErrorLogLevelStatus,
-          appEnvInvalidTokens = invalidTokensRef
+          appEnvInvalidTokens = invalidTokensRef,
+          appEnvTracer = tracer
         }
     )
 
@@ -673,7 +678,7 @@ newtype AppM a = AppM (ReaderT AppEnv (TraceT IO) a)
     )
 
 runAppM :: AppEnv -> AppM a -> IO a
-runAppM c (AppM a) = ignoreTraceT $ runReaderT a c
+runAppM c (AppM a) = runTraceT (Kronor.openTelemetryReporter (appEnvTracer c)) $ runReaderT a c
 
 instance HasAppEnv AppM where
   askAppEnv = ask

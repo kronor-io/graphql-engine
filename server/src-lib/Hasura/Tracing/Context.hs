@@ -1,15 +1,22 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 module Hasura.Tracing.Context
   ( TraceContext (..),
     TraceMetadata,
+    toLoggableFields,
   )
 where
 
-import Data.Aeson ((.=))
 import Data.Aeson qualified as J
+import Data.Char qualified
 import Hasura.Prelude
 import Hasura.Tracing.Sampling
 import Hasura.Tracing.TraceId
 import Hasura.Tracing.TraceState (TraceState)
+import OpenTelemetry.Trace.Core qualified as OpenTelemetry
+import OpenTelemetry.Trace.Id as OpenTelemetry (Base (..), spanIdBaseEncodedText, traceIdBaseEncodedText)
+import OpenTelemetry.Context.ThreadLocal qualified as OpenTelemetry
+import OpenTelemetry.Context qualified as OpenTelemetry
+import Data.Text qualified as T
 
 -- | Any additional human-readable key-value pairs relevant to the execution of
 -- a span.
@@ -28,7 +35,8 @@ type TraceMetadata = [(Text, Text)]
 -- within that trace, and the span's parent, unless the current span
 -- is the root. This is like a call stack.
 data TraceContext = TraceContext
-  { tcCurrentTrace :: TraceId,
+  { tcTracer :: OpenTelemetry.Tracer,
+    tcCurrentTrace :: TraceId,
     tcCurrentSpan :: SpanId,
     tcCurrentParent :: Maybe SpanId,
     tcSamplingState :: SamplingState,
@@ -37,14 +45,33 @@ data TraceContext = TraceContext
     tcStateState :: TraceState
   }
 
+toLoggableFields :: TraceContext -> IO J.Value
+toLoggableFields _ = do
+      mSpan <- OpenTelemetry.lookupSpan <$> OpenTelemetry.getContext
+      case mSpan of
+        Nothing -> return $ J.object []
+        Just sp -> do
+          ctxt <- OpenTelemetry.getSpanContext sp
+
+          let tId = hexToDec (T.takeEnd 16 (traceIdBaseEncodedText Base16 ctxt.traceId))
+          let sId = hexToDec (spanIdBaseEncodedText Base16 ctxt.spanId)
+          return $ J.object
+                  [ ("trace_id", J.String (tshow tId))
+                  , ("span_id", J.String (tshow sId))
+                  ]
+  where
+    -- Convert a hex string to a decimal number
+    hexToDec :: Text -> Integer
+    hexToDec = foldr (\c s -> s * 16 + c) 0 . reverse . map (fromIntegral . Data.Char.digitToInt) . T.unpack
+
 -- Should this be here? This implicitly ties Tracing to the name of fields in HTTP headers.
-instance J.ToJSON TraceContext where
-  toJSON TraceContext {..} =
-    let idFields =
-          [ "trace_id" .= bsToTxt (traceIdToHex tcCurrentTrace),
-            "span_id" .= bsToTxt (spanIdToHex tcCurrentSpan)
-          ]
-        samplingFieldMaybe =
-          samplingStateToHeader @Text tcSamplingState <&> \t ->
-            "sampling_state" .= t
-     in J.object $ idFields ++ maybeToList samplingFieldMaybe
+-- instance J.ToJSON TraceContext where
+--   toJSON TraceContext {..} =
+--     let idFields =
+--           [ "trace_id" .= bsToTxt (traceIdToHex tcCurrentTrace),
+--             "span_id" .= bsToTxt (spanIdToHex tcCurrentSpan)
+--           ]
+--         samplingFieldMaybe =
+--           samplingStateToHeader @Text tcSamplingState <&> \t ->
+--             "sampling_state" .= t
+--      in J.object $ idFields ++ maybeToList samplingFieldMaybe
