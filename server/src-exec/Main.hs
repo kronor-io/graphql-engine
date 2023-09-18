@@ -36,7 +36,7 @@ import Hasura.Server.Prometheus (makeDummyPrometheusMetrics)
 import Hasura.Server.Version
 import Hasura.ShutdownLatch
 import Hasura.Tracing (sampleAlways)
-import System.Environment (getEnvironment, lookupEnv, unsetEnv)
+import System.Environment (lookupEnv)
 import System.Exit qualified as Sys
 import System.Metrics qualified as EKG
 import System.Monitor.Heartbeat
@@ -48,17 +48,20 @@ main = maybeWithGhcDebug $ monitorHeartbeatMain $ do
   catch
     do
       env <- Env.getEnvironment
-      clearEnvironment
+      -- In kronor, we do care about reading from the environment variables.
+      -- For example, we want the opentelemetry library to read stuff such as
+      -- the endpoint to use
+      -- clearEnvironment
       args <- parseArgs env
       runApp env args
     (\(ExitException _code msg) -> BC.putStrLn msg >> Sys.exitFailure)
-  where
-    -- Since the handling of environment variables works differently between the
-    -- Cloud version and the OSSS version we clear the process environment to
-    -- avoid accidentally reading directly from the operating system environment
-    -- variables.
-    clearEnvironment :: IO ()
-    clearEnvironment = getEnvironment >>= traverse_ \(v, _) -> unsetEnv v
+ -- where
+ --   -- Since the handling of environment variables works differently between the
+ --   -- Cloud version and the OSSS version we clear the process environment to
+ --   -- avoid accidentally reading directly from the operating system environment
+ --   -- variables.
+ --   clearEnvironment :: IO ()
+ --   clearEnvironment = getEnvironment >>= traverse_ \(v, _) -> unsetEnv v
 
 runApp :: Env.Environment -> HGEOptions (ServeOptions Hasura) -> IO ()
 runApp env (HGEOptions rci metadataDbUrl hgeCmd) = do
