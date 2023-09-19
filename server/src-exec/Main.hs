@@ -50,7 +50,7 @@ main = maybeWithGhcDebug $ monitorHeartbeatMain $ do
       env <- Env.getEnvironment
       -- In kronor, we do care about reading from the environment variables.
       -- For example, we want the opentelemetry library to read stuff such as
-      -- the endpoint to use
+      -- the endpoint to use. this is way the next line is commented out
       -- clearEnvironment
       args <- parseArgs env
       runApp env args

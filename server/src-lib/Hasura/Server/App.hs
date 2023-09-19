@@ -121,7 +121,10 @@ import Web.Spock.Core ((<//>))
 import Web.Spock.Core qualified as Spock
 
 -- Kronor stuff
-import OpenTelemetry.Instrumentation.Wai (newOpenTelemetryWaiMiddleware)
+import OpenTelemetry.Trace.Core qualified as OpenTelemetry
+import OpenTelemetry.Context.ThreadLocal qualified as OpenTelemetry
+import OpenTelemetry.Propagator qualified as Propagator
+import Data.Text.Encoding qualified as Text
 
 data HandlerCtx = HandlerCtx
   { hcAppContext :: AppContext,
@@ -327,13 +330,20 @@ mkSpockAction appStateRef qErrEncoder qErrModifier apiHandler = do
         Tracing.SamplingAccept
         Tracing.emptyTraceState
 
+  let propagator = OpenTelemetry.getTracerProviderPropagators $ OpenTelemetry.getTracerTracerProvider $ Tracing.tcTracer tracingCtx
+  let parentContextM = do
+        ctx <- OpenTelemetry.getContext
+        ctxt <- Propagator.extract propagator headers ctx
+        OpenTelemetry.attachContext ctxt
+        
+  _ <- liftIO parentContextM
+
   let runTrace ::
         forall m1 a1.
         (MonadTrace m1) =>
         m1 a1 ->
         m1 a1
-      runTrace =
-        Tracing.newTraceWith tracingCtx appEnvTraceSamplingPolicy (fromString (B8.unpack pathInfo))
+      runTrace = Tracing.newTraceWith tracingCtx appEnvTraceSamplingPolicy (fromString (B8.unpack pathInfo))
 
   let getInfo parsedRequest = do
         authenticationResp <- lift (resolveUserInfo (_lsLogger appEnvLoggers) appEnvManager headers acAuthMode parsedRequest)
@@ -350,9 +360,14 @@ mkSpockAction appStateRef qErrEncoder qErrModifier apiHandler = do
           )
 
   hoist runTrace do
-    -- Add the request ID to the tracing metadata so that we
-    -- can correlate requests and traces
-    lift $ Tracing.attachMetadata [("request_id", unRequestId requestId)]
+    lift do
+      Tracing.attachMetadata [
+        -- Add the request ID to the tracing metadata so that we
+        -- can correlate requests and traces
+          ("hasura.request_id", unRequestId requestId)
+        , ("http.target", Text.decodeUtf8 (Wai.rawPathInfo req <> Wai.rawQueryString req))
+        , ("span.kind", "server")
+        ]
 
     (serviceTime, (result, userInfo, authHeaders, includeInternal, queryJSON, extraUserInfo)) <- withElapsedTime $ case apiHandler of
       -- in the case of a simple get/post we don't have to send the webhook anything
@@ -840,9 +855,6 @@ httpApp ::
   WS.WebsocketCloseOnMetadataChangeAction ->
   Spock.SpockT m ()
 httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOnMetadataChangeAction = do
-  Spock.middleware =<< liftIO newOpenTelemetryWaiMiddleware 
-
-  -- Additional spock action to run
   setupHook appStateRef
 
   -- cors middleware
