@@ -306,7 +306,7 @@ pgResolveConnectionTemplate sourceConfig (RequestContext (RequestContextHeaders 
           -- when community edition engine is used to test the connection template
           ConnTemplate_NotApplicable -> connectionTemplateNotApplicableError
           _ -> pure $ ConnectionTemplateResolver $ \sessionVariables' reqHeaders queryContext' ->
-            resolvePostgresConnectionTemplate connectionTemplate (Map.keys (_pscConnectionSet sourceConfig)) sessionVariables' reqHeaders queryContext'
+              resolvePostgresConnectionTemplate connectionTemplate (Map.keys (_pscConnectionSet sourceConfig)) sessionVariables' reqHeaders queryContext'
   let headers = map (\(hName, hVal) -> (CI.mk (txtToBs hName), txtToBs hVal)) $ Map.toList headersMap
   case maybeRoleFromSessionVariables sessionVariables of
     Nothing -> throw400 InvalidParams "No `x-hasura-role` found in session variables. Please try again with non-admin 'x-hasura-role' in the session context."

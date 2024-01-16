@@ -12,6 +12,7 @@ where
 import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as Set
+import Data.List qualified
 import Data.Text qualified as T
 import Data.Text.Extended
 import Hasura.Base.Error
@@ -227,7 +228,145 @@ resolveRemoteField ::
   UserInfo ->
   IR.RemoteSchemaRootField r RemoteSchemaVariable ->
   StateT RemoteJSONVariableMap m (IR.RemoteSchemaRootField r Variable)
-resolveRemoteField userInfo = traverse (resolveRemoteVariable userInfo)
+resolveRemoteField userInfo = traverseRemoteSchemaRootField (resolveRemoteVariable userInfo) (resolveRemoteArguments userInfo)
+
+resolveRemoteArguments ::
+  (MonadError QErr m) =>
+  UserInfo ->
+  HashMap G.Name (G.Value RemoteSchemaVariable) ->
+  StateT RemoteJSONVariableMap m (HashMap G.Name (G.Value Variable))
+resolveRemoteArguments userInfo = HashMap.traverseWithKey $ \k v -> traverseValue userInfo [k] v
+
+traverseValue ::
+  (MonadError QErr m) =>
+  UserInfo ->
+  [G.Name] ->
+  G.Value RemoteSchemaVariable ->
+  StateT RemoteJSONVariableMap m (G.Value Variable)
+traverseValue userInfo parentPath = \case
+  G.VVariable var -> do
+    var' <- resolveRemoteArgumentWithName userInfo parentPath var
+    pure $ G.VVariable var'
+  G.VList values -> do
+    values' <- traverse (\(i, v) -> traverseValue userInfo (G.unsafeMkName (tshow i) : parentPath) v) (zip [1::Int ..] values)
+    pure $ G.VList values'
+  G.VObject hm -> do
+    hm' <- HashMap.traverseWithKey (\key value -> traverseValue userInfo (key : parentPath) value) hm
+    pure $ G.VObject hm'
+  G.VNull -> pure G.VNull
+  G.VInt i -> pure $ G.VInt i
+  G.VFloat f -> pure $ G.VFloat f
+  G.VString t -> pure $ G.VString t
+  G.VBoolean b -> pure $ G.VBoolean b
+  G.VEnum enumVal -> pure $ G.VEnum enumVal
+
+resolveRemoteArgumentWithName ::
+  (MonadError QErr m) =>
+  UserInfo ->
+  [G.Name] ->
+  RemoteSchemaVariable ->
+  StateT RemoteJSONVariableMap m Variable
+resolveRemoteArgumentWithName userInfo parentPath = \case
+  SessionPresetVariable sessionVar typeName presetInfo -> do
+    sessionVarVal <-
+      onNothing (getSessionVariableValue sessionVar $ _uiSession userInfo)
+        $ throw400 NotFound
+        $ sessionVar
+        <<> " session variable expected, but not found"
+    varName <-
+      sessionVariableToGraphQLName sessionVar
+        `onNothing` throw500 ("'" <> sessionVariableToText sessionVar <> "' cannot be made into a valid GraphQL name")
+    coercedValue <-
+      case presetInfo of
+        SessionArgumentPresetScalar ->
+          case G.unName typeName of
+            "Int" ->
+              case readMaybe $ T.unpack sessionVarVal of
+                Nothing -> throw400 CoercionError $ sessionVarVal <<> " cannot be coerced into an Int value"
+                Just i -> pure $ G.VInt i
+            "Boolean" ->
+              if
+                | sessionVarVal `elem` ["true", "false"] ->
+                    pure $ G.VBoolean $ "true" == sessionVarVal
+                | otherwise ->
+                    throw400 CoercionError $ sessionVarVal <<> " cannot be coerced into a Boolean value"
+            "Float" ->
+              case readMaybe $ T.unpack sessionVarVal of
+                Nothing ->
+                  throw400 CoercionError $ sessionVarVal <<> " cannot be coerced into a Float value"
+                Just i -> pure $ G.VFloat i
+            -- The `String`,`ID` and the default case all use the same code. But,
+            -- it will be better to not merge all of them into the default case
+            -- because it will be helpful to know how all the built-in scalars
+            -- are handled
+            "String" -> pure $ G.VString sessionVarVal
+            "ID" -> pure $ G.VString sessionVarVal
+            -- When we encounter a custom scalar, we just pass it as a string
+            _ -> pure $ G.VString sessionVarVal
+        SessionArgumentPresetEnum enumVals -> do
+          sessionVarEnumVal <-
+            G.EnumValue
+              <$> onNothing
+                (G.mkName sessionVarVal)
+                (throw400 CoercionError $ sessionVarVal <<> " is not a valid GraphQL name")
+          case sessionVarEnumVal `Set.member` enumVals of
+            True -> pure $ G.VEnum sessionVarEnumVal
+            False -> throw400 CoercionError $ sessionVarEnumVal <<> " is not one of the valid enum values"
+    -- nullability is false, because we treat presets as hard presets
+    let variableGType = G.TypeNamed (G.Nullability False) typeName
+    pure $ Variable (VIRequired varName) variableGType $ Just $ GraphQLValue coercedValue
+  RemoteJSONValue gtype jsonValue -> do
+    -- This should never fail.
+    --
+    let varText = Data.List.foldl1' (\acc x -> acc <> "kZZk" <> x) (fmap G.unName (Data.List.reverse parentPath))
+    varName <-
+      G.mkName varText
+        `onNothing` throw500 ("'" <> varText <> "' is not a valid GraphQL name")
+    pure $ Variable (VIRequired varName) gtype $ Just $ JSONValue jsonValue
+  QueryVariable variable -> pure variable
+
+traverseRemoteSchemaRootField ::
+  (Applicative f) =>
+  (var1 -> f var2) ->
+  ( HashMap G.Name (G.Value var1) ->
+    f (HashMap G.Name (G.Value var2))
+  ) ->
+  IR.RemoteSchemaRootField r var1 ->
+  f (IR.RemoteSchemaRootField r var2)
+traverseRemoteSchemaRootField f1 f2 (IR.RemoteSchemaRootField a1 a2 a3) =
+  fmap
+    ( \b3 ->
+        IR.RemoteSchemaRootField
+          a1
+          a2
+          b3
+    )
+    (foo1 f1 f2 a3)
+
+foo1 ::
+  (Applicative f) =>
+  (var -> f var1) ->
+  (HashMap G.Name (G.Value var) -> f (HashMap G.Name (G.Value var1))) ->
+  IR.GraphQLField r var ->
+  f (IR.GraphQLField r var1)
+foo1 f1 f2 (IR.GraphQLField a1 a2 arguments a4 a5) =
+  (<*>)
+    ( liftA2
+        ( \b3 b4 b5 ->
+            IR.GraphQLField
+              a1
+              a2
+              b3
+              b4
+              b5
+        )
+        (f2 arguments)
+        ( traverse
+            (traverse f1)
+            a4
+        )
+    )
+    (traverse f1 a5)
 
 -- | TODO: Documentation.
 runVariableCache ::
