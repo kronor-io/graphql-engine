@@ -285,7 +285,10 @@ initMetadataConnectionInfo env metadataDbURL dbURL =
 initBasicConnectionInfo ::
   (MonadIO m) =>
   Env.Environment ->
-  -- | metadata DB URL (--metadata-database-url)
+  -- | metadata DB URL (--metadata-database-url). This is expected to be either
+  -- a postgres connection string URI, or our own @dynamic-from-file@ URI,
+  -- corresponding to the dynamic_from_file feature when connecting a postgres
+  -- data source.
   Maybe String ->
   -- | user's DB URL (--database-url)
   PostgresConnInfo (Maybe UrlConf) ->
@@ -319,10 +322,18 @@ initBasicConnectionInfo
         _srcConnInfo <- resolvePostgresConnInfo env srcURL maybeRetries
         pure $ BasicConnectionInfo (mkConnInfoFromMDB mdURL) (Just $ mkSourceConfig srcURL)
     where
+      -- Our own made up URI scheme corresponding to the dynamic_from_file feature
+      -- NOTE: Since this can only be set by the administrator, there's no need
+      -- to validate against something like HASURA_GRAPHQL_DYNAMIC_SECRETS_ALLOWED_PATH_PREFIX
+      dynamicScheme = "dynamic-from-file://"
       mkConnInfoFromMDB mdbURL =
         PG.ConnInfo
           { PG.ciRetries = fromMaybe 1 maybeRetries,
-            PG.ciDetails = PG.CDDatabaseURI $ txtToBs $ T.pack mdbURL
+            PG.ciDetails = case splitAt (length dynamicScheme) mdbURL of
+              (mbDynamicScheme, mbPath)
+                | mbDynamicScheme == dynamicScheme ->
+                    PG.CDDynamicDatabaseURI mbPath
+              _ -> PG.CDDatabaseURI $ txtToBs $ T.pack mdbURL
           }
       mkSourceConfig srcURL =
         PostgresConnConfiguration
@@ -350,10 +361,10 @@ resolvePostgresConnInfo ::
   Maybe Int ->
   m PG.ConnInfo
 resolvePostgresConnInfo env dbUrlConf (fromMaybe 1 -> retries) = do
-  dbUrlText <-
-    resolveUrlConf env dbUrlConf `onLeft` \err ->
-      liftIO (throwErrJExit InvalidDatabaseConnectionParamsError err)
-  pure $ PG.ConnInfo retries $ PG.CDDatabaseURI $ txtToBs dbUrlText
+  connDetails <-
+    runExceptT (resolveUrlConf env dbUrlConf)
+      >>= either (liftIO . throwErrJExit InvalidDatabaseConnectionParamsError) pure
+  pure $ PG.ConnInfo retries connDetails
 
 --------------------------------------------------------------------------------
 -- App init
@@ -500,6 +511,9 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvLicenseKeyCache = Nothing,
           appEnvMaxTotalHeaderLength = soMaxTotalHeaderLength,
           appEnvTriggersErrorLogLevelStatus = soTriggersErrorLogLevelStatus,
+          appEnvAsyncActionsFetchBatchSize = soAsyncActionsFetchBatchSize,
+          appEnvPersistedQueries = soPersistedQueries,
+          appEnvPersistedQueriesTtl = soPersistedQueriesTtl,
           appEnvInvalidTokens = invalidTokensRef,
           appEnvTracer = tracer
         }
@@ -713,12 +727,12 @@ instance HttpLog AppM where
 
   buildExtraHttpLogMetadata _ _ = ()
 
-  logHttpError logger loggingSettings userInfoM reqId waiReq req qErr headers _ =
+  logHttpError logger loggingSettings userInfoM reqId waiReq req qErr headers _ _ =
     unLoggerTracing logger
       $ mkHttpLog
       $ mkHttpErrorLogContext userInfoM loggingSettings reqId waiReq req qErr Nothing Nothing headers
 
-  logHttpSuccess logger loggingSettings userInfoM reqId waiReq reqBody response compressedResponse qTime cType headers (CommonHttpLogMetadata rb batchQueryOpLogs, ()) =
+  logHttpSuccess logger loggingSettings userInfoM reqId waiReq reqBody response compressedResponse qTime cType headers (CommonHttpLogMetadata rb batchQueryOpLogs, ()) _ =
     unLoggerTracing logger
       $ mkHttpLog
       $ mkHttpAccessLogContext userInfoM loggingSettings reqId waiReq reqBody (BL.length response) compressedResponse qTime cType headers rb batchQueryOpLogs
@@ -778,6 +792,13 @@ instance MonadGQLExecutionCheck AppM where
 instance MonadConfigApiHandler AppM where
   runConfigApiHandler = configApiGetHandler
 
+instance MonadGQLApiHandler AppM where
+  runPersistedQueriesGetHandler _ _ _ = throw400 NotSupported "PersistedQueryNotSupported"
+  runPersistedQueriesPostHandler _ _ query =
+    case query of
+      EqrGQLReq gqlReq -> v1GQHandler gqlReq
+      EqrAPQReq _ -> throw400 NotSupported "PersistedQueryNotSupported"
+
 instance MonadQueryLog AppM where
   logQueryLog logger = unLoggerTracing logger
 
@@ -802,16 +823,22 @@ instance MonadEventLogCleanup AppM where
 instance MonadGetPolicies AppM where
   runGetApiTimeLimit = pure $ Nothing
   runGetPrometheusMetricsGranularity = pure (pure GranularMetricsOff)
+  runGetModelInfoLogStatus = pure (pure ModelInfoLogOff)
 
 -- | Each of the function in the type class is executed in a totally separate transaction.
 instance MonadMetadataStorage AppM where
   fetchMetadataResourceVersion = runInSeparateTx fetchMetadataResourceVersionFromCatalog
   fetchMetadata = runInSeparateTx fetchMetadataAndResourceVersionFromCatalog
   fetchMetadataNotifications a b = runInSeparateTx $ fetchMetadataNotificationsFromCatalog a b
-  setMetadata r = runInSeparateTx . setMetadataInCatalog r
-  notifySchemaCacheSync a b c = runInSeparateTx $ notifySchemaCacheSyncTx a b c
+
   getCatalogState = runInSeparateTx getCatalogStateTx
   setCatalogState a b = runInSeparateTx $ setCatalogStateTx a b
+
+  updateMetadataAndNotifySchemaSync instanceId resourceVersion metadata cacheInvalidations =
+    runInSeparateTx $ do
+      newResourceVersion <- setMetadataInCatalog resourceVersion metadata
+      notifySchemaCacheSyncTx newResourceVersion instanceId cacheInvalidations
+      pure newResourceVersion
 
   -- stored source introspection is not available in this distribution
   fetchSourceIntrospection _ = pure $ Right Nothing
@@ -835,7 +862,7 @@ instance MonadMetadataStorage AppM where
   deleteScheduledEvent a b = runInSeparateTx $ deleteScheduledEventTx a b
 
   insertAction a b c d = runInSeparateTx $ insertActionTx a b c d
-  fetchUndeliveredActionEvents = runInSeparateTx fetchUndeliveredActionEventsTx
+  fetchUndeliveredActionEvents a = runInSeparateTx $ fetchUndeliveredActionEventsTx a
   setActionStatus a b = runInSeparateTx $ setActionStatusTx a b
   fetchActionResponse = runInSeparateTx . fetchActionResponseTx
   clearActionData = runInSeparateTx . clearActionDataTx
@@ -938,7 +965,8 @@ runHGEServer ::
     MonadEventLogCleanup m,
     ProvidesHasuraServices m,
     MonadTrace m,
-    MonadGetPolicies m
+    MonadGetPolicies m,
+    MonadGQLApiHandler m
   ) =>
   (AppStateRef impl -> Spock.SpockT m ()) ->
   AppStateRef impl ->
@@ -963,6 +991,7 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
           . Warp.setGracefulShutdownTimeout (Just 30) -- 30s graceful shutdown
           . Warp.setInstallShutdownHandler shutdownHandler
           . Warp.setBeforeMainLoop (for_ startupStatusHook id)
+          . Warp.setServerName ""
           . setForkIOWithMetrics
           . Warp.setMaxTotalHeaderLength appEnvMaxTotalHeaderLength
           $ Warp.defaultSettings
@@ -971,7 +1000,8 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
       setForkIOWithMetrics = Warp.setFork \f -> do
         void
           $ C.forkIOWithUnmask
-            ( \unmask ->
+            ( \unmask -> do
+                labelMe "runHGEServer_warp_fork"
                 bracket_
                   ( do
                       EKG.Gauge.inc (smWarpThreads appEnvServerMetrics)
@@ -1035,7 +1065,8 @@ mkHGEServer ::
     MonadEventLogCleanup m,
     ProvidesHasuraServices m,
     MonadTrace m,
-    MonadGetPolicies m
+    MonadGetPolicies m,
+    MonadGQLApiHandler m
   ) =>
   (AppStateRef impl -> Spock.SpockT m ()) ->
   AppStateRef impl ->
@@ -1330,6 +1361,8 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
           (acAsyncActionsFetchInterval <$> getAppContext appStateRef)
           (leActionEvents lockedEventsCtx)
           Nothing
+          appEnvAsyncActionsFetchBatchSize
+          (acHeaderPrecedence <$> getAppContext appStateRef)
 
       -- start a background thread to handle async action live queries
       void
@@ -1480,8 +1513,8 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = pccConnectionInfo config
   -- If the user does not provide values for the pool settings, then use the default values
   let (maxConns, idleTimeout, retries) = getDefaultPGPoolSettingIfNotExists poolSettings defaultPostgresPoolSettings
-  urlText <- resolveUrlConf env urlConf
-  let connInfo = PG.ConnInfo retries $ PG.CDDatabaseURI $ txtToBs urlText
+  connDetails <- resolveUrlConf env urlConf
+  let connInfo = PG.ConnInfo retries connDetails
       connParams =
         PG.defaultConnParams
           { PG.cpIdleTime = idleTimeout,

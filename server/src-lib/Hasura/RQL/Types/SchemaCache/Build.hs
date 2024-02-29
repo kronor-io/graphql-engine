@@ -1,6 +1,8 @@
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE UndecidableInstances #-}
+-- ghc 9.6 seems to be doing something screwy with...
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 -- | Types and functions used in the process of building the schema cache from metadata information
 -- stored in the @hdb_catalog@ schema in Postgres.
@@ -300,6 +302,7 @@ instance (UserInfoM m) => UserInfoM (MetadataT m) where
 instance (MonadGetPolicies m) => MonadGetPolicies (MetadataT m) where
   runGetApiTimeLimit = lift runGetApiTimeLimit
   runGetPrometheusMetricsGranularity = lift runGetPrometheusMetricsGranularity
+  runGetModelInfoLogStatus = lift $ runGetModelInfoLogStatus
 
 -- | @runMetadataT@ puts a stateful metadata in scope. @MetadataDefaults@ is
 -- provided so that it can be considered from the --metadataDefaults arguments.

@@ -11,6 +11,7 @@ const numberSchema = z.preprocess(
 export const poolSettingsSchema = z
   .object({
     totalMaxConnections: numberSchema.optional(),
+    maxConnections: numberSchema.optional(),
     idleTimeout: numberSchema.optional(),
     retries: numberSchema.optional(),
     poolTimeout: numberSchema.optional(),
@@ -26,6 +27,10 @@ export const databaseUrlSchema = z.discriminatedUnion('connectionType', [
   z.object({
     connectionType: z.literal('envVar'),
     envVar: z.string().min(1, 'Env variable cannot be empty'),
+  }),
+  z.object({
+    connectionType: z.literal('dynamicFromFile'),
+    dynamicFromFile: z.string().min(1, 'File path cannot be empty'),
   }),
   z.object({
     connectionType: z.literal('connectionParams'),

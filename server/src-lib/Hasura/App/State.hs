@@ -1,4 +1,5 @@
 {-# LANGUAGE Arrows #-}
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 module Hasura.App.State
   ( -- * application state
@@ -145,6 +146,9 @@ data AppEnv = AppEnv
     appEnvLicenseKeyCache :: Maybe (CredentialCache AgentLicenseKey),
     appEnvMaxTotalHeaderLength :: Int,
     appEnvTriggersErrorLogLevelStatus :: TriggersErrorLogLevelStatus,
+    appEnvAsyncActionsFetchBatchSize :: Int,
+    appEnvPersistedQueries :: PersistedQueriesState,
+    appEnvPersistedQueriesTtl :: Int,
     -- Kronor Stuff
     appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID),
     appEnvTracer :: OpenTelemetry.Tracer
@@ -173,7 +177,9 @@ data AppContext = AppContext
     acAsyncActionsFetchInterval :: OptionalInterval,
     acApolloFederationStatus :: ApolloFederationStatus,
     acCloseWebsocketsOnMetadataChangeStatus :: CloseWebsocketsOnMetadataChangeStatus,
-    acSchemaSampledFeatureFlags :: SchemaSampledFeatureFlags
+    acSchemaSampledFeatureFlags :: SchemaSampledFeatureFlags,
+    acRemoteSchemaResponsePriority :: RemoteSchemaResponsePriority,
+    acHeaderPrecedence :: HeaderPrecedence
   }
 
 -- | Collection of the LoggerCtx, the regular Logger and the PGLogger
@@ -268,7 +274,7 @@ buildAppContextRule ::
 buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> do
   schemaSampledFeatureFlags <- arrM (liftIO . sampleFeatureFlags) -< checkFeatureFlag
   authMode <- buildAuthMode -< (soAdminSecret, soAuthHook, soJwtSecret, soUnAuthRole)
-  let sqlGenCtx = initSQLGenCtx soExperimentalFeatures soStringifyNum soDangerousBooleanCollapse soRemoteNullForwardingPolicy
+  let sqlGenCtx = initSQLGenCtx soExperimentalFeatures soStringifyNum soDangerousBooleanCollapse soBackwardsCompatibleNullInNonNullableVariables soRemoteNullForwardingPolicy
   responseInternalErrorsConfig <- buildResponseInternalErrorsConfig -< (soAdminInternalErrors, soDevMode)
   eventEngineCtx <- buildEventEngineCtx -< (soEventsHttpPoolSize, soEventsFetchInterval, soEventsFetchBatchSize)
   returnA
@@ -294,7 +300,9 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> 
           acAsyncActionsFetchInterval = soAsyncActionsFetchInterval,
           acApolloFederationStatus = soApolloFederationStatus,
           acCloseWebsocketsOnMetadataChangeStatus = soCloseWebsocketsOnMetadataChangeStatus,
-          acSchemaSampledFeatureFlags = schemaSampledFeatureFlags
+          acSchemaSampledFeatureFlags = schemaSampledFeatureFlags,
+          acRemoteSchemaResponsePriority = soRemoteSchemaResponsePriority,
+          acHeaderPrecedence = soHeaderPrecedence
         }
   where
     buildEventEngineCtx = Inc.cache proc (httpPoolSize, fetchInterval, fetchBatchSize) -> do
@@ -331,8 +339,14 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> 
 --------------------------------------------------------------------------------
 -- subsets
 
-initSQLGenCtx :: HashSet ExperimentalFeature -> Options.StringifyNumbers -> Options.DangerouslyCollapseBooleans -> Options.RemoteNullForwardingPolicy -> SQLGenCtx
-initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse remoteNullForwardingPolicy =
+initSQLGenCtx ::
+  HashSet ExperimentalFeature ->
+  Options.StringifyNumbers ->
+  Options.DangerouslyCollapseBooleans ->
+  Options.BackwardsCompatibleNullInNonNullableVariables ->
+  Options.RemoteNullForwardingPolicy ->
+  SQLGenCtx
+initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse nullInNonNullableVariables remoteNullForwardingPolicy =
   let optimizePermissionFilters
         | EFOptimizePermissionFilters `elem` experimentalFeatures = Options.OptimizePermissionFilters
         | otherwise = Options.Don'tOptimizePermissionFilters
@@ -340,7 +354,7 @@ initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse remoteN
       bigqueryStringNumericInput
         | EFBigQueryStringNumericInput `elem` experimentalFeatures = Options.EnableBigQueryStringNumericInput
         | otherwise = Options.DisableBigQueryStringNumericInput
-   in SQLGenCtx stringifyNum dangerousBooleanCollapse remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput
+   in SQLGenCtx stringifyNum dangerousBooleanCollapse nullInNonNullableVariables remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput
 
 buildCacheStaticConfig :: AppEnv -> CacheStaticConfig
 buildCacheStaticConfig AppEnv {..} =

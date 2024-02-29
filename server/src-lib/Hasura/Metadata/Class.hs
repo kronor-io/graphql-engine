@@ -31,6 +31,7 @@ import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.Server.Types
 import Hasura.Session
+import Hasura.Tracing.Monad (TraceT)
 import Network.HTTP.Types qualified as HTTP
 
 data SchemaSyncEventProcessResult = SchemaSyncEventProcessResult
@@ -97,9 +98,16 @@ class (Monad m) => MonadMetadataStorage m where
   fetchMetadataResourceVersion :: m (Either QErr MetadataResourceVersion)
   fetchMetadata :: m (Either QErr MetadataWithResourceVersion)
   fetchMetadataNotifications :: MetadataResourceVersion -> InstanceId -> m (Either QErr [(MetadataResourceVersion, CacheInvalidations)])
-  setMetadata :: MetadataResourceVersion -> Metadata -> m (Either QErr MetadataResourceVersion)
-  notifySchemaCacheSync :: MetadataResourceVersion -> InstanceId -> CacheInvalidations -> m (Either QErr ())
+
   getCatalogState :: m (Either QErr CatalogState)
+
+  -- This function is used to update the metadata in the metadata storage with schema sync notifications.
+  updateMetadataAndNotifySchemaSync ::
+    InstanceId ->
+    MetadataResourceVersion ->
+    Metadata ->
+    CacheInvalidations ->
+    m (Either QErr MetadataResourceVersion)
 
   -- the `setCatalogState` function is used by the console and CLI to store its state
   -- it is disabled when maintenance mode is on
@@ -146,7 +154,7 @@ class (Monad m) => MonadMetadataStorage m where
     [HTTP.Header] ->
     Value ->
     m (Either QErr ActionId)
-  fetchUndeliveredActionEvents :: m (Either QErr [ActionLogItem])
+  fetchUndeliveredActionEvents :: Int -> m (Either QErr [ActionLogItem])
   setActionStatus :: ActionId -> AsyncActionStatus -> m (Either QErr ())
   fetchActionResponse :: ActionId -> m (Either QErr ActionLogResponse)
   clearActionData :: ActionName -> m (Either QErr ())
@@ -156,10 +164,11 @@ instance (MonadMetadataStorage m, MonadTrans t, Monad (t m)) => MonadMetadataSto
   fetchMetadataResourceVersion = lift fetchMetadataResourceVersion
   fetchMetadata = lift fetchMetadata
   fetchMetadataNotifications a b = lift $ fetchMetadataNotifications a b
-  setMetadata r = lift . setMetadata r
-  notifySchemaCacheSync a b c = lift $ notifySchemaCacheSync a b c
+
   getCatalogState = lift getCatalogState
   setCatalogState a b = lift $ setCatalogState a b
+
+  updateMetadataAndNotifySchemaSync a b c d = lift $ updateMetadataAndNotifySchemaSync a b c d
 
   fetchSourceIntrospection = lift . fetchSourceIntrospection
   storeSourceIntrospection a b = lift $ storeSourceIntrospection a b
@@ -182,7 +191,7 @@ instance (MonadMetadataStorage m, MonadTrans t, Monad (t m)) => MonadMetadataSto
   deleteScheduledEvent a b = lift $ deleteScheduledEvent a b
 
   insertAction a b c d = lift $ insertAction a b c d
-  fetchUndeliveredActionEvents = lift fetchUndeliveredActionEvents
+  fetchUndeliveredActionEvents a = lift $ fetchUndeliveredActionEvents a
   setActionStatus a b = lift $ setActionStatus a b
   fetchActionResponse = lift . fetchActionResponse
   clearActionData = lift . clearActionData
@@ -197,6 +206,8 @@ deriving via (TransT (ExceptT e) m) instance (MonadMetadataStorage m) => MonadMe
 deriving via (TransT MetadataT m) instance (MonadMetadataStorage m) => MonadMetadataStorage (MetadataT m)
 
 deriving via (TransT ManagedT m) instance (MonadMetadataStorage m) => MonadMetadataStorage (ManagedT m)
+
+deriving via (TransT TraceT m) instance (MonadMetadataStorage m) => MonadMetadataStorage (TraceT m)
 
 -- | Record a one-off event
 createOneOffScheduledEvent :: (MonadMetadataStorage m) => OneOffEvent -> m (Either QErr EventId)

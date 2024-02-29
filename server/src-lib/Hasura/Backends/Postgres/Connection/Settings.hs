@@ -362,7 +362,7 @@ instance HasCodec PostgresSourceConnInfo where
         <*> optionalFieldOrNull "ssl_configuration" sslConfigurationDoc
       .== psciSslConfiguration
     where
-      databaseUrlDoc = "The database connection URL as a string, as an environment variable, or as connection parameters."
+      databaseUrlDoc = "The database connection URL as a string, from an environment variable, as connection parameters, or dynamically read from a file at connect time."
       poolSettingsDoc = "Connection pool settings"
       usePreparedStatementsDoc =
         T.unwords
@@ -459,10 +459,8 @@ supportedConnectionTemplateVersions = [1]
 instance FromJSON ConnectionTemplate where
   parseJSON = withObject "ConnectionTemplate" $ \o -> do
     version <- o .:? "version" .!= 1
-    when (version `notElem` supportedConnectionTemplateVersions)
-      $ fail
-      $ "Supported versions are "
-      <> show supportedConnectionTemplateVersions
+    unless (version `elem` supportedConnectionTemplateVersions)
+      $ fail ("Supported versions are " <> show supportedConnectionTemplateVersions)
     ConnectionTemplate version
       <$> o
       .: "template"

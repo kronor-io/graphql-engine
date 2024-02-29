@@ -27,12 +27,14 @@ import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.Aeson.Lens
 import Data.Aeson.Ordered qualified as AO
 import Data.ByteString.Lazy qualified as BL
 import Data.CaseInsensitive qualified as CI
 import Data.Environment qualified as Env
 import Data.Has
 import Data.HashMap.Strict qualified as HashMap
+import Data.List.Extended qualified as LE
 import Data.SerializableBlob qualified as SB
 import Data.Set (Set)
 import Data.Text.Extended
@@ -78,8 +80,9 @@ import Hasura.RQL.Types.OpenTelemetry (getOtelTracesPropagator)
 import Hasura.RQL.Types.Roles (adminRoleName)
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache
-import Hasura.Server.Init.Config (OptionalInterval (..))
+import Hasura.Server.Init.Config (OptionalInterval (..), ResponseInternalErrorsConfig (..), shouldIncludeInternal)
 import Hasura.Server.Prometheus (PrometheusMetrics (..))
+import Hasura.Server.Types (HeaderPrecedence (..))
 import Hasura.Server.Utils
   ( mkClientHeadersForward,
     mkSetCookieHeaders,
@@ -153,8 +156,9 @@ resolveActionExecution ::
   IR.AnnActionExecution Void ->
   ActionExecContext ->
   Maybe GQLQueryText ->
+  HeaderPrecedence ->
   ActionExecution
-resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics IR.AnnActionExecution {..} ActionExecContext {..} gqlQueryText =
+resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics IR.AnnActionExecution {..} ActionExecContext {..} gqlQueryText headerPrecedence =
   ActionExecution $ first (encJFromOrderedValue . makeActionResponseNoRelations _aaeFields _aaeOutputType _aaeOutputFields True) <$> runWebhook
   where
     handlerPayload = ActionWebhookPayload (ActionContext _aaeName) _aecSessionVariables _aaePayload gqlQueryText
@@ -180,6 +184,7 @@ resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics
           _aaeTimeOut
           _aaeRequestTransform
           _aaeResponseTransform
+          headerPrecedence
 
 throwUnexpected :: (MonadError QErr m) => Text -> m ()
 throwUnexpected = throw400 Unexpected
@@ -342,8 +347,9 @@ Resolving async action query happens in two steps;
 resolveAsyncActionQuery ::
   UserInfo ->
   IR.AnnActionAsyncQuery ('Postgres 'Vanilla) Void ->
+  ResponseInternalErrorsConfig ->
   AsyncActionQueryExecution (IR.UnpreparedValue ('Postgres 'Vanilla))
-resolveAsyncActionQuery userInfo annAction =
+resolveAsyncActionQuery userInfo annAction responseErrorsConfig =
   case actionSource of
     IR.ASINoSource -> AAQENoRelationships \actionLogResponse -> runExcept do
       let ActionLogResponse {..} = actionLogResponse
@@ -357,7 +363,7 @@ resolveAsyncActionQuery userInfo annAction =
               \response -> makeActionResponseNoRelations annFields outputType HashMap.empty False <$> decodeValue response
           IR.AsyncId -> pure $ AO.String $ actionIdToText actionId
           IR.AsyncCreatedAt -> pure $ AO.toOrdered $ J.toJSON _alrCreatedAt
-          IR.AsyncErrors -> pure $ AO.toOrdered $ J.toJSON _alrErrors
+          IR.AsyncErrors -> pure $ AO.toOrdered $ J.toJSON $ mkQErrFromErrorValue <$> _alrErrors
       pure $ encJFromOrderedValue $ AO.object resolvedFields
     IR.ASISource sourceName sourceConfig ->
       let jsonAggSelect = mkJsonAggSelect outputType
@@ -373,7 +379,20 @@ resolveAsyncActionQuery userInfo annAction =
                           $ processOutputSelectionSet TF.AEActionResponsePayload outputType definitionList annFields stringifyNumerics
                       IR.AsyncId -> mkAnnFldFromPGCol idColumn
                       IR.AsyncCreatedAt -> mkAnnFldFromPGCol createdAtColumn
-                      IR.AsyncErrors -> mkAnnFldFromPGCol errorsColumn
+                      IR.AsyncErrors ->
+                        if (shouldIncludeInternal (_uiRole userInfo) responseErrorsConfig)
+                          then RS.mkAnnColumnField (fst errorsColumn) (ColumnScalar (snd errorsColumn)) NoRedaction Nothing
+                          else
+                            RS.mkAnnColumnField
+                              (fst errorsColumn)
+                              (ColumnScalar (snd errorsColumn))
+                              NoRedaction
+                              ( Just
+                                  $ S.ColumnOp
+                                    { _colOp = S.jsonbDeleteOp,
+                                      _colExp = S.SELit "internal"
+                                    }
+                              )
 
                   jsonbToRecordSet = QualifiedObject "pg_catalog" $ FunctionName "jsonb_to_recordset"
                   actionLogInput =
@@ -394,6 +413,14 @@ resolveAsyncActionQuery userInfo annAction =
                   tablePermissions = RS.TablePerm annBoolExpTrue Nothing
                in RS.AnnSelectG annotatedFields tableFromExp tablePermissions tableArguments stringifyNumerics Nothing
   where
+    mkQErrFromErrorValue :: J.Value -> QErr
+    mkQErrFromErrorValue actionLogResponseError =
+      let internal = ExtraInternal <$> (actionLogResponseError ^? key "internal")
+          internal' = if shouldIncludeInternal (_uiRole userInfo) responseErrorsConfig then internal else Nothing
+          errorMessageText = fromMaybe "internal: error in parsing the action log" $ actionLogResponseError ^? key "error" . _String
+          codeMaybe = actionLogResponseError ^? key "code" . _String
+          code = maybe Unexpected ActionWebhookCode codeMaybe
+       in QErr [] HTTP.status500 errorMessageText code internal'
     IR.AnnActionAsyncQuery _ actionId outputType asyncFields definitionList stringifyNumerics _ actionSource = annAction
 
     idColumn = (unsafePGCol "id", PGUUID)
@@ -460,8 +487,10 @@ asyncActionsProcessor ::
   IO OptionalInterval ->
   STM.TVar (Set LockedActionEventId) ->
   Maybe GH.GQLQueryText ->
+  Int ->
+  IO HeaderPrecedence ->
   m (Forever m)
-asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedActionEvents gqlQueryText =
+asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedActionEvents gqlQueryText fetchBatchSize getHeaderPrecedence =
   return
     $ Forever ()
     $ const
@@ -482,8 +511,9 @@ asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedAct
           unless (HashMap.null asyncActions) $ do
             -- fetch undelivered action events only when there's at least
             -- one async action present in the schema cache
-            asyncInvocationsE <- fetchUndeliveredActionEvents
+            asyncInvocationsE <- fetchUndeliveredActionEvents fetchBatchSize
             asyncInvocations <- liftIO $ onLeft asyncInvocationsE mempty
+            headerPrecedence <- liftIO getHeaderPrecedence
             -- save the actions that are currently fetched from the DB to
             -- be processed in a TVar (Set LockedActionEventId) and when
             -- the action is processed we remove it from the set. This set
@@ -493,11 +523,11 @@ asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedAct
             -- locked action events set TVar is empty, it will mean that there are
             -- no events that are in the 'processing' state
             saveLockedEvents (map (EventId . actionIdToText . _aliId) asyncInvocations) lockedActionEvents
-            LA.mapConcurrently_ (callHandler actionCache tracesPropagator) asyncInvocations
+            LA.mapConcurrently_ (callHandler actionCache tracesPropagator headerPrecedence) asyncInvocations
           liftIO $ sleep $ milliseconds (unrefine sleepTime)
   where
-    callHandler :: ActionCache -> Tracing.HttpPropagator -> ActionLogItem -> m ()
-    callHandler actionCache tracesPropagator actionLogItem =
+    callHandler :: ActionCache -> Tracing.HttpPropagator -> HeaderPrecedence -> ActionLogItem -> m ()
+    callHandler actionCache tracesPropagator headerPrecedence actionLogItem =
       Tracing.newTrace Tracing.sampleAlways "async actions processor" do
         let ActionLogItem
               actionId
@@ -538,6 +568,7 @@ asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedAct
                   timeout
                   metadataRequestTransform
                   metadataResponseTransform
+                  headerPrecedence
             resE <-
               setActionStatus actionId $ case eitherRes of
                 Left e -> AASError e
@@ -567,6 +598,7 @@ callWebhook ::
   Timeout ->
   Maybe RequestTransform ->
   Maybe MetadataResponseTransform ->
+  HeaderPrecedence ->
   m (ActionWebhookResponse, HTTP.ResponseHeaders)
 callWebhook
   env
@@ -582,12 +614,16 @@ callWebhook
   actionWebhookPayload
   timeoutSeconds
   metadataRequestTransform
-  metadataResponseTransform = do
+  metadataResponseTransform
+  headerPrecedence = do
     resolvedConfHeaders <- makeHeadersFromConf env confHeaders
     let clientHeaders = if forwardClientHeaders then mkClientHeadersForward reqHeaders else mempty
-        -- Using HashMap to avoid duplicate headers between configuration headers
-        -- and client headers where configuration headers are preferred
-        hdrs = (HashMap.toList . HashMap.fromList) (resolvedConfHeaders <> defaultHeaders <> clientHeaders)
+        hdrs = case headerPrecedence of
+          -- preserves old behaviour (default)
+          -- avoids duplicates and forwards client headers with higher precedence than configuration headers
+          ClientHeadersFirst -> LE.uniquesOn fst (clientHeaders <> defaultHeaders <> resolvedConfHeaders)
+          -- avoids duplicates and forwards configuration headers with higher precedence than client headers
+          ConfiguredHeadersFirst -> LE.uniquesOn fst (resolvedConfHeaders <> defaultHeaders <> clientHeaders)
         postPayload = J.toJSON actionWebhookPayload
         requestBody = J.encode postPayload
         requestBodySize = BL.length requestBody
@@ -769,8 +805,8 @@ insertActionTx actionName sessionVariables httpHeaders inputArgsPayload =
   where
     toHeadersMap = HashMap.fromList . map ((bsToTxt . CI.original) *** bsToTxt)
 
-fetchUndeliveredActionEventsTx :: PG.TxE QErr [ActionLogItem]
-fetchUndeliveredActionEventsTx =
+fetchUndeliveredActionEventsTx :: Int -> PG.TxE QErr [ActionLogItem]
+fetchUndeliveredActionEventsTx fetchBatchSize =
   map mapEvent
     <$> PG.withQE
       defaultTxErrorHandler
@@ -780,12 +816,12 @@ fetchUndeliveredActionEventsTx =
       id in (
         select id from hdb_catalog.hdb_action_log
         where status = 'created'
-        for update skip locked limit 10
+        for update skip locked limit $1
       )
     returning
       id, action_name, request_headers::json, session_variables::json, input_payload::json
   |]
-      ()
+      (Identity batchSize)
       False
   where
     mapEvent
@@ -798,6 +834,8 @@ fetchUndeliveredActionEventsTx =
         ActionLogItem actionId actionName (fromHeadersMap headersMap) sessionVariables inputPayload
 
     fromHeadersMap = map ((CI.mk . txtToBs) *** txtToBs) . HashMap.toList
+
+    batchSize = fromIntegral fetchBatchSize :: Word64
 
 setActionStatusTx :: ActionId -> AsyncActionStatus -> PG.TxE QErr ()
 setActionStatusTx actionId = \case

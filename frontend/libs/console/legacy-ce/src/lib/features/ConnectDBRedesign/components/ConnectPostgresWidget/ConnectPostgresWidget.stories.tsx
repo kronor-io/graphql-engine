@@ -4,10 +4,14 @@ import { ReactQueryDecorator } from '../../../../storybook/decorators/react-quer
 import { handlers } from '../../mocks/handlers.mock';
 import { userEvent, waitFor, within } from '@storybook/testing-library';
 import { expect } from '@storybook/jest';
+import { ConsoleTypeDecorator } from '../../../../storybook/decorators';
 
 export default {
   component: ConnectPostgresWidget,
-  decorators: [ReactQueryDecorator()],
+  decorators: [
+    ReactQueryDecorator(),
+    ConsoleTypeDecorator({ consoleType: 'pro' }),
+  ],
   parameters: {
     msw: handlers(),
   },
@@ -56,7 +60,7 @@ export const Test: StoryObj<typeof ConnectPostgresWidget> = {
     const radioOptions = await canvas.findAllByLabelText(
       'Connect Database via'
     );
-    await expect(radioOptions.length).toBe(3);
+    await expect(radioOptions.length).toBe(4);
 
     const databaseUrlOption = await canvas.findByTestId(
       'configuration.connectionInfo.databaseUrl.connectionType-databaseUrl'
@@ -104,7 +108,7 @@ export const Test: StoryObj<typeof ConnectPostgresWidget> = {
     // Find and click on advanced settings
     await userEvent.click(await canvas.findByText('Advanced Settings'));
     await expect(
-      await canvas.findByText('Total Max Connections')
+      await canvas.findByText('Max Connections')
     ).toBeInTheDocument();
     await expect(await canvas.findByText('Idle Timeout')).toBeInTheDocument();
     await expect(await canvas.findByText('Retries')).toBeInTheDocument();
@@ -157,7 +161,7 @@ export const PostgresEditConnection: StoryObj<typeof ConnectPostgresWidget> = {
     const radioOptions = await canvas.findAllByLabelText(
       'Connect Database via'
     );
-    await expect(radioOptions.length).toBe(3);
+    await expect(radioOptions.length).toBe(4);
     const databaseUrlOption = await canvas.findByTestId(
       'configuration.connectionInfo.databaseUrl.connectionType-databaseUrl'
     );
@@ -170,7 +174,7 @@ export const PostgresEditConnection: StoryObj<typeof ConnectPostgresWidget> = {
     await userEvent.click(await canvas.findByText('Advanced Settings'));
     await expect(
       await canvas.findByTestId(
-        'configuration.connectionInfo.poolSettings.totalMaxConnections'
+        'configuration.connectionInfo.poolSettings.maxConnections'
       )
     ).toHaveValue(500);
     await expect(

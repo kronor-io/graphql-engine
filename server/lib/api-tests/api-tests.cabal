@@ -137,6 +137,7 @@ library
     Test.DataConnector.QuerySpec
     Test.DataConnector.SelectPermissionsSpec
     Test.Databases.BigQuery.Queries.SpatialTypesSpec
+    Test.Databases.BigQuery.Queries.TextFunctionsSpec
     Test.Databases.BigQuery.Queries.TypeInterpretationSpec
     Test.Databases.BigQuery.Schema.ComputedFields.TableSpec
     Test.Databases.Postgres.ArraySpec
@@ -229,6 +230,7 @@ library
     Test.Regression.RemoteRelationshipStringifyNum8387Spec
     Test.Regression.RootExistElementAliasing9457Spec
     Test.Regression.SqlServerIdentifierQuotingSpec
+    Test.Regression.SqlServerRemoteRelationshipRhs8712Spec
     Test.Regression.StreamConflictSpec
     Test.Regression.UsingTheSameFunctionForRootFieldAndComputedField8643Spec
     Test.ScheduledEvents.ScheduledEventsInvalidEnvVarSpec

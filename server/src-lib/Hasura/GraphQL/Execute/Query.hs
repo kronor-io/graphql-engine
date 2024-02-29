@@ -9,7 +9,7 @@ import Data.Environment qualified as Env
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.Tagged qualified as Tagged
-import Data.Text.Extended ((<>>))
+import Data.Text.Extended (toTxt, (<>>))
 import Hasura.Base.Error
 import Hasura.GraphQL.Context
 import Hasura.GraphQL.Execute.Action
@@ -29,12 +29,17 @@ import Hasura.Prelude
 import Hasura.QueryTags
 import Hasura.QueryTags.Types
 import Hasura.RQL.IR
+import Hasura.RQL.IR.ModelInformation
 import Hasura.RQL.Types.Action
 import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.GraphqlSchemaIntrospection
+import Hasura.RQL.Types.Schema.Options as Options
+import Hasura.RemoteSchema.Metadata.Base (RemoteSchemaName (..))
 import Hasura.SQL.AnyBackend qualified as AB
+import Hasura.Server.Init.Config (ResponseInternalErrorsConfig (..))
 import Hasura.Server.Prometheus (PrometheusMetrics (..))
-import Hasura.Server.Types (RequestId (..))
+import Hasura.Server.Types (HeaderPrecedence, MonadGetPolicies, RequestId (..))
 import Hasura.Services.Network
 import Hasura.Session
 import Hasura.Tracing (MonadTrace)
@@ -44,6 +49,7 @@ import Network.HTTP.Types qualified as HTTP
 
 parseGraphQLQuery ::
   (MonadError QErr m) =>
+  Options.BackwardsCompatibleNullInNonNullableVariables ->
   GQLContext ->
   [G.VariableDefinition] ->
   Maybe (HashMap G.Name J.Value) ->
@@ -54,8 +60,8 @@ parseGraphQLQuery ::
       [G.Directive Variable],
       G.SelectionSet G.NoFragments Variable
     )
-parseGraphQLQuery gqlContext varDefs varValsM directives fields = do
-  (resolvedDirectives, resolvedSelSet) <- resolveVariables varDefs (fromMaybe HashMap.empty varValsM) directives fields
+parseGraphQLQuery nullInNonNullableVariables gqlContext varDefs varValsM directives fields = do
+  (resolvedDirectives, resolvedSelSet) <- resolveVariables nullInNonNullableVariables varDefs (fromMaybe HashMap.empty varValsM) directives fields
   parsedQuery <- liftEither $ gqlQueryParser gqlContext resolvedSelSet
   pure (parsedQuery, resolvedDirectives, resolvedSelSet)
 
@@ -67,13 +73,15 @@ convertQuerySelSet ::
     MonadIO m,
     MonadGQLExecutionCheck m,
     MonadQueryTags m,
-    ProvidesNetwork m
+    ProvidesNetwork m,
+    MonadGetPolicies m
   ) =>
   Env.Environment ->
   L.Logger L.Hasura ->
   Tracing.HttpPropagator ->
   PrometheusMetrics ->
   GQLContext ->
+  SQLGenCtx ->
   UserInfo ->
   HTTP.RequestHeaders ->
   [G.Directive G.Name] ->
@@ -84,13 +92,16 @@ convertQuerySelSet ::
   RequestId ->
   -- | Graphql Operation Name
   Maybe G.Name ->
-  m (ExecutionPlan, [QueryRootField UnpreparedValue], DirectiveMap, ParameterizedQueryHash)
+  ResponseInternalErrorsConfig ->
+  HeaderPrecedence ->
+  m (ExecutionPlan, [QueryRootField UnpreparedValue], DirectiveMap, ParameterizedQueryHash, [ModelInfoPart])
 convertQuerySelSet
   env
   logger
   tracingPropagator
   prometheusMetrics
   gqlContext
+  SQLGenCtx {nullInNonNullableVariables}
   userInfo
   reqHeaders
   directives
@@ -99,10 +110,12 @@ convertQuerySelSet
   gqlUnparsed
   introspectionDisabledRoles
   reqId
-  maybeOperationName = do
+  maybeOperationName
+  responseErrorsConfig
+  headerPrecedence = do
     -- 1. Parse the GraphQL query into the 'RootFieldMap' and a 'SelectionSet'
     (unpreparedQueries, normalizedDirectives, normalizedSelectionSet) <-
-      Tracing.newSpan "Parse query IR" $ parseGraphQLQuery gqlContext varDefs (GH._grVariables gqlUnparsed) directives fields
+      Tracing.newSpan "Parse query IR" $ parseGraphQLQuery nullInNonNullableVariables gqlContext varDefs (GH._grVariables gqlUnparsed) directives fields
 
     -- 2. Parse directives on the query
     dirMap <- toQErr $ runParse (parseDirectives customDirectives (G.DLExecutable G.EDLQUERY) normalizedDirectives)
@@ -113,7 +126,9 @@ convertQuerySelSet
           case rootFieldUnpreparedValue of
             RFMulti lst -> do
               allSteps <- traverse (resolveExecutionSteps rootFieldName) lst
-              pure $ ExecStepMulti allSteps
+              let executionStepsList = map fst allSteps
+                  modelInfoList = map snd allSteps
+              pure $ (ExecStepMulti executionStepsList, concat modelInfoList)
             RFDB sourceName exists ->
               AB.dispatchAnyBackend @BackendExecute
                 exists
@@ -127,12 +142,13 @@ convertQuerySelSet
                       queryTagsAttributes = encodeQueryTags $ QTQuery $ QueryMetadata mReqId maybeOperationName rootFieldName parameterizedQueryHash
                       queryTagsComment = Tagged.untag $ createQueryTags @m queryTagsAttributes queryTagsConfig
                       (noRelsDBAST, remoteJoins) = RJ.getRemoteJoinsQueryDB db
-                  dbStepInfo <- flip runReaderT queryTagsComment $ mkDBQueryPlan @b userInfo sourceName sourceConfig noRelsDBAST reqHeaders maybeOperationName
-                  pure $ ExecStepDB [] (AB.mkAnyBackend dbStepInfo) remoteJoins
-            RFRemote rf -> do
+                  (dbStepInfo, dbModelInfoList) <- flip runReaderT queryTagsComment $ mkDBQueryPlan @b userInfo sourceName sourceConfig noRelsDBAST reqHeaders maybeOperationName
+                  pure $ (ExecStepDB [] (AB.mkAnyBackend dbStepInfo) remoteJoins, dbModelInfoList)
+            RFRemote (RemoteSchemaName rName) rf -> do
               RemoteSchemaRootField remoteSchemaInfo resultCustomizer remoteField <- runVariableCache $ for rf $ resolveRemoteVariable userInfo
               let (noRelsRemoteField, remoteJoins) = RJ.getRemoteJoinsGraphQLField remoteField
-              pure $ buildExecStepRemote remoteSchemaInfo resultCustomizer G.OperationTypeQuery noRelsRemoteField remoteJoins (GH._grOperationName gqlUnparsed)
+              let rsModel = ModelInfoPart (toTxt rName) ModelTypeRemoteSchema Nothing Nothing (ModelOperationType G.OperationTypeQuery)
+              pure $ (buildExecStepRemote remoteSchemaInfo resultCustomizer G.OperationTypeQuery noRelsRemoteField remoteJoins (GH._grOperationName gqlUnparsed), [rsModel])
             RFAction action -> do
               httpManager <- askHTTPManager
               let (noRelsDBAST, remoteJoins) = RJ.getRemoteJoinsActionQuery action
@@ -147,13 +163,19 @@ convertQuerySelSet
                         prometheusMetrics
                         s
                         (ActionExecContext reqHeaders (_uiSession userInfo))
-                        (Just (GH._grQuery gqlUnparsed)),
+                        (Just (GH._grQuery gqlUnparsed))
+                        headerPrecedence,
                     _aaeName s,
                     _aaeForwardClientHeaders s
                   )
-                AQAsync s -> (AEPAsyncQuery $ AsyncActionQueryExecutionPlan (_aaaqActionId s) $ resolveAsyncActionQuery userInfo s, _aaaqName s, _aaaqForwardClientHeaders s)
-              pure $ ExecStepAction actionExecution (ActionsInfo actionName fch) remoteJoins
-            RFRaw r -> flip onLeft throwError =<< executeIntrospection userInfo r introspectionDisabledRoles
+                AQAsync s -> (AEPAsyncQuery $ AsyncActionQueryExecutionPlan (_aaaqActionId s) $ resolveAsyncActionQuery userInfo s responseErrorsConfig, _aaaqName s, _aaaqForwardClientHeaders s)
+              let actionsModel = ModelInfoPart (toTxt actionName) ModelTypeAction Nothing Nothing (ModelOperationType G.OperationTypeQuery)
+              pure $ (ExecStepAction actionExecution (ActionsInfo actionName fch) remoteJoins, [actionsModel])
+            RFRaw r -> fmap (,[]) $ flip onLeft throwError =<< executeIntrospection userInfo r introspectionDisabledRoles
     -- 3. Transform the 'RootFieldMap' into an execution plan
     executionPlan <- flip InsOrdHashMap.traverseWithKey unpreparedQueries $ resolveExecutionSteps
-    pure (executionPlan, InsOrdHashMap.elems unpreparedQueries, dirMap, parameterizedQueryHash)
+    let executionPlan' = InsOrdHashMap.map fst executionPlan
+        modelInfoHashMap = InsOrdHashMap.map snd executionPlan
+
+    let modelInfoList = concat $ InsOrdHashMap.elems modelInfoHashMap
+    pure (executionPlan', InsOrdHashMap.elems unpreparedQueries, dirMap, parameterizedQueryHash, modelInfoList)

@@ -253,6 +253,9 @@ instance FromEnv Options.RemoteSchemaPermissions where
 instance FromEnv Options.DangerouslyCollapseBooleans where
   fromEnv = fmap (bool Options.Don'tDangerouslyCollapseBooleans Options.DangerouslyCollapseBooleans) . fromEnv @Bool
 
+instance FromEnv Options.BackwardsCompatibleNullInNonNullableVariables where
+  fromEnv = fmap (bool Options.Don'tAllowNullInNonNullableVariables Options.AllowNullInNonNullableVariables) . fromEnv @Bool
+
 instance FromEnv Options.RemoteNullForwardingPolicy where
   fromEnv = fmap (bool Options.RemoteForwardAccurately Options.RemoteOnlyForwardNonNull) . fromEnv @Bool
 
@@ -381,3 +384,12 @@ instance FromEnv Server.Types.CloseWebsocketsOnMetadataChangeStatus where
 
 instance FromEnv Server.Types.TriggersErrorLogLevelStatus where
   fromEnv = fmap (bool Server.Types.TriggersErrorLogLevelDisabled Server.Types.TriggersErrorLogLevelEnabled) . fromEnv @Bool
+
+instance FromEnv Server.Types.PersistedQueriesState where
+  fromEnv = fmap (bool Server.Types.PersistedQueriesDisabled Server.Types.PersistedQueriesEnabled) . fromEnv @Bool
+
+instance FromEnv Server.Types.RemoteSchemaResponsePriority where
+  fromEnv = fmap (bool Server.Types.RemoteSchemaResponseErrors Server.Types.RemoteSchemaResponseData) . fromEnv @Bool
+
+instance FromEnv Server.Types.HeaderPrecedence where
+  fromEnv = fmap (bool Server.Types.ClientHeadersFirst Server.Types.ConfiguredHeadersFirst) . fromEnv @Bool

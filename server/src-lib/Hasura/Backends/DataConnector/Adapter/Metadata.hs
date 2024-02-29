@@ -8,7 +8,6 @@ import Control.Monad.Trans.Control
 import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.Bifunctor (bimap)
 import Data.Environment (Environment)
 import Data.Has (Has (getter))
 import Data.HashMap.Strict qualified as HashMap
@@ -71,7 +70,7 @@ import Hasura.RQL.Types.Metadata (SourceMetadata (..))
 import Hasura.RQL.Types.Metadata.Backend (BackendMetadata (..))
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.NamingCase (NamingCase)
-import Hasura.RQL.Types.Relationships.Local (ArrRelDef, ObjRelDef, RelInfo ())
+import Hasura.RQL.Types.Relationships.Local (ArrRelDef, ObjRelDef, RelInfo (), RelMapping (..))
 import Hasura.RQL.Types.SchemaCache (CacheRM, askSourceConfig, askSourceInfo)
 import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.RQL.Types.SchemaCacheTypes (DependencyReason (DRTable), SchemaDependency (SchemaDependency), SchemaObjId (SOSourceObj), SourceObjId (SOITable))
@@ -239,8 +238,9 @@ resolveBackendInfo' ::
     ProvidesNetwork m
   ) =>
   Logger Hasura ->
+  Environment ->
   (Inc.Dependency (Maybe (HashMap DC.DataConnectorName Inc.InvalidationKey)), Map.Map DC.DataConnectorName DC.DataConnectorOptions) `arr` HashMap DC.DataConnectorName DC.DataConnectorInfo
-resolveBackendInfo' logger = proc (invalidationKeys, optionsMap) -> do
+resolveBackendInfo' logger env = proc (invalidationKeys, optionsMap) -> do
   maybeDataConnectorCapabilities <-
     (|
       Inc.keyed
@@ -265,11 +265,13 @@ resolveBackendInfo' logger = proc (invalidationKeys, optionsMap) -> do
       HTTP.Manager ->
       ExceptT QErr m (Maybe DC.DataConnectorInfo)
     getDataConnectorCapabilities options@DC.DataConnectorOptions {..} manager =
-      ( ignoreTraceT
-          . flip runAgentClientT (AgentClientContext logger _dcoUri manager Nothing Nothing)
-          $ (Just . mkDataConnectorInfo options)
-          <$> Client.capabilities
-      )
+      do
+        resolvedUri <- DC.resolveDataConnectorUri env _dcoUri
+        ( ignoreTraceT
+            . flip runAgentClientT (AgentClientContext logger resolvedUri manager Nothing Nothing)
+            $ (Just . mkDataConnectorInfo options)
+            <$> Client.capabilities
+          )
         `catchError` ignoreConnectionErrors
 
     -- If we can't connect to a data connector agent to get its capabilities
@@ -290,7 +292,7 @@ resolveBackendInfo' logger = proc (invalidationKeys, optionsMap) -> do
     toHashMap = HashMap.fromList . Map.toList
 
 resolveSourceConfig' ::
-  (Monad m) =>
+  (MonadIO m) =>
   SourceName ->
   DC.ConnSourceConfig ->
   BackendSourceKind 'DataConnector ->
@@ -300,23 +302,25 @@ resolveSourceConfig' ::
   m (Either QErr DC.SourceConfig)
 resolveSourceConfig'
   sourceName
-  csc@DC.ConnSourceConfig {template, timeout, value = originalConfig}
+  csc@DC.ConnSourceConfig {_cscTemplate, _cscTemplateVariables, _cscTimeout, _cscValue = originalConfig}
   (DataConnectorKind dataConnectorName)
   backendInfo
   env
   manager = runExceptT do
     DC.DataConnectorInfo {_dciOptions = DC.DataConnectorOptions {_dcoUri}, ..} <- getDataConnectorInfo dataConnectorName backendInfo
+    resolvedUri <- DC.resolveDataConnectorUri env _dcoUri
 
     validateConnSourceConfig dataConnectorName sourceName _dciConfigSchemaResponse csc Nothing env
 
     pure
       DC.SourceConfig
-        { _scEndpoint = _dcoUri,
+        { _scEndpoint = resolvedUri,
           _scConfig = originalConfig,
-          _scTemplate = template,
+          _scTemplate = _cscTemplate,
+          _scTemplateVariables = fromMaybe mempty _cscTemplateVariables,
           _scCapabilities = _dciCapabilities,
           _scManager = manager,
-          _scTimeoutMicroseconds = (DC.sourceTimeoutMicroseconds <$> timeout),
+          _scTimeoutMicroseconds = (DC.sourceTimeoutMicroseconds <$> _cscTimeout),
           _scDataConnectorName = dataConnectorName,
           _scEnvironment = env
         }
@@ -473,7 +477,7 @@ buildForeignKeySet (API.ForeignKeys constraints) =
     $ constraints
     & HashMap.foldMapWithKey @[RQL.T.T.ForeignKeyMetadata 'DataConnector]
       \constraintName API.Constraint {..} -> maybeToList do
-        let columnMapAssocList = HashMap.foldrWithKey' (\(API.ColumnName k) (API.ColumnName v) acc -> (DC.ColumnName k, DC.ColumnName v) : acc) [] _cColumnMapping
+        let columnMapAssocList = HashMap.foldrWithKey' (\k v acc -> (Witch.from k, Witch.from v) : acc) [] $ API.unColumnPathMapping _cColumnMapping
         columnMapping <- NEHashMap.fromList columnMapAssocList
         let foreignKey =
               RQL.T.T.ForeignKey
@@ -785,7 +789,7 @@ convertTableMetadataToTableInfo tableName logicalModelCache RQL.T.T.DBTableMetad
                   constraint =
                     SourceConstraint
                       { _scForeignTable = Witch.from _fkForeignTable,
-                        _scColumnMapping = HashMap.fromList $ bimap Witch.from Witch.from <$> NEHashMap.toList _fkColumnMapping
+                        _scColumnMapping = RelMapping $ NEHashMap.toHashMap _fkColumnMapping
                       }
                in (constraintName, constraint)
           )

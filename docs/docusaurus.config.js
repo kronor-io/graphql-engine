@@ -18,13 +18,15 @@ const config = {
   organizationName: 'hasura',
   projectName: 'graphql-engine',
   staticDirectories: ['static', 'public'],
-  scripts: [
-    {
-      src: "https://www.chatbase.co/embed.min.js",
-      id: "iiL6XJbYo6tRR_M4rUB9F",
-      defer: true,
-    }
-  ],
+  customFields: {
+    docsBotEndpointURL:
+      process.env.NODE_ENV === 'development'
+        ? 'ws://localhost:8000/hasura-docs-ai'
+        : 'wss://website-api.hasura.io/chat-bot/hasura-docs-ai',
+    hasuraVersion: 2,
+    DEV_TOKEN: process.env.DEV_TOKEN,
+  },
+  scripts: [],
   webpack: {
     jsLoader: isServer => ({
       loader: require.resolve('swc-loader'),
@@ -249,7 +251,7 @@ const config = {
             className: 'nav-link_login',
           },
           {
-            to: 'https://cloud.hasura.io/signup?pg=products&plcmt=header&cta=try-hasura&tech=default',
+            to: 'https://cloud.hasura.io/signup?pg=products&plcmt=header&cta=get_started&tech=default',
             label: 'Get Started',
             position: 'right',
             className: 'nav-link_getting-started',

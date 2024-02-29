@@ -965,10 +965,21 @@
             "BigqueryRelManualNativeQueryConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -991,10 +1002,21 @@
             "BigqueryRelManualTableConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -1946,10 +1968,21 @@
             "CitusRelManualNativeQueryConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -1972,10 +2005,21 @@
             "CitusRelManualTableConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -2954,10 +2998,21 @@
             "CockroachRelManualNativeQueryConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -2980,10 +3035,21 @@
             "CockroachRelManualTableConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -3654,6 +3720,12 @@
                     "template": {
                         "type": "string"
                     },
+                    "template_variables": {
+                        "additionalProperties": {
+                            "$ref": "#/components/schemas/TemplateVariableSource"
+                        },
+                        "type": "object"
+                    },
                     "timeout": {
                         "oneOf": [
                             {
@@ -3682,7 +3754,14 @@
                         "type": "string"
                     },
                     "uri": {
-                        "type": "string"
+                        "oneOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "$ref": "#/components/schemas/FromEnv"
+                            }
+                        ]
                     }
                 },
                 "required": [
@@ -3727,7 +3806,17 @@
                 "properties": {
                     "columns": {
                         "items": {
-                            "type": "string"
+                            "oneOf": [
+                                {
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "type": "array"
+                                },
+                                {
+                                    "type": "string"
+                                }
+                            ]
                         },
                         "type": "array"
                     },
@@ -3747,7 +3836,17 @@
             "DataconnectorArrRelUsingFKeyOnSingleColumn": {
                 "properties": {
                     "column": {
-                        "type": "string"
+                        "oneOf": [
+                            {
+                                "items": {
+                                    "type": "string"
+                                },
+                                "type": "array"
+                            },
+                            {
+                                "type": "string"
+                            }
+                        ]
                     },
                     "table": {
                         "items": {
@@ -4049,7 +4148,17 @@
                 "properties": {
                     "columns": {
                         "items": {
-                            "type": "string"
+                            "oneOf": [
+                                {
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "type": "array"
+                                },
+                                {
+                                    "type": "string"
+                                }
+                            ]
                         },
                         "type": "array"
                     },
@@ -4069,7 +4178,17 @@
             "DataconnectorObjRelRemoteTableSingleColumn": {
                 "properties": {
                     "column": {
-                        "type": "string"
+                        "oneOf": [
+                            {
+                                "items": {
+                                    "type": "string"
+                                },
+                                "type": "array"
+                            },
+                            {
+                                "type": "string"
+                            }
+                        ]
                     },
                     "table": {
                         "items": {
@@ -4106,10 +4225,41 @@
             "DataconnectorRelManualNativeQueryConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "oneOf": [
+                                        {
+                                            "items": {
+                                                "type": "string"
+                                            },
+                                            "type": "array"
+                                        },
+                                        {
+                                            "type": "string"
+                                        }
+                                    ]
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "oneOf": [
+                                        {
+                                            "items": {
+                                                "type": "string"
+                                            },
+                                            "type": "array"
+                                        },
+                                        {
+                                            "type": "string"
+                                        }
+                                    ]
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -4132,10 +4282,41 @@
             "DataconnectorRelManualTableConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "oneOf": [
+                                        {
+                                            "items": {
+                                                "type": "string"
+                                            },
+                                            "type": "array"
+                                        },
+                                        {
+                                            "type": "string"
+                                        }
+                                    ]
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "oneOf": [
+                                        {
+                                            "items": {
+                                                "type": "string"
+                                            },
+                                            "type": "array"
+                                        },
+                                        {
+                                            "type": "string"
+                                        }
+                                    ]
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -5819,10 +6000,21 @@
             "MssqlRelManualNativeQueryConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -5845,10 +6037,21 @@
             "MssqlRelManualTableConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -7202,10 +7405,21 @@
             "PostgresRelManualNativeQueryConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -7228,10 +7442,21 @@
             "PostgresRelManualTableConfig": {
                 "properties": {
                     "column_mapping": {
-                        "additionalProperties": {
-                            "type": "string"
-                        },
-                        "type": "object"
+                        "additionalProperties": true,
+                        "anyOf": [
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            },
+                            {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "type": "object"
+                            }
+                        ]
                     },
                     "insertion_order": {
                         "enum": [
@@ -7353,7 +7578,7 @@
                 "description": "https://hasura.io/docs/latest/graphql/core/api-reference/syntax-defs.html#pgsourceconnectioninfo",
                 "properties": {
                     "database_url": {
-                        "description": "The database connection URL as a string, as an environment variable, or as connection parameters.",
+                        "description": "The database connection URL as a string, from an environment variable, as connection parameters, or dynamically read from a file at connect time.",
                         "oneOf": [
                             {
                                 "type": "string"
@@ -7928,11 +8153,27 @@
                     "foreign_key_constraint_on": {
                         "oneOf": [
                             {
+                                "items": {
+                                    "type": "string"
+                                },
+                                "type": "array"
+                            },
+                            {
                                 "type": "string"
                             },
                             {
                                 "items": {
-                                    "type": "string"
+                                    "oneOf": [
+                                        {
+                                            "items": {
+                                                "type": "string"
+                                            },
+                                            "type": "array"
+                                        },
+                                        {
+                                            "type": "string"
+                                        }
+                                    ]
                                 },
                                 "type": "array"
                             },
@@ -9236,6 +9477,37 @@
                 ],
                 "type": "object"
             },
+            "TemplateVariableDynamicFromFile": {
+                "properties": {
+                    "filepath": {
+                        "type": "string"
+                    },
+                    "type": {
+                        "enum": [
+                            "dynamic_from_file"
+                        ],
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "filepath",
+                    "type"
+                ],
+                "type": "object"
+            },
+            "TemplateVariableSource": {
+                "discriminator": {
+                    "mapping": {
+                        "dynamic_from_file": "TemplateVariableDynamicFromFile"
+                    },
+                    "propertyName": "type"
+                },
+                "oneOf": [
+                    {
+                        "$ref": "#/components/schemas/TemplateVariableDynamicFromFile"
+                    }
+                ]
+            },
             "TlsAllow": {
                 "properties": {
                     "host": {
@@ -9386,7 +9658,30 @@
             "UrlConfFromParams": {
                 "properties": {
                     "connection_parameters": {
-                        "$ref": "#/components/schemas/PGConnectionParams"
+                        "oneOf": [
+                            {
+                                "properties": {
+                                    "Left": {
+                                        "$ref": "#/components/schemas/PGConnectionParams"
+                                    }
+                                },
+                                "required": [
+                                    "Left"
+                                ],
+                                "type": "object"
+                            },
+                            {
+                                "properties": {
+                                    "Right": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "Right"
+                                ],
+                                "type": "object"
+                            }
+                        ]
                     }
                 },
                 "required": [

@@ -62,6 +62,7 @@ serveOptions =
       soEnableTelemetry = Init.TelemetryDisabled,
       soStringifyNum = Options.Don'tStringifyNumbers,
       soDangerousBooleanCollapse = Options.Don'tDangerouslyCollapseBooleans,
+      soBackwardsCompatibleNullInNonNullableVariables = Options.Don'tAllowNullInNonNullableVariables,
       soRemoteNullForwardingPolicy = Options.RemoteForwardAccurately,
       soEnabledAPIs = testSuiteEnabledApis,
       soLiveQueryOpts = ES.mkSubscriptionsOptions Nothing Nothing,
@@ -94,7 +95,12 @@ serveOptions =
       soApolloFederationStatus = ApolloFederationDisabled,
       soCloseWebsocketsOnMetadataChangeStatus = Init._default Init.closeWebsocketsOnMetadataChangeOption,
       soMaxTotalHeaderLength = Init._default Init.maxTotalHeaderLengthOption,
-      soTriggersErrorLogLevelStatus = Init._default Init.triggersErrorLogLevelStatusOption
+      soTriggersErrorLogLevelStatus = Init._default Init.triggersErrorLogLevelStatusOption,
+      soAsyncActionsFetchBatchSize = Init._default Init.asyncActionsFetchBatchSizeOption,
+      soPersistedQueries = Init._default Init.persistedQueriesOption,
+      soPersistedQueriesTtl = Init._default Init.persistedQueriesTtlOption,
+      soRemoteSchemaResponsePriority = Init._default Init.remoteSchemaResponsePriorityOption,
+      soHeaderPrecedence = Init._default Init.configuredHeaderPrecedenceOption
     }
 
 -- | What log level should be used by the engine; this is not exported, and

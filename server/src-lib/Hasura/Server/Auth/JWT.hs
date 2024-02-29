@@ -1,4 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
+-- TODO:
+-- In the use of ‘unregisteredClaims’ (imported from Crypto.JWT):
+--     Deprecated: "use a sub-type"
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 -- |
 -- Module      : Hasura.Server.Auth.JWT
@@ -101,7 +105,7 @@ import Hasura.Server.Utils
 import Hasura.Session (SessionVariable, SessionVariableValue, UserAdminSecret (..), UserInfo, UserRoleBuild (..), mkSessionVariable, mkSessionVariablesHeaders, mkSessionVariablesText, mkUserInfo, sessionVariableToText)
 import Network.HTTP.Client.Transformable qualified as HTTP
 import Network.HTTP.Types as N
-import Network.URI (URI)
+import Network.URI.Extended (URI)
 import Network.Wreq qualified as Wreq
 import Web.Spock.Internal.Cookies qualified as Spock
 
@@ -598,7 +602,7 @@ processJwt_ processJwtBytes decodeIssuer fGetHeaderType jwtCtxs headers mUnAuthR
                     >>= mkRoleName
                     . bsToTxt
 
-            when (requestedRole `notElem` allowedRoles)
+            unless (requestedRole `elem` allowedRoles)
               $ throw400 AccessDenied "Your requested role is not in allowed roles"
             let finalClaims =
                   HashMap.delete defaultRoleClaim . HashMap.delete allowedRolesClaim $ claimsMap

@@ -5,7 +5,8 @@ import GraphQLWithHasuraBanner from '@site/src/components/GraphQLWithHasuraBanne
 import CustomFooter from '@site/src/components/CustomFooter';
 import styles from './styles.module.scss';
 import { Redirect } from '@docusaurus/router';
-
+import { AiChatBot } from "@site/src/components/AiChatBot/AiChatBot";
+import BrowserOnly from '@docusaurus/BrowserOnly';
 const CustomDocItem = props => {
   useEffect(() => {
     // This function is adds <wbr> tags to code blocks within a table
@@ -33,6 +34,23 @@ const CustomDocItem = props => {
         cell.innerHTML = cell.innerHTML.replace(/_/g, '_<wbr>');
       });
     }
+
+    // dynamically updating the pg prop for the getting started cta
+    function updateGettingStartedParam() {
+      const linkElement = document.querySelector('.navbar__link.nav-link_getting-started');
+
+      if (linkElement) {
+        let page = props.location.pathname;
+        page = page.slice(0, -1);
+        page = page.replace('/docs/', 'docs_v2_').replace('latest/', '').replace(/\//g, '_');
+
+        const href = linkElement.getAttribute('href');
+        const newHref = href.replace(/pg=([^&]+)/, `pg=${page}`);
+        linkElement.setAttribute('href', newHref);
+      }
+    }
+
+    updateGettingStartedParam();
   }, []);
 
   // redirect them to the index if they attempt to directly navigate to a path with
@@ -60,6 +78,9 @@ const CustomDocItem = props => {
         {/*<PageHelpful />*/}
         <HasuraConBanner {...props} />
         <GraphQLWithHasuraBanner />
+        <BrowserOnly fallback={<div>Loading...</div>}>
+          {() => <AiChatBot/>}
+        </BrowserOnly>
         <CustomFooter />
       </div>
     </div>

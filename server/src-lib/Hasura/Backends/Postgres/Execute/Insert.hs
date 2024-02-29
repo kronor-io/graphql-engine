@@ -49,6 +49,7 @@ import Hasura.RQL.Types.Headers
 import Hasura.RQL.Types.NamingCase (NamingCase)
 import Hasura.RQL.Types.Relationships.Local
 import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.Server.Types (HeaderPrecedence)
 import Hasura.Session
 import Hasura.Tracing qualified as Tracing
 import Network.HTTP.Client.Transformable qualified as HTTP
@@ -195,7 +196,7 @@ insertObject singleObjIns additionalColumns userInfo planVars stringifyNum tCase
     afterInsertDepCols :: [ColumnInfo ('Postgres pgKind)]
     afterInsertDepCols =
       flip (getColInfos @('Postgres pgKind)) allColumns
-        $ concatMap (HashMap.keys . riMapping . IR._riRelationInfo) allAfterInsertRels
+        $ concatMap (HashMap.keys . unRelMapping . riMapping . IR._riRelationInfo) allAfterInsertRels
 
     withArrRels ::
       Maybe (ColumnValues ('Postgres pgKind) TxtEncodedVal) ->
@@ -258,7 +259,7 @@ insertObjRel planVars userInfo stringifyNum tCase objRelIns =
     table = case riTarget relInfo of
       RelTargetNativeQuery _ -> error "insertObjRel RelTargetNativeQuery"
       RelTargetTable tn -> tn
-    mapCols = riMapping relInfo
+    mapCols = unRelMapping $ riMapping relInfo
     allCols = IR._aiTableColumns singleObjIns
     rCols = HashMap.elems mapCols
     rColInfos = getColInfos rCols allCols
@@ -298,7 +299,7 @@ insertArrRel resCols userInfo planVars stringifyNum tCase arrRelIns =
       $ throw500 "affected_rows not returned in array rel insert"
   where
     IR.RelationInsert multiObjIns relInfo = arrRelIns
-    mapping = riMapping relInfo
+    mapping = unRelMapping $ riMapping relInfo
     mutOutput = IR.MOutMultirowFields [("affected_rows", IR.MCount)]
 
 -- | Validate an insert object based on insert columns,
@@ -325,7 +326,7 @@ validateInsert insCols objRels addCols = do
     <> " columns as their values are already being determined by parent insert"
 
   forM_ objRels $ \relInfo -> do
-    let lCols = HashMap.keys $ riMapping relInfo
+    let lCols = HashMap.keys $ unRelMapping $ riMapping relInfo
         relName = riName relInfo
         relNameTxt = relNameToTxt relName
         lColConflicts = lCols `intersect` (addCols <> insCols)
@@ -452,10 +453,11 @@ validateInsertRows ::
   Bool ->
   [HTTP.Header] ->
   [IR.AnnotatedInsertRow ('Postgres pgKind) (IR.UnpreparedValue ('Postgres pgKind))] ->
+  HeaderPrecedence ->
   m ()
-validateInsertRows env manager logger userInfo resolvedWebHook confHeaders timeout forwardClientHeaders reqHeaders rows = do
+validateInsertRows env manager logger userInfo resolvedWebHook confHeaders timeout forwardClientHeaders reqHeaders rows headerPrecedence = do
   let inputData = J.object ["input" J..= map convertInsertRow rows]
-  PGE.validateMutation env manager logger userInfo resolvedWebHook confHeaders timeout forwardClientHeaders reqHeaders inputData
+  PGE.validateMutation env manager logger userInfo resolvedWebHook confHeaders timeout forwardClientHeaders reqHeaders inputData headerPrecedence
   where
     convertInsertRow :: IR.AnnotatedInsertRow ('Postgres pgKind) (IR.UnpreparedValue ('Postgres pgKind)) -> J.Value
     convertInsertRow fields = J.object $ flip mapMaybe fields $ \field ->

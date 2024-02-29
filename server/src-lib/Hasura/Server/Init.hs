@@ -169,6 +169,7 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
       Options.Don'tStringifyNumbers -> withOptionDefault Nothing stringifyNumOption
       stringifyNums -> pure stringifyNums
   soDangerousBooleanCollapse <- withOptionDefault rsoDangerousBooleanCollapse dangerousBooleanCollapseOption
+  soBackwardsCompatibleNullInNonNullableVariables <- withOptionDefault rsoBackwardsCompatibleNullInNonNullableVariables backwardsCompatibleNullInNonNullableVariablesOption
   soRemoteNullForwardingPolicy <- withOptionDefault rsoRemoteNullForwardingPolicy remoteNullForwardingPolicyOption
   soEnabledAPIs <- withOptionDefault rsoEnabledAPIs enabledAPIsOption
   soLiveQueryOpts <- do
@@ -219,6 +220,11 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
     withOptionDefault rsoCloseWebsocketsOnMetadataChangeStatus closeWebsocketsOnMetadataChangeOption
   soMaxTotalHeaderLength <- withOptionDefault rsoMaxTotalHeaderLength maxTotalHeaderLengthOption
   soTriggersErrorLogLevelStatus <- withOptionDefault rsoTriggersErrorLogLevelStatus triggersErrorLogLevelStatusOption
+  soAsyncActionsFetchBatchSize <- withOptionDefault rsoAsyncActionsFetchBatchSize asyncActionsFetchBatchSizeOption
+  soPersistedQueries <- withOptionDefault rsoPersistedQueries persistedQueriesOption
+  soPersistedQueriesTtl <- withOptionDefault rsoPersistedQueriesTtl persistedQueriesTtlOption
+  soRemoteSchemaResponsePriority <- withOptionDefault rsoRemoteSchemaResponsePriority remoteSchemaResponsePriorityOption
+  soHeaderPrecedence <- withOptionDefault rsoHeaderPrecedence configuredHeaderPrecedenceOption
   pure ServeOptions {..}
 
 -- | Fetch Postgres 'Query.ConnParams' components from the environment

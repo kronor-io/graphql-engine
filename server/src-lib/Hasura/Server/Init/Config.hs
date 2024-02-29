@@ -290,6 +290,7 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoWsReadCookie :: WsReadCookieStatus,
     rsoStringifyNum :: Schema.Options.StringifyNumbers,
     rsoDangerousBooleanCollapse :: Maybe Schema.Options.DangerouslyCollapseBooleans,
+    rsoBackwardsCompatibleNullInNonNullableVariables :: Maybe Schema.Options.BackwardsCompatibleNullInNonNullableVariables,
     rsoRemoteNullForwardingPolicy :: Maybe Schema.Options.RemoteNullForwardingPolicy,
     rsoEnabledAPIs :: Maybe (HashSet API),
     rsoMxRefetchInt :: Maybe Subscription.Options.RefetchInterval,
@@ -324,7 +325,12 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoApolloFederationStatus :: Maybe Server.Types.ApolloFederationStatus,
     rsoCloseWebsocketsOnMetadataChangeStatus :: Maybe Server.Types.CloseWebsocketsOnMetadataChangeStatus,
     rsoMaxTotalHeaderLength :: Maybe Int,
-    rsoTriggersErrorLogLevelStatus :: Maybe Server.Types.TriggersErrorLogLevelStatus
+    rsoTriggersErrorLogLevelStatus :: Maybe Server.Types.TriggersErrorLogLevelStatus,
+    rsoAsyncActionsFetchBatchSize :: Maybe Int,
+    rsoPersistedQueries :: Maybe Server.Types.PersistedQueriesState,
+    rsoPersistedQueriesTtl :: Maybe Int,
+    rsoRemoteSchemaResponsePriority :: Maybe Server.Types.RemoteSchemaResponsePriority,
+    rsoHeaderPrecedence :: Maybe Server.Types.HeaderPrecedence
   }
 
 -- | Whether or not to serve Console assets.
@@ -593,6 +599,7 @@ data ServeOptions impl = ServeOptions
     soEnableTelemetry :: TelemetryStatus,
     soStringifyNum :: Schema.Options.StringifyNumbers,
     soDangerousBooleanCollapse :: Schema.Options.DangerouslyCollapseBooleans,
+    soBackwardsCompatibleNullInNonNullableVariables :: Schema.Options.BackwardsCompatibleNullInNonNullableVariables,
     soRemoteNullForwardingPolicy :: Schema.Options.RemoteNullForwardingPolicy,
     soEnabledAPIs :: HashSet API,
     soLiveQueryOpts :: Subscription.Options.LiveQueriesOptions,
@@ -626,7 +633,12 @@ data ServeOptions impl = ServeOptions
     soApolloFederationStatus :: Server.Types.ApolloFederationStatus,
     soCloseWebsocketsOnMetadataChangeStatus :: Server.Types.CloseWebsocketsOnMetadataChangeStatus,
     soMaxTotalHeaderLength :: Int,
-    soTriggersErrorLogLevelStatus :: Server.Types.TriggersErrorLogLevelStatus
+    soTriggersErrorLogLevelStatus :: Server.Types.TriggersErrorLogLevelStatus,
+    soAsyncActionsFetchBatchSize :: Int,
+    soPersistedQueries :: Server.Types.PersistedQueriesState,
+    soPersistedQueriesTtl :: Int,
+    soRemoteSchemaResponsePriority :: Server.Types.RemoteSchemaResponsePriority,
+    soHeaderPrecedence :: Server.Types.HeaderPrecedence
   }
 
 -- | 'ResponseInternalErrorsConfig' represents the encoding of the
