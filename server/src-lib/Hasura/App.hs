@@ -1102,7 +1102,7 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
   liftIO $ logDeprecatedEnvVars logger acEnvironment sources
 
   -- log inconsistent schema objects
-  inconsObjs <- scInconsistentObjs <$> liftIO ( appStateRef)
+  inconsObjs <- scInconsistentObjs <$> liftIO (getSchemaCache appStateRef)
   liftIO $ logInconsistentMetadata logger inconsObjs
 
   -- NOTE: `newLogTVar` is being used to make sure that the metadata logger runs only once
