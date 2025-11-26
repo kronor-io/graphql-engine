@@ -145,6 +145,7 @@ data AppEnv = AppEnv
     appEnvCheckFeatureFlag :: CheckFeatureFlag,
     appEnvLicenseKeyCache :: Maybe (CredentialCache AgentLicenseKey),
     appEnvMaxTotalHeaderLength :: Int,
+    appEnvMaxRequestBodyLength :: Int,
     appEnvTriggersErrorLogLevelStatus :: TriggersErrorLogLevelStatus,
     appEnvAsyncActionsFetchBatchSize :: Int,
     appEnvPersistedQueries :: PersistedQueriesState,

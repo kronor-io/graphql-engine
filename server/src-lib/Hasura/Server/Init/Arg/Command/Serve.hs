@@ -66,6 +66,7 @@ module Hasura.Server.Init.Arg.Command.Serve
     triggersErrorLogLevelStatusOption,
     closeWebsocketsOnMetadataChangeOption,
     maxTotalHeaderLengthOption,
+    maxRequestBodyLengthOption,
     asyncActionsFetchBatchSizeOption,
     persistedQueriesOption,
     persistedQueriesTtlOption,
@@ -161,6 +162,7 @@ serveCommandParser =
     <*> parseApolloFederationStatus
     <*> parseEnableCloseWebsocketsOnMetadataChange
     <*> parseMaxTotalHeaderLength
+    <*> parseMaxRequestBodyLength
     <*> parseTriggersErrorLoglevelStatus
     <*> parseAsyncActionsFetchBatchSize
     <*> parsePersistedQueries
@@ -1250,6 +1252,23 @@ maxTotalHeaderLengthOption =
       Config._helpMessage = "Max cumulative length of all headers in bytes (Default: 1MB)"
     }
 
+parseMaxRequestBodyLength :: Opt.Parser (Maybe Int)
+parseMaxRequestBodyLength =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "max-request-body-length"
+          <> Opt.help (Config._helpMessage maxRequestBodyLengthOption)
+      )
+
+maxRequestBodyLengthOption :: Config.Option Int
+maxRequestBodyLengthOption =
+  Config.Option
+    { Config._default = (50 * 1024),
+      Config._envVar = "HASURA_GRAPHQL_MAX_REQUEST_BODY_LENGTH",
+      Config._helpMessage = "Max length of the request body in bytes (Default: 50KiB)"
+    }
+
 triggersErrorLogLevelStatusOption :: Config.Option (Types.TriggersErrorLogLevelStatus)
 triggersErrorLogLevelStatusOption =
   Config.Option
@@ -1452,6 +1471,7 @@ serveCmdFooter =
         Config.optionPP apolloFederationStatusOption,
         Config.optionPP closeWebsocketsOnMetadataChangeOption,
         Config.optionPP maxTotalHeaderLengthOption,
+        Config.optionPP maxRequestBodyLengthOption,
         Config.optionPP remoteNullForwardingPolicyOption,
         Config.optionPP triggersErrorLogLevelStatusOption,
         Config.optionPP asyncActionsFetchBatchSizeOption,

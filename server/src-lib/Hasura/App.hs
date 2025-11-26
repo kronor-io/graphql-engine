@@ -160,8 +160,10 @@ import Hasura.ShutdownLatch
 import Hasura.Tracing
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.CreateManager (mkHttpManager)
+import Network.HTTP.Types (badRequest400)
 import Network.Types.Extended
 import Network.Wai (Application)
+import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp qualified as Warp
 import Options.Applicative
 import Refined (unrefine)
@@ -510,6 +512,7 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvSchemaPollInterval = soSchemaPollInterval,
           appEnvLicenseKeyCache = Nothing,
           appEnvMaxTotalHeaderLength = soMaxTotalHeaderLength,
+          appEnvMaxRequestBodyLength = soMaxRequestBodyLength,
           appEnvTriggersErrorLogLevelStatus = soTriggersErrorLogLevelStatus,
           appEnvAsyncActionsFetchBatchSize = soAsyncActionsFetchBatchSize,
           appEnvPersistedQueries = soPersistedQueries,
@@ -995,6 +998,13 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
           . Warp.setMaxTotalHeaderLength appEnvMaxTotalHeaderLength
           $ Warp.defaultSettings
 
+      limitRequestSizeMw :: Wai.Middleware
+      limitRequestSizeMw app req respond = do
+        case Wai.requestBodyLength req of
+          Wai.KnownLength n | n > fromIntegral appEnvMaxRequestBodyLength ->
+               respond (Wai.responseLBS badRequest400 [] "")
+          _ -> app req respond
+
       setForkIOWithMetrics :: Warp.Settings -> Warp.Settings
       setForkIOWithMetrics = Warp.setFork \f -> do
         void
@@ -1032,7 +1042,7 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
   -- any resources using the finalizers attached using 'ManagedT' above.
   -- Structuring things using the shutdown latch in this way lets us decide
   -- elsewhere exactly how we want to control shutdown.
-  liftIO $ Warp.runSettings warpSettings waiApplication
+  liftIO $ Warp.runSettings warpSettings (limitRequestSizeMw waiApplication)
 
 -- | Part of a factorization of 'runHGEServer' to expose the constructed WAI
 -- application for testing purposes. See 'runHGEServer' for documentation.
