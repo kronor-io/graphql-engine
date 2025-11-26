@@ -31,7 +31,7 @@ checkGQLExecution info sc req = do
   invalidTokensRef <- askInvalidTokens
   invalidTokens <- liftIO $ STM.atomically $ STM.readTVar invalidTokensRef
 
-  case Hasura.Session.getSessionVariableValue "x-hasura-token-id" info._uiSession of
+  case Hasura.Session.getSessionVariableValue "x-hasura-jwt-id" info._uiSession of
     Just token ->
       case UUID.fromText token of
         Nothing -> do
