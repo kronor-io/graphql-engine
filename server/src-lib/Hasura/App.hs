@@ -96,8 +96,7 @@ import Hasura.Eventing.Common
 import Hasura.Eventing.EventTrigger
 import Hasura.Eventing.ScheduledTrigger
 import Hasura.GraphQL.Execute
-  ( ExecutionStep (..),
-    MonadGQLExecutionCheck (..),
+  ( MonadGQLExecutionCheck (..),
     checkQueryInAllowlist,
   )
 import Hasura.GraphQL.Execute.Action
@@ -175,6 +174,7 @@ import Web.Spock.Core qualified as Spock
 import Kronor.ApiLimitsEnforcer qualified as Kronor
 import Kronor.TokenValidator qualified as Kronor
 import Kronor.OpenTelemetryReporter qualified as Kronor
+import Kronor.IntrospectionOptionsEnforcer qualified as Kronor
 
 --------------------------------------------------------------------------------
 -- Error handling (move to another module!)
@@ -465,7 +465,7 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
 
   -- Generate event's trigger shared state
   lockedEventsCtx <- liftIO $ initLockedEventsCtx
-  
+
   -- Kronor Stuff
   invalidTokensRef <- liftIO $ STM.newTVarIO mempty
   void $ Kronor.startInvalidTokensListenerThread logger metadataDbPool 5000 invalidTokensRef
@@ -784,8 +784,7 @@ instance MonadGQLExecutionCheck AppM where
     Kronor.checkGQLExecution userInfo sc req
     return req
 
-  executeIntrospection _ introspectionQuery _ =
-    pure $ Right $ ExecStepRaw introspectionQuery
+  executeIntrospection = Kronor.executeIntrospection
 
   checkGQLBatchedReqs = Kronor.checkGQLBatchedReqs
 
@@ -1111,7 +1110,7 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
 
   -- Start a background thread for processing schema sync event present in the '_sscSyncEventRef'
   _ <- startSchemaSyncProcessorThread appStateRef newLogTVar
-  
+
   case appEnvEventingMode of
     EventingEnabled -> do
       startEventTriggerPollerThread logger appEnvLockedEventsCtx

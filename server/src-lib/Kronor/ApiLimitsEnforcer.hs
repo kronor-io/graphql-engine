@@ -5,34 +5,32 @@ module Kronor.ApiLimitsEnforcer (checkGQLExecution, checkGQLBatchedReqs, askGrap
 import Control.Concurrent.STM qualified as STM
 import Data.Map qualified as Map
 import Data.Time.Clock.Units qualified as Clock
-import GHC.Records qualified
+import Data.UUID qualified as UUID
 import Hasura.Base.Error
 import Hasura.GraphQL.Transport.HTTP.Protocol qualified as Protocol
 import Hasura.Prelude
 import Hasura.RQL.Types.ApiLimit qualified as Limits
+import Hasura.RQL.Types.SchemaCache
 import Hasura.Server.Limits qualified as Limits
 import Hasura.Server.Types qualified as HGE
-import Hasura.RQL.Types.Roles (RoleName)
-import Hasura.Session qualified
+import Hasura.Session
 import Kronor.TokenValidator (HasInvalidTokens (..))
 import Language.GraphQL.Draft.Syntax qualified as G
 import System.Timeout.Lifted (timeout)
-import Data.UUID qualified as UUID
 
 checkGQLExecution ::
   ( MonadError QErr m,
     HasInvalidTokens m,
-    MonadIO m,
-    GHC.Records.HasField "scApiLimits" schemaCache Limits.ApiLimit
+    MonadIO m
   ) =>
   Hasura.Session.UserInfo ->
-  schemaCache ->
+  SchemaCache ->
   Protocol.GQLReq Protocol.GQLExecDoc ->
   m ()
 checkGQLExecution info sc req = do
   invalidTokensRef <- askInvalidTokens
   invalidTokens <- liftIO $ STM.atomically $ STM.readTVar invalidTokensRef
-  
+
   case Hasura.Session.getSessionVariableValue "x-hasura-token-id" info._uiSession of
     Just token ->
       case UUID.fromText token of
@@ -50,15 +48,11 @@ checkGQLExecution info sc req = do
     enforceDepthLimits info sc query
 
 checkGQLBatchedReqs ::
-  ( GHC.Records.HasField "_uiRole" userSession RoleName,
-    GHC.Records.HasField "scApiLimits" schemaCache Limits.ApiLimit,
-    Foldable t,
-    Monad m
-  ) =>
-  userSession ->
-  requestId ->
-  t a ->
-  schemaCache ->
+  Monad m =>
+  UserInfo ->
+  HGE.RequestId ->
+  [Protocol.GQLReq Protocol.GQLQueryText] ->
+  SchemaCache ->
   m (Either QErr ())
 checkGQLBatchedReqs userInfo _requestId reqs sc = runExceptT $ do
   let Limits.ApiLimit _ _ _ _ mbatchLimit disabledLimits = sc.scApiLimits
@@ -78,12 +72,9 @@ checkGQLBatchedReqs userInfo _requestId reqs sc = runExceptT $ do
               throw429 BadRequest "too many batched requests in a single request"
 
 enforceNodeLimits ::
-  ( MonadError QErr m,
-    GHC.Records.HasField "_uiRole" userInfo RoleName,
-    GHC.Records.HasField "scApiLimits" schemaCache Limits.ApiLimit
-  ) =>
-  userInfo ->
-  schemaCache ->
+  MonadError QErr m =>
+  UserInfo ->
+  SchemaCache ->
   Protocol.SingleOperation ->
   m ()
 enforceNodeLimits userInfo sc query = do
@@ -120,12 +111,9 @@ enforceNodeLimits userInfo sc query = do
         countSelectionFields xs + countSelectionFields (G._ifSelectionSet frag)
 
 enforceDepthLimits ::
-  ( MonadError QErr m,
-    GHC.Records.HasField "_uiRole" userInfo RoleName,
-    GHC.Records.HasField "scApiLimits" schemaCache Limits.ApiLimit
-  ) =>
-  userInfo ->
-  schemaCache ->
+  MonadError QErr m =>
+  UserInfo ->
+  SchemaCache ->
   Protocol.SingleOperation ->
   m ()
 enforceDepthLimits userInfo sc query = do
@@ -153,7 +141,7 @@ enforceDepthLimits userInfo sc query = do
       [] -> acc
       (G.SelectionField (G.Field {_fName = n}) : xs)
         | isIntrospectionFieldName n ->
-            -- instrospection queries are exempt from depth limits
+            -- introspection queries are exempt from depth limits
             countDepths acc xs
       (G.SelectionField (G.Field {_fSelectionSet = []}) : xs) ->
         countDepths acc xs
@@ -165,11 +153,9 @@ enforceDepthLimits userInfo sc query = do
          in countDepths (innerDepth : acc) xs
 
 askGraphqlOperationLimit ::
-  ( Monad m,
-    GHC.Records.HasField "_uiRole" userInfo RoleName
-  ) =>
+  Monad m =>
   HGE.RequestId ->
-  userInfo ->
+  UserInfo ->
   Limits.ApiLimit ->
   m Limits.ResourceLimits
 askGraphqlOperationLimit _requestId userInfo apiLimit = do
