@@ -107,9 +107,12 @@ mkUserInfo roleBuild userAdminSecret sessionVariables = do
         <> " not found in session variables"
     URBFromSessionVariablesFallback roleName' -> pure $ fromMaybe roleName' maybeSessionRole
     URBPreDetermined roleName' -> pure roleName'
+  let fallbackRoleName = case roleBuild of
+        URBFromSessionVariablesFallback roleName' -> Just roleName'
+        _ -> Nothing
   backendOnlyFieldAccess <- getBackendOnlyFieldAccess
   let modifiedSession = modifySessionVariables roleName sessionVariables
-  pure $ UserInfo roleName modifiedSession backendOnlyFieldAccess
+  pure $ UserInfo fallbackRoleName roleName modifiedSession backendOnlyFieldAccess
   where
     maybeSessionRole = maybeRoleFromSessionVariables sessionVariables
 
@@ -145,4 +148,4 @@ maybeRoleFromSessionVariables sessionVariables =
   getSessionVariableValue userRoleHeader sessionVariables >>= mkRoleName
 
 adminUserInfo :: UserInfo
-adminUserInfo = UserInfo adminRoleName mempty BOFADisallowed
+adminUserInfo = UserInfo Nothing adminRoleName mempty BOFADisallowed

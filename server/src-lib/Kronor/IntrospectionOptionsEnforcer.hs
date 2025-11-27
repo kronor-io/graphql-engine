@@ -9,8 +9,8 @@ import Hasura.GraphQL.Execute
    )
 import Hasura.Prelude
 import Hasura.RQL.Types.GraphqlSchemaIntrospection
+import Hasura.RQL.Types.Roles (adminRoleName)
 import Hasura.Session
-import Kronor.TokenValidator (HasInvalidTokens (..))
 
 executeIntrospection :: Monad m =>
     UserInfo ->
@@ -18,6 +18,6 @@ executeIntrospection :: Monad m =>
     SetGraphqlIntrospectionOptions ->
     m (Either QErr ExecutionStep)
 executeIntrospection ui introspectionQuery introspectionOptions = runExceptT $ do
-  if ui._uiRole `elem` introspectionOptions._idrDisabledForRoles
+  if ui._uiRole `elem` introspectionOptions._idrDisabledForRoles && ui._uiFallbackRole /= Just adminRoleName
     then throw401 "Introspection disabled"
     else pure $ ExecStepRaw introspectionQuery

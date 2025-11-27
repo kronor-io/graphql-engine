@@ -113,7 +113,8 @@ instance ToJSON BackendOnlyFieldAccess where
 instance Hashable BackendOnlyFieldAccess
 
 data UserInfo = UserInfo
-  { _uiRole :: !RoleName,
+  { _uiFallbackRole :: !(Maybe RoleName),
+    _uiRole :: !RoleName,
     _uiSession :: !SessionVariables,
     _uiBackendOnlyFieldAccess :: !BackendOnlyFieldAccess
   }
