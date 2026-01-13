@@ -1000,9 +1000,10 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
 
       limitRequestSizeMw :: Wai.Middleware
       limitRequestSizeMw app req respond = do
-        case Wai.requestBodyLength req of
-          Wai.KnownLength n | n > fromIntegral appEnvMaxRequestBodyLength ->
-               respond (Wai.responseLBS badRequest400 [] "")
+        let enforceLimit = Wai.pathInfo req /= ["v1", "metadata"]
+        case (enforceLimit, Wai.requestBodyLength req) of
+          (True, Wai.KnownLength n) | n > fromIntegral appEnvMaxRequestBodyLength ->
+            respond (Wai.responseLBS badRequest400 [] "")
           _ -> app req respond
 
       setForkIOWithMetrics :: Warp.Settings -> Warp.Settings
