@@ -56,7 +56,7 @@ import Language.GraphQL.Draft.Syntax qualified as G
 
 -- | Construct and execute a call to a remote schema for a remote join.
 makeRemoteSchemaJoinCall ::
-  (MonadError QErr m, MonadTrace m) =>
+  (MonadError QErr m, MonadIO m, MonadTrace m) =>
   -- | Function to send a request over the network.
   (GQLReqOutgoing -> m BL.ByteString) ->
   -- | User information.

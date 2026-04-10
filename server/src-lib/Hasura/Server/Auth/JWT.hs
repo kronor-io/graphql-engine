@@ -694,7 +694,7 @@ processHeaderSimple jwtCtx jwt = do
     cl <- parseClaimsMap claims claimsConfig
     case tokenId of
       Nothing -> pure cl
-      Just i -> pure $ HashMap.insert "x-hasura-jwt-id" i cl
+      Just i -> pure $ HashMap.insert (unsafeMkSessionVariable ("x-hasura-jwt-id" :: Text)) i cl
 
   pure (claimsObject, expTimeM)
   where

@@ -84,8 +84,6 @@ import Hasura.RQL.DDL.Schema.Cache.Config
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common (SQLGenCtx (..))
 import Hasura.RQL.Types.Endpoint as EP
-import Hasura.Authentication.Role (adminRoleName, roleNameToTxt)
-import Hasura.RQL.Types.OpenTelemetry (getOtelTracesPropagator)
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.Source
 import Hasura.Server.API.Config (runGetConfig)

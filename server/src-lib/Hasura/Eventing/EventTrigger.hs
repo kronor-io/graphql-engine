@@ -52,7 +52,6 @@ import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Aeson.Lens qualified as JL
 import Data.Either (isRight)
 import Data.Has
 import Data.HashMap.Strict qualified as HashMap

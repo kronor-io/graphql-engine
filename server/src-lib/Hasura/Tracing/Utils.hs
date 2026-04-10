@@ -17,6 +17,8 @@ import Hasura.RQL.Types.SourceConfiguration (HasSourceConfiguration (..))
 import Hasura.Tracing.Class
 import Hasura.Tracing.Context
 import Hasura.Tracing.Propagator (HttpPropagator)
+import Hasura.Tracing.Propagator.B3 (b3TraceContextPropagator)
+import Hasura.Tracing.Propagator.W3CTraceContext (w3cTraceContextPropagator)
 import Hasura.Tracing.TraceId (SpanKind (SKClient))
 import Network.HTTP.Client.Transformable qualified as HTTP
 import OpenTelemetry.Trace.Core qualified as OpenTelemetry
