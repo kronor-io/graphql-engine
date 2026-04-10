@@ -19,6 +19,7 @@ import Data.List.Extended (duplicates)
 import Data.Text.Extended
 import Data.Text.NonEmpty qualified as NT
 import Database.PG.Query.Pool qualified as PG
+import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleNameSafe)
 import Hasura.Base.Error
 import Hasura.Base.ErrorMessage
 import Hasura.Base.ToErrorValue
@@ -61,7 +62,6 @@ import Hasura.RQL.Types.CustomTypes
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.Permission
 import Hasura.RQL.Types.Relationships.Remote
-import Hasura.RQL.Types.Roles (RoleName, adminRoleName, mkRoleNameSafe)
 import Hasura.RQL.Types.Schema.Options (SchemaOptions (..))
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
@@ -205,7 +205,7 @@ buildGQLContext
         case res of
           Left err ->
             pure $ \_ _ _ ->
-              unLogger logger $ mkGenericLog @Text LevelWarn "schema-registry" ("failed to fetch the time from metadata db correctly: " <> showQErr err)
+              unLogger logger $ mkGenericLog @Text LevelWarn "schema-registry" ("Failed to fetch the time from metadata db correctly: " <> showQErr err)
           Right now -> do
             let schemaRegistryMap = generateSchemaRegistryMap hasuraContexts
                 projectSchemaInfo = \metadataResourceVersion inconsistentMetadata metadata ->
@@ -253,7 +253,7 @@ buildSchemaOptions ::
   HashSet ExperimentalFeature ->
   SchemaOptions
 buildSchemaOptions
-  ( SQLGenCtx stringifyNum dangerousBooleanCollapse _nullInNonNullableVariables remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput,
+  ( SQLGenCtx stringifyNum dangerousBooleanCollapse _nullInNonNullableVariables noNullUnboundVariableDefault removeEmptySubscriptionResponses remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput,
     functionPermsCtx
     )
   expFeatures =
@@ -283,7 +283,11 @@ buildSchemaOptions
         soPostgresArrays =
           if EFDisablePostgresArrays `Set.member` expFeatures
             then Options.DontUsePostgresArrays
-            else Options.UsePostgresArrays
+            else Options.UsePostgresArrays,
+        soNoNullUnboundVariableDefault =
+          noNullUnboundVariableDefault,
+        soRemoveEmptySubscriptionResponses =
+          removeEmptySubscriptionResponses
       }
 
 -- | Build the @QueryHasura@ context for a given role.
@@ -324,16 +328,6 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
       fmap mconcat $ for (toList sources) \sourceInfo ->
         AB.dispatchAnyBackend @BackendSchema sourceInfo $ buildSource schemaContext schemaOptions
 
-    -- build all remote schemas
-    -- we only keep the ones that don't result in a name conflict
-    (remoteSchemaFields, !remoteSchemaErrors) <-
-      runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions)
-        $ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationBackendFields role remoteSchemaPermsCtx
-    let remotesQueryFields = concatMap (\(n, rf) -> (n,) <$> piQuery rf) remoteSchemaFields
-        remotesMutationFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piMutation rf) remoteSchemaFields
-        remotesSubscriptionFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piSubscription rf) remoteSchemaFields
-        apolloQueryFields = apolloRootFields apolloFederationStatus apolloFedTableParsers
-
     -- build all actions
     -- we use the source context due to how async query relationships are implemented
     (actionsQueryFields, actionsMutationFields, actionsSubscriptionFields) <-
@@ -344,6 +338,16 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
           mutationFields <- buildActionMutationFields customTypes action
           subscriptionFields <- buildActionSubscriptionFields customTypes action
           pure (queryFields, mutationFields, subscriptionFields)
+
+    -- build all remote schemas
+    -- we only keep the ones that don't result in a name conflict
+    (remoteSchemaFields, !remoteSchemaErrors) <-
+      runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions)
+        $ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationBackendFields actionsQueryFields actionsMutationFields role remoteSchemaPermsCtx
+    let remotesQueryFields = concatMap (\(n, rf) -> (n,) <$> piQuery rf) remoteSchemaFields
+        remotesMutationFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piMutation rf) remoteSchemaFields
+        remotesSubscriptionFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piSubscription rf) remoteSchemaFields
+        apolloQueryFields = apolloRootFields apolloFederationStatus apolloFedTableParsers
 
     mutationParserFrontend <-
       buildMutationParser sourcesMutationFrontendFields remotesMutationFields actionsMutationFields
@@ -627,7 +631,7 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
         -- Permissions are disabled, unauthenticated users have access to remote schemas.
         (remoteFields, remoteSchemaErrors) <-
           runRemoteSchema fakeSchemaContext (soRemoteNullForwardingPolicy schemaOptions)
-            $ buildAndValidateRemoteSchemas allRemotes [] [] fakeRole remoteSchemaPermsCtx
+            $ buildAndValidateRemoteSchemas allRemotes [] [] [] [] fakeRole remoteSchemaPermsCtx
         pure
           ( (\(n, rf) -> fmap (fmap (RFRemote n)) rf) <$> concatMap (\(n, q) -> (n,) <$> piQuery q) remoteFields,
             (\(n, rf) -> fmap (fmap (RFRemote n)) rf) <$> concat (mapMaybe (\(n, q) -> fmap (n,) <$> piMutation q) remoteFields),
@@ -660,8 +664,10 @@ buildAndValidateRemoteSchemas ::
     MonadIO m
   ) =>
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
-  [FieldParser P.Parse (NamespacedField (QueryRootField UnpreparedValue))] ->
-  [FieldParser P.Parse (NamespacedField (MutationRootField UnpreparedValue))] ->
+  [FieldParser P.Parse (NamespacedField (QueryRootField UnpreparedValue))] -> -- Sources query fields
+  [FieldParser P.Parse (NamespacedField (MutationRootField UnpreparedValue))] -> -- Sources mutation fields
+  [FieldParser P.Parse (QueryRootField UnpreparedValue)] -> -- Action query fields
+  [FieldParser P.Parse (MutationRootField UnpreparedValue)] -> -- Action mutation fields
   RoleName ->
   Options.RemoteSchemaPermissions ->
   SchemaT
@@ -672,7 +678,7 @@ buildAndValidateRemoteSchemas ::
     )
     (MemoizeT m)
     ([(RemoteSchemaName, RemoteSchemaParser P.Parse)], HashSet InconsistentMetadata)
-buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields role remoteSchemaPermsCtx =
+buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields actionQueryFields actionMutationFields role remoteSchemaPermsCtx =
   runWriterT $ foldlM step [] (HashMap.elems remotes)
   where
     getFieldName = P.getName . P.fDefinition
@@ -707,8 +713,23 @@ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields r
               --   - between this remote and the sources:
               for_ (duplicates $ newSchemaMutationFieldNames <> sourcesMutationFieldNames)
                 $ \name -> reportInconsistency $ "Field cannot be overwritten by remote field " <> squote name
-          -- No need to check for conflicts between subscription fields, since
-          -- remote subscriptions aren't supported yet.
+            -- No need to check for conflicts between subscription fields, since
+            -- remote subscriptions aren't supported yet.
+
+            -- check for conflicting types of remote schemas with existing sources and actions schema
+            let collectedTypes =
+                  P.collectTypeDefinitions @MetadataObjId
+                    [ -- sources and actions schema
+                      P.TypeDefinitionsWrapper $ map P.fDefinition sourcesQueryFields,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition sourcesMutationFields,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition actionQueryFields,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition actionMutationFields,
+                      -- remote schema
+                      P.TypeDefinitionsWrapper $ map P.fDefinition $ piQuery remoteSchemaParser,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition <$> piMutation remoteSchemaParser
+                    ]
+            onLeft_ collectedTypes $ \conflictingTypes ->
+              reportInconsistency $ "Found conflicting definitions for GraphQL type" <> fromErrorMessage (toErrorValue conflictingTypes)
 
           -- Only add this new remote to the list if there was no error
           pure

@@ -17,6 +17,7 @@ import Data.List.Split (chunksOf)
 import Data.Monoid (Endo (..), Sum (..))
 import Data.Text.Extended
 import GHC.AssertNF.CPP
+import Hasura.Authentication.Role (RoleName)
 import Hasura.Base.Error
 import Hasura.GraphQL.Execute.Backend
 import Hasura.GraphQL.Execute.Subscription.Options
@@ -36,10 +37,9 @@ import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendTag (backendTag, reify)
 import Hasura.RQL.Types.BackendType (BackendType (..), PostgresKind (Vanilla))
 import Hasura.RQL.Types.Common (SourceName)
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.Subscription (SubscriptionType (..))
 import Hasura.Server.Logging (ModelInfo (..), ModelInfoLog (..))
-import Hasura.Server.Prometheus (PrometheusMetrics (..), SubscriptionMetrics (..), liveQuerySubscriptionLabel, recordSubcriptionMetric)
+import Hasura.Server.Prometheus (PrometheusMetrics (..), SubscriptionMetrics (..), liveQuerySubscriptionLabel, recordSubscriptionMetric)
 import Hasura.Server.Types (GranularPrometheusMetricsState (..), ModelInfoLogState (..))
 import Refined (unrefine)
 import System.Metrics.Prometheus.Gauge qualified as Prometheus.Gauge
@@ -121,7 +121,7 @@ pollLiveQuery pollerId pollerResponseState lqOpts (sourceName, sourceConfig) rol
       (queryExecutionTime, mxRes) <- runDBSubscription @b sourceConfig query (over (each . _2) C._csVariables cohorts) resolvedConnectionTemplate
 
       let dbExecTimeMetric = submDBExecTotalTime $ pmSubscriptionMetrics $ prometheusMetrics
-      recordSubcriptionMetric
+      recordSubscriptionMetric
         granularPrometheusMetricsState
         True
         operationNamesMap
@@ -215,7 +215,7 @@ pollLiveQuery pollerId pollerResponseState lqOpts (sourceName, sourceConfig) rol
   when (modelInfoLogStatus' == ModelInfoLogOn) $ do
     for_ (modelInfoList) $ \(ModelInfoPart modelName modelType modelSourceName modelSourceType modelQueryType) -> do
       L.unLogger logger $ ModelInfoLog L.LevelInfo $ ModelInfo modelName (toTxt modelType) (toTxt <$> modelSourceName) (toTxt <$> modelSourceType) (toTxt modelQueryType) False
-  recordSubcriptionMetric
+  recordSubscriptionMetric
     granularPrometheusMetricsState
     True
     operationNamesMap
@@ -235,14 +235,17 @@ pollLiveQuery pollerId pollerResponseState lqOpts (sourceName, sourceConfig) rol
       let cohortSnapshot = C.CohortSnapshot cohortVars respRef (map snd curOpsL) (map snd newOpsL)
       return (resId, cohortSnapshot)
 
+    getCohortSnapshot :: (CohortVariables, C.Cohort ()) -> STM.STM (CohortId, C.CohortSnapshot)
     getCohortOperations cohorts = \case
       Left e ->
         -- TODO: this is internal error
-        let resp = throwError $ GQExecError [encodeGQLErr False e]
+        let resp = throwError $ GQExecError [encodeGQLErr HideInternalErrors e]
          in [(resp, cohortId, Nothing, snapshot) | (cohortId, snapshot) <- cohorts]
       Right responses -> do
         let cohortSnapshotMap = HashMap.fromList cohorts
         flip mapMaybe responses $ \(cohortId, respBS) ->
+          -- respBS represents the raw top-level field result, exactly as it will appear in
+          -- '{data: <respBS>}' modulo mysterious things done to it by 'modifier' (namespacing?)
           let respHash = mkRespHash respBS
               respSize = BS.length respBS
            in -- TODO: currently we ignore the cases when the cohortId from

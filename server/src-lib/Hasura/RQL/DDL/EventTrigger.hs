@@ -19,6 +19,7 @@ module Hasura.RQL.DDL.EventTrigger
     getSourceTableAndTriggers,
     getTriggerNames,
     getTriggersMap,
+    getTriggerTableMap,
     getTableNameFromTrigger,
     cetqSource,
     cetqName,
@@ -60,6 +61,7 @@ import Data.Sequence qualified as Seq
 import Data.Text qualified as T
 import Data.Text.Extended
 import Data.URL.Template (printTemplate, renderTemplate)
+import Hasura.Authentication.User (UserInfoM (..))
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Eventing.Backend
@@ -81,7 +83,6 @@ import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.RQL.Types.SchemaCacheTypes
 import Hasura.RQL.Types.Source
 import Hasura.SQL.AnyBackend qualified as AB
-import Hasura.Session
 import Hasura.Table.Cache
 import Hasura.Table.Metadata (TableMetadata (..), tmEventTriggers)
 import Hasura.Tracing (TraceT)
@@ -639,6 +640,19 @@ getTriggersMap ::
   SourceMetadata b ->
   InsOrdHashMap TriggerName (EventTriggerConf b)
 getTriggersMap = InsOrdHashMap.unions . map _tmEventTriggers . InsOrdHashMap.elems . _smTables
+
+-- | Get a map from trigger name to the table it is defined on
+getTriggerTableMap ::
+  SourceMetadata b ->
+  InsOrdHashMap TriggerName (TableName b)
+getTriggerTableMap sourceMetadata =
+  InsOrdHashMap.fromList
+    $ concatMap mkKeyValue
+    $ InsOrdHashMap.toList
+    $ _smTables sourceMetadata
+  where
+    mkKeyValue (tableName, tableMetadata) =
+      map (,tableName) $ InsOrdHashMap.keys (_tmEventTriggers tableMetadata)
 
 getSourceTableAndTriggers ::
   SourceMetadata b ->

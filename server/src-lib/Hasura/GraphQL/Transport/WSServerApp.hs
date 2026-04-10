@@ -48,6 +48,7 @@ import Hasura.Tracing qualified as Tracing
 import Network.WebSockets qualified as WS
 import System.Metrics.Gauge qualified as EKG.Gauge
 
+-- | This is called for each client websocket connection
 createWSServerApp ::
   ( MonadIO m,
     MonadFail m, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
@@ -98,9 +99,10 @@ createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache = \ 
 
     onMessageHandler conn bs sp = do
       headerPrecedence <- liftIO $ acHeaderPrecedence <$> getAppContext (_wseAppStateRef serverEnv)
+      traceQueryStatus <- liftIO $ acTraceQueryStatus <$> getAppContext (_wseAppStateRef serverEnv)
       responseErrorsConfig <- liftIO $ acResponseInternalErrorsConfig <$> getAppContext (_wseAppStateRef serverEnv)
       mask_
-        $ onMessage enabledLogTypes getAuthMode serverEnv conn bs (wsActions sp) licenseKeyCache responseErrorsConfig headerPrecedence
+        $ onMessage enabledLogTypes getAuthMode serverEnv conn bs (wsActions sp) licenseKeyCache responseErrorsConfig headerPrecedence traceQueryStatus
 
     onCloseHandler conn = mask_ do
       granularPrometheusMetricsState <- runGetPrometheusMetricsGranularity
@@ -141,6 +143,7 @@ createWSServerEnv appStateRef = do
       appEnvServerMetrics
       appEnvPrometheusMetrics
       appEnvTraceSamplingPolicy
+      appEnvLoggingSettings
 
 mkWSActions :: L.Logger L.Hasura -> WSSubProtocol -> WS.WSActions WSConnData
 mkWSActions logger subProtocol =

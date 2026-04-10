@@ -9,8 +9,8 @@ import Hasura.GraphQL.Execute
    )
 import Hasura.Prelude
 import Hasura.RQL.Types.GraphqlSchemaIntrospection
-import Hasura.RQL.Types.Roles (adminRoleName)
-import Hasura.Session
+import Hasura.Authentication.Role (adminRoleName)
+import Hasura.Authentication.User (UserInfo (..))
 
 executeIntrospection :: Monad m =>
     UserInfo ->
