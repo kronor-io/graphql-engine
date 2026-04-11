@@ -48,7 +48,7 @@ def graphql(hge_ctx, query, jwt_conf, role, jti=None):
 
 def block_token(engine, token_id, token_type="backend"):
     """Insert a blocked token into tenant.tokens."""
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         conn.execute(
             sqlalchemy.text(
                 "INSERT INTO tenant.tokens (token_id, blocked, token_type) "
@@ -60,7 +60,7 @@ def block_token(engine, token_id, token_type="backend"):
 
 def clear_tokens(engine):
     """Remove all rows from tenant.tokens."""
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         conn.execute(sqlalchemy.text("DELETE FROM tenant.tokens"))
 
 

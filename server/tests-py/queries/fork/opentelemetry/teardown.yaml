@@ -3,5 +3,6 @@ args:
 
 - type: run_sql
   args:
+    cascade: true
     sql: |
       DROP TABLE IF EXISTS fork_items CASCADE;

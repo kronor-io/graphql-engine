@@ -29,13 +29,10 @@ def graphql(hge_ctx, query, jwt_conf=None, role=None, use_admin_secret=False):
     headers = {"Content-Type": "application/json"}
     if use_admin_secret:
         headers["X-Hasura-Admin-Secret"] = hge_ctx.hge_key
-        if role and jwt_conf:
-            token = make_jwt_token(jwt_conf, role)
-            headers["Authorization"] = f"Bearer {token}"
-    elif role and jwt_conf:
+    if role and jwt_conf:
         token = make_jwt_token(jwt_conf, role)
         headers["Authorization"] = f"Bearer {token}"
-    else:
+    elif not use_admin_secret:
         headers["X-Hasura-Admin-Secret"] = hge_ctx.hge_key
     return requests.post(
         f"{hge_ctx.hge_url}/v1/graphql",
