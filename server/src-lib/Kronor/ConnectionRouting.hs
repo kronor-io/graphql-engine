@@ -161,9 +161,8 @@ mkPGExecCtxWithConnRouting defaultIsoLevel primaryPool replicaPools connSetPools
       GraphQLQuery (Just (PCTOPrimary _)) -> pure primaryPool
       GraphQLQuery (Just (PCTOReadReplicas _)) -> selectReplica
       GraphQLQuery (Just (PCTOConnectionSet name)) ->
-        onNothing
-          (HashMap.lookup name connSetPools)
-          (throw400 NotFound $ "Connection set member '" <> toTxt name <> "' not found")
+        HashMap.lookup name connSetPools
+          `onNothing` throw400 NotFound ("Connection set member '" <> toTxt name <> "' not found")
       GraphQLQuery (Just (PCTODefault _)) -> case txType of
         NoTxRead -> selectReplica
         Tx PG.ReadOnly _ -> selectReplica
