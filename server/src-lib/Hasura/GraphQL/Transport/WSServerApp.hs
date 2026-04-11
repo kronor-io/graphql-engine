@@ -84,6 +84,7 @@ createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache rate
         onConnHandler
         onMessageHandler
         onCloseHandler
+        onRateLimitExceededHandler
 
     logger = _wseLogger serverEnv
     serverMetrics = _wseServerMetrics serverEnv
@@ -111,6 +112,9 @@ createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache rate
       liftIO $ EKG.Gauge.dec $ smWebsocketConnections serverMetrics
       liftIO $ decWebsocketConnections $ pmConnections prometheusMetrics
       onClose logger serverMetrics prometheusMetrics (_wseSubscriptionState serverEnv) conn granularPrometheusMetricsState
+
+    onRateLimitExceededHandler conn =
+      sendCloseWithMsg logger conn TooManyRequests4429 Nothing Nothing
 
 stopWSServerApp :: WSServerEnv impl -> IO ()
 stopWSServerApp wsEnv = WS.shutdown (_wseServer wsEnv)

@@ -374,7 +374,8 @@ type HasuraServerApp m = IpAddress -> WS.PendingConnection -> m ()
 data WSHandlers m a = WSHandlers
   { _hOnConn :: (WSId -> WS.RequestHead -> IpAddress -> WSSubProtocol -> m (Either WS.RejectRequest (AcceptWith a))),
     _hOnMessage :: (WSConn a -> BL.ByteString -> WSSubProtocol -> m ()),
-    _hOnClose :: OnCloseH m a
+    _hOnClose :: OnCloseH m a,
+    _hOnRateLimitExceeded :: WSConn a -> m ()
   }
 
 -- | The background thread responsible for closing all websocket connections
@@ -544,6 +545,7 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
     connHandler = _hOnConn wsHandlers
     messageHandler = _hOnMessage wsHandlers
     closeHandler = _hOnClose wsHandlers
+    rateLimitExceededHandler = _hOnRateLimitExceeded wsHandlers
 
     logUnexpectedExceptions = flip catches handlers
       where
@@ -654,7 +656,7 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
                     case rateLimited of
                       RateLimit.RateLimitExceeded -> do
                         logWSLog logger $ WSLog wsId (EMessageReceived (MessageDetails "<rate-limited>" 0)) Nothing
-                        liftIO $ closeConnWithCode wsConn 4429 "WebSocket message rate limit exceeded"
+                        rateLimitExceededHandler wsConn
                       RateLimit.RateLimitOk -> do
                         let messageLength = BL.length msg
                             censoredMessage =

@@ -16,7 +16,7 @@ module Kronor.WebSocketRateLimiter
   )
 where
 
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import GHC.Clock (getMonotonicTimeNSec)
 import Hasura.Prelude
 
@@ -56,18 +56,14 @@ newRateLimiterState = do
 checkRateLimit :: RateLimitConfig -> RateLimiterState -> IO RateLimitResult
 checkRateLimit RateLimitConfig {..} (RateLimiterState ref) = do
   now <- getMonotonicTimeNSec
-  ws <- readIORef ref
-  let windowNs = fromIntegral rlcWindowSeconds * 1_000_000_000
-      elapsed = now - wsWindowStart ws
-  if elapsed >= windowNs
-    then do
-      -- Window expired, start a new one with this message counted
-      writeIORef ref (WindowState now 1)
-      pure RateLimitOk
-    else do
-      let newCount = wsMessageCount ws + 1
-      if newCount > rlcMaxMessages
-        then pure RateLimitExceeded
-        else do
-          writeIORef ref (ws {wsMessageCount = newCount})
-          pure RateLimitOk
+  atomicModifyIORef' ref $ \ws ->
+    let windowNs = fromIntegral rlcWindowSeconds * 1_000_000_000
+        elapsed = now - wsWindowStart ws
+     in if elapsed >= windowNs
+          then -- Window expired, start a new one with this message counted
+            (WindowState now 1, RateLimitOk)
+          else
+            let newCount = wsMessageCount ws + 1
+             in if newCount > rlcMaxMessages
+                  then (ws, RateLimitExceeded)
+                  else (ws {wsMessageCount = newCount}, RateLimitOk)
