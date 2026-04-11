@@ -19,7 +19,7 @@ import OpenTelemetry.Resource
 import OpenTelemetry.Trace as OpenTelemetry
 
 openTelemetryReporter :: OpenTelemetry.Tracer -> Reporter
-openTelemetryReporter tracer = Reporter \_context spanName getMetadata action -> do
+openTelemetryReporter tracer = Reporter \_context spanName _spanKind getMetadata _getStatus action -> do
   threadContext <- OpenTelemetry.getContext
 
   (parent, theSpan) <- liftIO do

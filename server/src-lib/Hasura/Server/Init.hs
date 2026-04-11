@@ -34,6 +34,7 @@ import Hasura.Base.Error qualified as Error
 import Hasura.GraphQL.ApolloFederation (getApolloFederationStatus)
 import Hasura.GraphQL.Execute.Subscription.Options qualified as Subscription.Options
 import Hasura.Logging qualified as Logging
+import Hasura.NativeQuery.Validation qualified as NativeQuery
 import Hasura.Prelude
 import Hasura.RQL.Types.Common qualified as Common
 import Hasura.RQL.Types.Schema.Options qualified as Options
@@ -210,6 +211,9 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soEnableMetadataQueryLogging <- case rsoEnableMetadataQueryLoggingEnv of
     Server.Logging.MetadataQueryLoggingDisabled -> withOptionDefault Nothing enableMetadataQueryLoggingOption
     metadataQueryLoggingEnabled -> pure metadataQueryLoggingEnabled
+  soHttpLogQueryOnlyOnError <- case rsoHttpLogQueryOnlyOnError of
+    Server.Logging.HttpLogQueryOnlyOnErrorDisabled -> withOptionDefault Nothing httpLogQueryOnlyOnErrorOption
+    httpLogQueryOnlyOnError -> pure httpLogQueryOnlyOnError
   soDefaultNamingConvention <- withOptionDefault rsoDefaultNamingConvention defaultNamingConventionOption
   soMetadataDefaults <- withOptionDefault rsoMetadataDefaults metadataDefaultsOption
   soExtensionsSchema <- withOptionDefault rsoExtensionsSchema metadataDBExtensionsSchemaOption
@@ -226,6 +230,13 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soPersistedQueriesTtl <- withOptionDefault rsoPersistedQueriesTtl persistedQueriesTtlOption
   soRemoteSchemaResponsePriority <- withOptionDefault rsoRemoteSchemaResponsePriority remoteSchemaResponsePriorityOption
   soHeaderPrecedence <- withOptionDefault rsoHeaderPrecedence configuredHeaderPrecedenceOption
+  soTraceQueryStatus <- withOptionDefault rsoTraceQueryStatus traceQueryStatusOption
+  soDisableNativeQueryValidation <-
+    case rsoDisableNativeQueryValidation of
+      NativeQuery.AlwaysValidateNativeQueries -> withOptionDefault Nothing disableNativeQueryValidationOption
+      NativeQuery.NeverValidateNativeQueries -> pure NativeQuery.NeverValidateNativeQueries
+  soPreserve401Errors <- withOptionSwitch' rsoPreserve401Errors (\case { MapEverythingTo200 -> False; Preserve401Errors -> True }, bool MapEverythingTo200 Preserve401Errors) preserve401ErrorsOption
+  soServerTimeout <- withOptionDefault rsoServerTimeout serverTimeoutOption
   pure ServeOptions {..}
 
 -- | Fetch Postgres 'Query.ConnParams' components from the environment

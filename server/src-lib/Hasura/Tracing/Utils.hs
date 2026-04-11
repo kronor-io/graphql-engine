@@ -5,6 +5,7 @@
 module Hasura.Tracing.Utils
   ( traceHTTPRequest,
     attachSourceConfigAttributes,
+    composedPropagator,
   )
 where
 
@@ -16,6 +17,9 @@ import Hasura.RQL.Types.SourceConfiguration (HasSourceConfiguration (..))
 import Hasura.Tracing.Class
 import Hasura.Tracing.Context
 import Hasura.Tracing.Propagator (HttpPropagator)
+import Hasura.Tracing.Propagator.B3 (b3TraceContextPropagator)
+import Hasura.Tracing.Propagator.W3CTraceContext (w3cTraceContextPropagator)
+import Hasura.Tracing.TraceId (SpanKind (SKClient))
 import Network.HTTP.Client.Transformable qualified as HTTP
 import OpenTelemetry.Trace.Core qualified as OpenTelemetry
 import OpenTelemetry.Context.ThreadLocal qualified as OpenTelemetry
@@ -39,7 +43,7 @@ traceHTTPRequest ::
 traceHTTPRequest _propagator req f = do
   let method = bsToTxt (view HTTP.method req)
       uri = view HTTP.url req
-  newSpan (method <> " " <> uri) do
+  newSpan (method <> " " <> uri) SKClient do
     maybeTraceContext <- currentContext
     case maybeTraceContext of
       Nothing -> f req
@@ -53,7 +57,7 @@ traceHTTPRequest _propagator req f = do
           , ("http.request.method", method)
           , ("http.request.uri", uri)
           , ("span.type", "http")
-          , ("span.kind", "client") 
+          , ("span.kind", "client")
           ]
         f $ over HTTP.headers (headers <>) req
 
@@ -61,3 +65,7 @@ attachSourceConfigAttributes :: forall b m. (HasSourceConfiguration b, MonadTrac
 attachSourceConfigAttributes sourceConfig = do
   let backendSourceKind = sourceConfigBackendSourceKind @b sourceConfig
   attachMetadata [("source.kind", toTxt $ backendSourceKind)]
+
+-- | Propagator composition of Trace Context and ZipKin B3.
+composedPropagator :: HttpPropagator
+composedPropagator = b3TraceContextPropagator <> w3cTraceContextPropagator

@@ -26,11 +26,13 @@ module Hasura.Server.Init.Arg.Command.Serve
     corsDomainOption,
     disableCorsOption,
     enableConsoleOption,
+    preserve401ErrorsOption,
     consoleAssetsDirOption,
     consoleSentryDsnOption,
     enableTelemetryOption,
     wsReadCookieOption,
     stringifyNumOption,
+    disableNativeQueryValidationOption,
     dangerousBooleanCollapseOption,
     backwardsCompatibleNullInNonNullableVariablesOption,
     remoteNullForwardingPolicyOption,
@@ -58,6 +60,7 @@ module Hasura.Server.Init.Arg.Command.Serve
     gracefulShutdownOption,
     webSocketConnectionInitTimeoutOption,
     enableMetadataQueryLoggingOption,
+    httpLogQueryOnlyOnErrorOption,
     defaultNamingConventionOption,
     metadataDBExtensionsSchemaOption,
     parseMetadataDefaults,
@@ -72,6 +75,8 @@ module Hasura.Server.Init.Arg.Command.Serve
     persistedQueriesTtlOption,
     remoteSchemaResponsePriorityOption,
     configuredHeaderPrecedenceOption,
+    traceQueryStatusOption,
+    serverTimeoutOption,
 
     -- * Pretty Printer
     serveCmdFooter,
@@ -84,19 +89,21 @@ import Data.HashSet qualified as HashSet
 import Data.Text qualified as Text
 import Data.Time qualified as Time
 import Database.PG.Query qualified as Query
+import Hasura.Authentication.Role (RoleName)
+import Hasura.Authentication.Role qualified as Roles
 import Hasura.Backends.Postgres.Connection.MonadTx qualified as MonadTx
 import Hasura.Cache.Bounded qualified as Bounded
 import Hasura.GraphQL.Execute.Subscription.Options qualified as Subscription.Options
 import Hasura.Logging qualified as Logging
+import Hasura.NativeQuery.Validation qualified as NativeQuery
 import Hasura.Prelude
 import Hasura.RQL.Types.Metadata (MetadataDefaults, emptyMetadataDefaults)
 import Hasura.RQL.Types.NamingCase qualified as NC
-import Hasura.RQL.Types.Roles (RoleName)
-import Hasura.RQL.Types.Roles qualified as Roles
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.Server.Auth qualified as Auth
 import Hasura.Server.Cors qualified as Cors
 import Hasura.Server.Init.Arg.PrettyPrinter qualified as PP
+import Hasura.Server.Init.Config (Preserve401ErrorsStatus (..))
 import Hasura.Server.Init.Config qualified as Config
 import Hasura.Server.Init.Env qualified as Env
 import Hasura.Server.Logging qualified as Server.Logging
@@ -156,6 +163,7 @@ serveCommandParser =
     <*> parseGracefulShutdownTimeout
     <*> parseWebSocketConnectionInitTimeout
     <*> parseEnableMetadataQueryLogging
+    <*> parseHttpLogQueryOnlyOnError
     <*> parseDefaultNamingConvention
     <*> parseExtensionsSchema
     <*> parseMetadataDefaults
@@ -169,6 +177,10 @@ serveCommandParser =
     <*> parsePersistedQueriesTtl
     <*> parseRemoteSchemaResponsePriority
     <*> parseConfiguredHeaderPrecedence
+    <*> parseTraceQueryStatus
+    <*> parseDisableNativeQueryValidation
+    <*> parsePreserve401Errors
+    <*> parseServerTimeout
 
 --------------------------------------------------------------------------------
 -- Serve Options
@@ -625,6 +637,22 @@ stringifyNumOption =
     { Config._default = Options.Don'tStringifyNumbers,
       Config._envVar = "HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES",
       Config._helpMessage = "Stringify numeric types (default: false)"
+    }
+
+parseDisableNativeQueryValidation :: Opt.Parser NativeQuery.DisableNativeQueryValidation
+parseDisableNativeQueryValidation =
+  fmap (bool NativeQuery.AlwaysValidateNativeQueries NativeQuery.NeverValidateNativeQueries)
+    $ Opt.switch
+      ( Opt.long "disable-native-query-validation"
+          <> Opt.help (Config._helpMessage disableNativeQueryValidationOption)
+      )
+
+disableNativeQueryValidationOption :: Config.Option NativeQuery.DisableNativeQueryValidation
+disableNativeQueryValidationOption =
+  Config.Option
+    { Config._default = NativeQuery.AlwaysValidateNativeQueries,
+      Config._envVar = "HASURA_GRAPHQL_DISABLE_NATIVE_QUERY_VALIDATION",
+      Config._helpMessage = "Disable Native Query validation (default: false)"
     }
 
 parseDangerousBooleanCollapse :: Opt.Parser (Maybe Options.DangerouslyCollapseBooleans)
@@ -1146,6 +1174,22 @@ enableMetadataQueryLoggingOption =
       Config._helpMessage = "Enables the query field in http-logs for metadata queries (default: false)"
     }
 
+parseHttpLogQueryOnlyOnError :: Opt.Parser Server.Logging.HttpLogQueryOnlyOnError
+parseHttpLogQueryOnlyOnError =
+  fmap (bool Server.Logging.HttpLogQueryOnlyOnErrorDisabled Server.Logging.HttpLogQueryOnlyOnErrorEnabled)
+    $ Opt.switch
+      ( Opt.long "http-log-query-only-on-error"
+          <> Opt.help (Config._helpMessage httpLogQueryOnlyOnErrorOption)
+      )
+
+httpLogQueryOnlyOnErrorOption :: Config.Option Server.Logging.HttpLogQueryOnlyOnError
+httpLogQueryOnlyOnErrorOption =
+  Config.Option
+    { Config._default = Server.Logging.HttpLogQueryOnlyOnErrorDisabled,
+      Config._envVar = "HASURA_GRAPHQL_HTTP_LOG_QUERY_ONLY_ON_ERROR",
+      Config._helpMessage = "Only add query to http log on error (default: false)"
+    }
+
 -- TODO(SOLOMON): The defaulting behavior for this occurs inside the Engine. In
 -- an isolated PR we should move that defaulting in the parsing stage.
 parseDefaultNamingConvention :: Opt.Parser (Maybe NC.NamingCase)
@@ -1360,6 +1404,14 @@ parseConfiguredHeaderPrecedence =
           <> Opt.help (Config._helpMessage configuredHeaderPrecedenceOption)
       )
 
+parseTraceQueryStatus :: Opt.Parser (Maybe Types.TraceQueryStatus)
+parseTraceQueryStatus =
+  (bool Nothing (Just Types.TraceQueryEnabled))
+    <$> Opt.switch
+      ( Opt.long "trace-sql-query"
+          <> Opt.help (Config._helpMessage traceQueryStatusOption)
+      )
+
 configuredHeaderPrecedenceOption :: Config.Option Types.HeaderPrecedence
 configuredHeaderPrecedenceOption =
   Config.Option
@@ -1369,6 +1421,51 @@ configuredHeaderPrecedenceOption =
         "Forward configured metadata headers with higher precedence than client headers"
           <> "when delivering payload to webhook for actions and input validations. (default: false)"
     }
+
+traceQueryStatusOption :: Config.Option Types.TraceQueryStatus
+traceQueryStatusOption =
+  Config.Option
+    { Config._default = Types.TraceQueryDisabled,
+      Config._envVar = "HASURA_GRAPHQL_ENABLE_QUERY_TRACING",
+      Config._helpMessage =
+        "Enable query tracing for all queries. (default: false)"
+    }
+
+parsePreserve401Errors :: Opt.Parser Preserve401ErrorsStatus
+parsePreserve401Errors =
+  (bool MapEverythingTo200 Preserve401Errors)
+    <$> Opt.switch
+      ( Opt.long "preserve-401-errors"
+          <> Opt.help (Config._helpMessage preserve401ErrorsOption)
+      )
+
+preserve401ErrorsOption :: Config.Option Preserve401ErrorsStatus
+preserve401ErrorsOption =
+  Config.Option
+    { Config._default = MapEverythingTo200,
+      Config._envVar = "HASURA_GRAPHQL_PRESERVE_401_ERRORS",
+      Config._helpMessage =
+        "Preserve HTTP 401 status codes from webhook auth responses and JWT auth failures. (default: false)"
+    }
+
+serverTimeoutOption :: Config.Option (Refined NonNegative Int)
+serverTimeoutOption =
+  Config.Option
+    { Config._default = $$(refineTH @NonNegative @Int 30),
+      Config._envVar = "HASURA_GRAPHQL_SERVER_TIMEOUT",
+      Config._helpMessage =
+        "Timeout for server requests in seconds (default: 30). Connections with slow progress may close, often after up to twice this time."
+    }
+
+parseServerTimeout :: Opt.Parser (Maybe (Refined NonNegative Int))
+parseServerTimeout =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "server-timeout"
+          <> Opt.metavar "<INTERVAL (seconds)>"
+          <> Opt.help (Config._helpMessage serverTimeoutOption)
+      )
 
 --------------------------------------------------------------------------------
 -- Pretty Printer
@@ -1477,6 +1574,8 @@ serveCmdFooter =
         Config.optionPP asyncActionsFetchBatchSizeOption,
         Config.optionPP persistedQueriesOption,
         Config.optionPP persistedQueriesTtlOption,
-        Config.optionPP configuredHeaderPrecedenceOption
+        Config.optionPP configuredHeaderPrecedenceOption,
+        Config.optionPP preserve401ErrorsOption,
+        Config.optionPP serverTimeoutOption
       ]
     eventEnvs = [Config.optionPP graphqlEventsHttpPoolSizeOption, Config.optionPP graphqlEventsFetchIntervalOption]

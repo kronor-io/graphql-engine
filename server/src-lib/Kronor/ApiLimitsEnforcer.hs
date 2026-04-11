@@ -13,7 +13,8 @@ import Hasura.RQL.Types.ApiLimit qualified as Limits
 import Hasura.RQL.Types.SchemaCache
 import Hasura.Server.Limits qualified as Limits
 import Hasura.Server.Types qualified as HGE
-import Hasura.Session
+import Hasura.Authentication.Session (getSessionVariableValue, unsafeMkSessionVariable)
+import Hasura.Authentication.User (UserInfo (..))
 import Kronor.TokenValidator (HasInvalidTokens (..))
 import Language.GraphQL.Draft.Syntax qualified as G
 import System.Timeout.Lifted (timeout)
@@ -23,7 +24,7 @@ checkGQLExecution ::
     HasInvalidTokens m,
     MonadIO m
   ) =>
-  Hasura.Session.UserInfo ->
+  UserInfo ->
   SchemaCache ->
   Protocol.GQLReq Protocol.GQLExecDoc ->
   m ()
@@ -31,7 +32,7 @@ checkGQLExecution info sc req = do
   invalidTokensRef <- askInvalidTokens
   invalidTokens <- liftIO $ STM.atomically $ STM.readTVar invalidTokensRef
 
-  case Hasura.Session.getSessionVariableValue "x-hasura-jwt-id" info._uiSession of
+  case getSessionVariableValue (unsafeMkSessionVariable ("x-hasura-jwt-id" :: Text)) info._uiSession of
     Just token ->
       case UUID.fromText token of
         Nothing -> do

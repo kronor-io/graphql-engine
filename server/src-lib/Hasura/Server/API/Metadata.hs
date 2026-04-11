@@ -6,6 +6,7 @@ module Hasura.Server.API.Metadata
   )
 where
 
+import Control.Exception.Lifted qualified as E
 import Control.Lens (_Just)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson
@@ -15,6 +16,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as T
 import GHC.Generics.Extended (constrName)
 import Hasura.App.State
+import Hasura.Authentication.User (UserInfoM)
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Eventing.Backend
@@ -73,9 +75,9 @@ import Hasura.Server.Init.FeatureFlag (HasFeatureFlagChecker)
 import Hasura.Server.Logging (SchemaSyncLog (..), SchemaSyncThreadType (TTMetadataApi))
 import Hasura.Server.Types
 import Hasura.Services
-import Hasura.Session
 import Hasura.StoredProcedure.API qualified as StoredProcedures
 import Hasura.Tracing qualified as Tracing
+import Network.WebSockets qualified as WS (ConnectionException (..))
 
 -- | The payload for the @/v1/metadata@ endpoint. See:
 --
@@ -113,7 +115,7 @@ runMetadataQuery ::
 runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetadata {..} = do
   AppEnv {..} <- askAppEnv
   let logger = _lsLogger appEnvLoggers
-  MetadataWithResourceVersion metadata currentResourceVersion <- Tracing.newSpan "fetchMetadata" $ liftEitherM fetchMetadata
+  MetadataWithResourceVersion metadata currentResourceVersion <- Tracing.newSpan "fetchMetadata" Tracing.SKInternal $ liftEitherM fetchMetadata
   let exportsMetadata = \case
         RMV1 (RMExportMetadata _) -> True
         RMV2 (RMV2ExportMetadata _) -> True
@@ -160,7 +162,7 @@ runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetad
           $ "Attempting to insert new metadata in storage"
 
         newResourceVersion <-
-          Tracing.newSpan "updateMetadataAndNotifySchemaSync"
+          Tracing.newSpan "updateMetadataAndNotifySchemaSync" Tracing.SKInternal
             $ liftEitherM
             $ updateMetadataAndNotifySchemaSync appEnvInstanceId (fromMaybe currentResourceVersion _rqlMetadataResourceVersion) modMetadata cacheInvalidations
 
@@ -177,26 +179,37 @@ runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetad
           <> showMetadataResourceVersion newResourceVersion
 
         -- save sources introspection to stored-introspection DB
-        Tracing.newSpan "storeSourcesIntrospection"
+        Tracing.newSpan "storeSourcesIntrospection" Tracing.SKInternal
           $ saveSourcesIntrospection logger sourcesIntrospection newResourceVersion
 
         -- run the schema registry action
-        Tracing.newSpan "runSchemaRegistryAction"
+        Tracing.newSpan "runSchemaRegistryAction" Tracing.SKInternal
           $ for_ schemaRegistryAction
           $ \action -> do
             liftIO $ action newResourceVersion (scInconsistentObjs (lastBuiltSchemaCache modSchemaCache)) modMetadata
 
         (_, modSchemaCache', _, _, _) <-
-          Tracing.newSpan "setMetadataResourceVersionInSchemaCache"
+          Tracing.newSpan "setMetadataResourceVersionInSchemaCache" Tracing.SKInternal
             $ setMetadataResourceVersionInSchemaCache newResourceVersion
             & runCacheRWT dynamicConfig modSchemaCache
 
         -- Close all subscriptions with 1012 code (subscribers should reconnect)
         -- and close poller threads
-        when ((_cdcCloseWebsocketsOnMetadataChangeStatus dynamicConfig) == CWMCEnabled)
-          $ Tracing.newSpan "closeWebsocketsOnMetadataChange"
-          $ liftIO
-          $ WS.runWebsocketCloseOnMetadataChangeAction closeWebsocketsOnMetadataChange
+        when ((_cdcCloseWebsocketsOnMetadataChangeStatus dynamicConfig) == CWMCEnabled) $ do
+          Tracing.newSpan "closeWebsocketsOnMetadataChange" Tracing.SKInternal
+            $ E.catch (liftIO $ WS.runWebsocketCloseOnMetadataChangeAction closeWebsocketsOnMetadataChange)
+            -- 'ConnectionClosed' seems to happen when this is run between an
+            -- unclean client shutdown and (probably) the attempt to send the
+            -- next keepalive message on the connection. It's fine to ignore
+            -- it. Other exception types have not been observed here.
+            $ \case
+              WS.ConnectionClosed -> pure ()
+              e ->
+                L.unLoggerTracing logger
+                  $ SchemaSyncLog L.LevelDebug TTMetadataApi
+                  $ String
+                  $ "When closeWebsocketsOnMetadataChange, got: "
+                  <> tshow e
 
         pure (r, modSchemaCache')
       (MaintenanceModeEnabled (), ReadOnlyModeDisabled) ->
@@ -369,10 +382,10 @@ runMetadataQueryM env schemaSampledFeatureFlags remoteSchemaPerms currentResourc
     -- NOTE: This is a good place to install tracing, since it's involved in
     -- the recursive case via "bulk":
     RMV1 q ->
-      Tracing.newSpan ("v1 " <> T.pack (constrName q))
+      Tracing.newSpan ("v1 " <> T.pack (constrName q)) Tracing.SKInternal
         $ runMetadataQueryV1M env schemaSampledFeatureFlags remoteSchemaPerms currentResourceVersion q
     RMV2 q ->
-      Tracing.newSpan ("v2 " <> T.pack (constrName q))
+      Tracing.newSpan ("v2 " <> T.pack (constrName q)) Tracing.SKInternal
         $ runMetadataQueryV2M currentResourceVersion q
 
 runMetadataQueryV1M ::
@@ -602,7 +615,7 @@ runBulkAtomic cmds = do
 
   -- Try building the schema cache using the combined modifiers. If we run into
   -- any inconsistencies, we should fail and roll back.
-  inconsistencies <- tryBuildSchemaCacheWithModifiers mdModifiers
+  inconsistencies <- tryBuildSchemaCacheWithModifiers [] mdModifiers
 
   unless (null inconsistencies)
     $ throw400WithDetail BadRequest "Schema inconsistency"

@@ -24,11 +24,13 @@ where
 
 import Control.Arrow.Extended
 import Control.Concurrent.STM qualified as STM
+import Control.Monad.Catch (MonadMask)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Environment qualified as E
 import Data.HashSet qualified as Set
 import Data.UUID (UUID)
 import Database.PG.Query qualified as PG
+import Hasura.Authentication.Role (RoleName)
 import Hasura.Backends.DataConnector.Agent.Client (AgentLicenseKey)
 import Hasura.Base.Error
 import Hasura.CredentialCache
@@ -45,7 +47,6 @@ import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.NamingCase
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache (MetadataResourceVersion)
 import Hasura.Server.Auth
@@ -150,6 +151,8 @@ data AppEnv = AppEnv
     appEnvAsyncActionsFetchBatchSize :: Int,
     appEnvPersistedQueries :: PersistedQueriesState,
     appEnvPersistedQueriesTtl :: Int,
+    appEnvPreserve401Errors :: Preserve401ErrorsStatus,
+    appServerTimeout :: Refined NonNegative Int,
     -- Kronor Stuff
     appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID),
     appEnvTracer :: OpenTelemetry.Tracer
@@ -180,7 +183,8 @@ data AppContext = AppContext
     acCloseWebsocketsOnMetadataChangeStatus :: CloseWebsocketsOnMetadataChangeStatus,
     acSchemaSampledFeatureFlags :: SchemaSampledFeatureFlags,
     acRemoteSchemaResponsePriority :: RemoteSchemaResponsePriority,
-    acHeaderPrecedence :: HeaderPrecedence
+    acHeaderPrecedence :: HeaderPrecedence,
+    acTraceQueryStatus :: TraceQueryStatus
   }
 
 -- | Collection of the LoggerCtx, the regular Logger and the PGLogger
@@ -268,6 +272,7 @@ buildAppContextRule ::
     Inc.ArrowCache m arr,
     MonadBaseControl IO m,
     MonadIO m,
+    MonadMask m,
     MonadError QErr m,
     MonadReader (L.Logger L.Hasura, HTTP.Manager) m
   ) =>
@@ -303,7 +308,8 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> 
           acCloseWebsocketsOnMetadataChangeStatus = soCloseWebsocketsOnMetadataChangeStatus,
           acSchemaSampledFeatureFlags = schemaSampledFeatureFlags,
           acRemoteSchemaResponsePriority = soRemoteSchemaResponsePriority,
-          acHeaderPrecedence = soHeaderPrecedence
+          acHeaderPrecedence = soHeaderPrecedence,
+          acTraceQueryStatus = soTraceQueryStatus
         }
   where
     buildEventEngineCtx = Inc.cache proc (httpPoolSize, fetchInterval, fetchBatchSize) -> do
@@ -355,7 +361,15 @@ initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse nullInN
       bigqueryStringNumericInput
         | EFBigQueryStringNumericInput `elem` experimentalFeatures = Options.EnableBigQueryStringNumericInput
         | otherwise = Options.DisableBigQueryStringNumericInput
-   in SQLGenCtx stringifyNum dangerousBooleanCollapse nullInNonNullableVariables remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput
+
+      noNullUnboundVariableDefault
+        | EFNoNullUnboundVariableDefault `elem` experimentalFeatures = Options.RemoveUnboundNullableVariablesFromTheQuery
+        | otherwise = Options.DefaultUnboundNullableVariablesToNull
+
+      removeEmptySubscriptionResponses
+        | EFRemoveEmptySubscriptionResponses `elem` experimentalFeatures = Options.RemoveEmptyResponses
+        | otherwise = Options.PreserveEmptyResponses
+   in SQLGenCtx stringifyNum dangerousBooleanCollapse nullInNonNullableVariables noNullUnboundVariableDefault removeEmptySubscriptionResponses remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput
 
 buildCacheStaticConfig :: AppEnv -> CacheStaticConfig
 buildCacheStaticConfig AppEnv {..} =

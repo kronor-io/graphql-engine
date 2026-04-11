@@ -1,5 +1,30 @@
-version: "3.9"
+# this Docker Compose file loads `v3-engine` along with an `ndc-postgres`
+# connector and a sample `postgres` database
+# run it with `docker compose up`, then access Graphiql at localhost:3000
+# or view traces in Jaeger at localhost:4002
+
 services:
+  engine:
+    build:
+      dockerfile: Dockerfile
+    environment:
+      - METADATA_PATH=app/metadata.json
+      - AUTHN_CONFIG_PATH=app/auth_config.json
+      - OTLP_ENDPOINT=http://jaeger:4317
+    ports:
+      - 3000:3000
+    depends_on:
+      jaeger:
+        condition: service_started
+      auth_hook:
+        condition: service_started
+    extra_hosts:
+      - local.hasura.dev=${LOCALHOST_GATEWAY:-host-gateway}
+    volumes:
+      - ./static/auth/auth_config_v3.json:/app/auth_config.json
+      - ./static/metadata.json:/app/metadata.json
+      - ./crates/open-dds/examples/reference.json:/app/crates/open-dds/examples/reference.json
+
   postgres:
     image: postgis/postgis:16-3.4
     platform: linux/amd64
@@ -8,7 +33,7 @@ services:
       - -F # turn fsync off for speed
       - -N 1000 # increase max connections from 100 so we can run more HGEs
     ports:
-      - 64001:5432
+      - 5432:5432
     environment:
       POSTGRES_PASSWORD: "password"
     volumes:
@@ -16,27 +41,44 @@ services:
         source: postgres
         target: /var/lib/postgresql/data
       - type: bind
-        source: ./engine/tests/db_definition.sql
-        target: /docker-entrypoint-initdb.d/db_definition.sql
+        source: ./crates/engine/tests/db_definition.sql
+        target: /docker-entrypoint-initdb.d/01-db_definition.sql
+        read_only: true
+      - type: bind
+        source: ./crates/engine/tests/chinook-postgres.sql
+        target: /docker-entrypoint-initdb.d/02-chinook.sql
+        read_only: true
+      - type: bind
+        source: ./crates/engine/tests/finish.sql
+        target: /docker-entrypoint-initdb.d/03-finish.sql
         read_only: true
     healthcheck:
       test:
         - CMD-SHELL
-        - psql -U "$${POSTGRES_USER:-postgres}" < /dev/null && sleep 5 && psql -U "$${POSTGRES_USER:-postgres}" < /dev/null
-      start_period: 5s
-      interval: 5s
-      timeout: 10s
-      retries: 20
-  reference_agent:
-    build: https://github.com/hasura/ndc-spec.git#v0.1.0-rc.18
-    ports:
-      - 8102:8100
+        - psql -U "$${POSTGRES_USER:-postgres}" finished < /dev/null
+      start_period: 2s
+      interval: 2s
+      timeout: 1s
+      retries: 5
+
   auth_hook:
+    build:
+      dockerfile: dev-auth-webhook.Dockerfile
+    # this tag will only be found on images built in CI,
+    # otherwise we build from Dockerfile
+    image: build.internal/dev-auth-webhook-x86_64-linux:ci
+    environment:
+      OTLP_ENDPOINT: "http://jaeger:4317"
+      RUST_LOG: debug
     ports:
       - "3050:3050"
-    build: ./hasura-authn-webhook/dev-auth-webhook
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  # browse traces at: http://localhost:16686/search
   jaeger:
-    image: jaegertracing/all-in-one:1.37
+    image: jaegertracing/all-in-one:1.55
     restart: always
     ports:
       - 5775:5775/udp
@@ -50,65 +92,90 @@ services:
       - 4317:4317 # OTLP gRPC
       - 4318:4318 # OTLP HTTP
       - 9411:9411
+      - 16686:16686
     environment:
-      COLLECTOR_OTLP_ENABLED: 'true'
-      COLLECTOR_ZIPKIN_HOST_PORT: '9411'
-  postgres_connector:
-    image: ghcr.io/hasura/ndc-postgres:dev-main-0452625e7
+      COLLECTOR_OTLP_ENABLED: "true"
+      COLLECTOR_ZIPKIN_HOST_PORT: "9411"
+
+  postgres_connector_ndc_v01:
+    image: ghcr.io/hasura/ndc-postgres:dev-main
     ports:
-      - 8100:8100
+      - 8080:8080
+    environment:
+      CONNECTION_URI: "postgresql://postgres:password@postgres"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://jaeger:4317"
+      OTEL_SERVICE_NAME: "ndc-postgres"
+      RUST_LOG: info
     volumes:
-      - ./engine/tests/pg_ndc_config.json:/config.json
+      - type: bind
+        source: ./crates/engine/tests/ndc-postgres-configuration
+        target: /etc/connector
+        read_only: true
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["serve", "--configuration", "/config.json", "--otlp-endpoint", "http://jaeger:4317"]
+
+  postgres_connector:
+    image: ghcr.io/hasura/ndc-postgres:dev-benoit-eng-362-update-ndc-postgres-to-ndc_models-020
+    ports:
+      - 8082:8080
+    environment:
+      CONNECTION_URI: "postgresql://postgres:password@postgres"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://jaeger:4317"
+      OTEL_SERVICE_NAME: "ndc-postgres"
+      RUST_LOG: info
+    volumes:
+      - type: bind
+        source: ./crates/engine/tests/ndc-postgres-configuration
+        target: /etc/connector
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   custom_connector:
     build:
-      context: .
-      target: builder
+      dockerfile: custom-connector.Dockerfile
+    # this tag will only be found on images built in CI
+    # otherwise we build from Dockerfile
+    image: build.internal/custom-connector-x86_64-linux:ci
     ports:
-      - 8101:8101
+      - "8102:8102"
+    environment:
+      RUST_LOG: info
+      ENABLE_RELATIONSHIP_SUPPORT: "1" # Enabled
     healthcheck:
-      test: curl --fail http://localhost:8101/schema || exit 1
+      test: curl -fsS http://localhost:8102/schema
       start_period: 5s
       interval: 5s
       timeout: 10s
       retries: 20
-    command: ["sh", "-c", "cargo run --bin agent"]
-  engine:
-    build:
-      context: .
-      target: builder
-    depends_on:
-      - reference_agent
-      - jaeger
-      - auth_hook
 
-    command: ["sh", "-c", "cargo run --bin engine -- --metadata-path $METADATA_PATH --otlp-endpoint http://jaeger:4317 --authn-config-path $AUTHN_CONFIG_PATH"]
-    ports:
-      # Binding to localhost:3001 avoids conflict with dev_setup
-      - 3001:3000
-
-  dev_setup:
+  custom_connector_no_relationships:
     build:
-      context: .
-      target: builder
-    depends_on:
-      - jaeger
-      - auth_hook
-      - postgres
-      - postgres_connector
-      - custom_connector
-    volumes:
-      - ./tracing-util:/app/tracing-util
-      - ./lang-graphql:/app/lang-graphql
-      - ./open-dds:/app/open-dds
-      - ./engine:/app/engine
-      - ./hasura-authn-core:/app/hasura-authn-core
-      - ./hasura-authn-webhook:/app/hasura-authn-webhook
+      dockerfile: custom-connector.Dockerfile
+    # this tag will only be found on images built in CI
+    # otherwise we build from Dockerfile
+    image: build.internal/custom-connector-x86_64-linux:ci
     ports:
-      - 3000:3000
+      - "8103:8102"
+    environment:
+      RUST_LOG: info
+      ENABLE_RELATIONSHIP_SUPPORT: "0" # Disabled
+    healthcheck:
+      test: curl -fsS http://localhost:8102/schema
+      start_period: 5s
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  custom_connector_ndc_v01:
+    # This is the v3-engine commit version before the custom connector got upgraded to ndc_models v0.2.0
+    image: ghcr.io/hasura/v3-custom-connector:bef8a750ca31b067952247ad348683a4faa843f5
+    ports:
+      - "8101:8101"
+    environment:
+      RUST_LOG: info
 
 volumes:
   postgres:
