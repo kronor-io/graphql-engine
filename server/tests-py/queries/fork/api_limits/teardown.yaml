@@ -1,0 +1,21 @@
+type: bulk
+args:
+
+- type: untrack_function
+  args:
+    schema: public
+    name: fork_slow_function
+
+- type: drop_relationship
+  args:
+    table:
+      name: fork_authors
+      schema: public
+    relationship: articles
+
+- type: run_sql
+  args:
+    sql: |
+      DROP FUNCTION IF EXISTS fork_slow_function();
+      DROP TABLE IF EXISTS fork_articles CASCADE;
+      DROP TABLE IF EXISTS fork_authors CASCADE;

@@ -1,0 +1,31 @@
+type: bulk
+args:
+
+- type: run_sql
+  args:
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS tenant;
+      CREATE TABLE IF NOT EXISTS tenant.tokens (
+        token_id UUID NOT NULL,
+        blocked BOOLEAN NOT NULL DEFAULT false,
+        token_type TEXT NOT NULL
+      );
+      -- A simple test table for queries
+      CREATE TABLE IF NOT EXISTS fork_items (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL
+      );
+      INSERT INTO fork_items (id, name) VALUES (1, 'Item 1') ON CONFLICT DO NOTHING;
+
+- type: track_table
+  args:
+    schema: public
+    name: fork_items
+
+- type: create_select_permission
+  args:
+    table: fork_items
+    role: user
+    permission:
+      columns: '*'
+      filter: {}
