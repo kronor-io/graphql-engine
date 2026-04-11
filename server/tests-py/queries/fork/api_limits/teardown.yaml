@@ -1,0 +1,10 @@
+type: bulk
+args:
+
+- type: run_sql
+  args:
+    sql: |
+      DROP FUNCTION IF EXISTS fork_slow_function() CASCADE;
+      DROP TABLE IF EXISTS fork_articles CASCADE;
+      DROP TABLE IF EXISTS fork_authors CASCADE;
+    cascade: true

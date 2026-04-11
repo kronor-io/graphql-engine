@@ -224,6 +224,7 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
     withOptionDefault rsoCloseWebsocketsOnMetadataChangeStatus closeWebsocketsOnMetadataChangeOption
   soMaxTotalHeaderLength <- withOptionDefault rsoMaxTotalHeaderLength maxTotalHeaderLengthOption
   soMaxRequestBodyLength <- withOptionDefault rsoMaxRequestBodyLength maxRequestBodyLengthOption
+  soTokenPollInterval <- withOptionDefault rsoTokenPollInterval tokenPollIntervalOption
   soTriggersErrorLogLevelStatus <- withOptionDefault rsoTriggersErrorLogLevelStatus triggersErrorLogLevelStatusOption
   soAsyncActionsFetchBatchSize <- withOptionDefault rsoAsyncActionsFetchBatchSize asyncActionsFetchBatchSizeOption
   soPersistedQueries <- withOptionDefault rsoPersistedQueries persistedQueriesOption

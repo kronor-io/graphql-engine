@@ -1,0 +1,90 @@
+type: bulk
+args:
+
+- type: run_sql
+  args:
+    sql: |
+      CREATE TABLE IF NOT EXISTS fork_authors (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS fork_articles (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT,
+        author_id INTEGER REFERENCES fork_authors(id)
+      );
+      -- A function that sleeps for 3 seconds (for time limit tests)
+      CREATE OR REPLACE FUNCTION fork_slow_function()
+      RETURNS SETOF fork_articles AS $$
+        SELECT pg_sleep(3);
+        SELECT * FROM fork_articles;
+      $$ LANGUAGE sql STABLE;
+
+      INSERT INTO fork_authors (id, name) VALUES (1, 'Author 1') ON CONFLICT DO NOTHING;
+      INSERT INTO fork_articles (id, title, content, author_id) VALUES (1, 'Article 1', 'Content 1', 1) ON CONFLICT DO NOTHING;
+
+- type: track_table
+  args:
+    schema: public
+    name: fork_authors
+
+- type: track_table
+  args:
+    schema: public
+    name: fork_articles
+
+- type: create_object_relationship
+  args:
+    name: author
+    table: fork_articles
+    using:
+      foreign_key_constraint_on: author_id
+
+- type: create_array_relationship
+  args:
+    table: fork_authors
+    name: articles
+    using:
+      foreign_key_constraint_on:
+        table: fork_articles
+        column: author_id
+
+- type: track_function
+  args:
+    schema: public
+    name: fork_slow_function
+
+# Select permissions for 'user' role
+- type: create_select_permission
+  args:
+    table: fork_articles
+    role: user
+    permission:
+      columns: '*'
+      filter: {}
+
+- type: create_select_permission
+  args:
+    table: fork_authors
+    role: user
+    permission:
+      columns: '*'
+      filter: {}
+
+# Select permissions for 'anonymous' role
+- type: create_select_permission
+  args:
+    table: fork_articles
+    role: anonymous
+    permission:
+      columns: '*'
+      filter: {}
+
+- type: create_select_permission
+  args:
+    table: fork_authors
+    role: anonymous
+    permission:
+      columns: '*'
+      filter: {}
