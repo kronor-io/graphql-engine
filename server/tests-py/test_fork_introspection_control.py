@@ -5,7 +5,6 @@ Allows disabling introspection for specific roles. Admin-secret requests
 always bypass the restriction.
 """
 
-import json
 import pytest
 import jwt
 import requests

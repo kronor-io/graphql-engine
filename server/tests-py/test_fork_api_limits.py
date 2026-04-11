@@ -7,7 +7,6 @@ Note: GraphQL always returns HTTP 200. Limit violations are returned as
 errors in the response body, not via HTTP status codes.
 """
 
-import json
 import pytest
 import jwt
 import requests

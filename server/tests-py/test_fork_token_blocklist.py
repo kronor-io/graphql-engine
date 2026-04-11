@@ -5,7 +5,6 @@ The engine polls tenant.tokens for blocked tokens and rejects requests
 carrying a blocked jti. Uses a short poll interval for faster tests.
 """
 
-import json
 import time
 import uuid
 
