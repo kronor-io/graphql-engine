@@ -1,0 +1,25 @@
+type: bulk
+args:
+
+- type: run_sql
+  args:
+    sql: |
+      CREATE TABLE IF NOT EXISTS conn_routing_test (
+        id SERIAL PRIMARY KEY,
+        source TEXT NOT NULL
+      );
+      DELETE FROM conn_routing_test;
+      INSERT INTO conn_routing_test (id, source) VALUES (1, 'primary');
+
+- type: track_table
+  args:
+    schema: public
+    name: conn_routing_test
+
+- type: create_select_permission
+  args:
+    table: conn_routing_test
+    role: user
+    permission:
+      columns: '*'
+      filter: {}

@@ -301,3 +301,90 @@ websockets library before rate limiting and are not counted.
 - CLI options: `server/src-lib/Hasura/Server/Init/Arg/Command/Serve.hs`
 - Size limit wiring: `server/src-lib/Hasura/Server/Init.hs` (ConnectionOptions)
 - Rate limit integration: `server/src-lib/Hasura/GraphQL/Transport/WebSocket/Server.hs` (rcv loop)
+
+---
+
+## 7. Dynamic Database Connection Routing (Connection Templates)
+
+Enables Hasura's connection template feature, which was previously gated behind
+the Cloud/Enterprise edition. Allows routing GraphQL queries to different
+database connection pools based on Kriti templates that evaluate request context
+(session variables, headers, query type).
+
+### How It Works
+
+1. A **connection template** (Kriti expression) is configured on a Postgres source
+2. **Connection set members** provide named alternative database connections
+3. On each non-admin GraphQL request, the template evaluates with the request context
+4. The result determines which pool handles the query: primary, read replicas,
+   or a named connection set member
+5. Admin requests bypass template resolution and always use the primary pool
+
+### Routing Targets
+
+| Template Result       | Behavior                                              |
+|-----------------------|-------------------------------------------------------|
+| `$.primary`           | Route to primary database                             |
+| `$.read_replicas`     | Route to a random read replica (fallback to primary)  |
+| `$.default`           | Reads → replicas, writes → primary                    |
+| `$.connection_set.X`  | Route to named connection set member `X`              |
+
+### Configuration
+
+Configured as part of the source configuration via `pg_add_source`:
+
+```json
+POST /v1/metadata
+{
+  "type": "pg_add_source",
+  "args": {
+    "name": "default",
+    "configuration": {
+      "connection_info": {
+        "database_url": "postgresql://..."
+      },
+      "read_replicas": [
+        { "database_url": "postgresql://replica1/..." }
+      ],
+      "connection_set": [
+        {
+          "name": "analytics",
+          "connection_info": { "database_url": "postgresql://analytics/..." }
+        }
+      ],
+      "connection_template": {
+        "version": 1,
+        "template": "{{ if ($.request.session.x-hasura-role == \"analyst\") $.connection_set.analytics else $.primary }}"
+      }
+    }
+  }
+}
+```
+
+### Testing Templates
+
+Use the `pg_test_connection_template` metadata API to test template resolution
+without executing a query:
+
+```json
+POST /v1/metadata
+{
+  "type": "pg_test_connection_template",
+  "args": {
+    "source_name": "default",
+    "request_context": {
+      "headers": {},
+      "session": { "x-hasura-role": "user", "x-hasura-route": "analytics" },
+      "query": { "operation_name": "MyQuery", "operation_type": "query" }
+    }
+  }
+}
+```
+
+### Code
+
+- Pool creation & template config: `server/src-lib/Hasura/App.hs` (`mkPgSourceResolver`)
+- Connection routing exec context: `server/src-lib/Hasura/Backends/Postgres/Execute/Types.hs` (`mkPGExecCtxWithConnRouting`)
+- Template resolution: `server/src-lib/Hasura/Backends/Postgres/Execute/ConnectionTemplate.hs`
+- Metadata types: `server/src-lib/Hasura/Backends/Postgres/Connection/Settings.hs`
+- Test API: `server/src-lib/Hasura/RQL/DDL/ConnectionTemplate.hs`
