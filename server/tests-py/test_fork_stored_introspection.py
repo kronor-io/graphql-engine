@@ -9,6 +9,9 @@ Verifies that:
    schema (with an inconsistency warning) instead of disappearing entirely.
 """
 
+import copy
+import json
+
 import pytest
 import requests
 import sqlalchemy
@@ -100,7 +103,6 @@ class TestStoredIntrospection:
                 row = result.fetchone()
 
             assert row is not None, "No stored introspection found"
-            import json
             introspection = json.loads(row[0])
             backend = introspection.get("backend_introspection", [])
             source_names = [pair[0] for pair in backend if isinstance(pair, list)]
@@ -206,7 +208,6 @@ class TestStoredIntrospection:
 def _deep_copy_metadata_with_bad_url(metadata):
     """Return a copy of the metadata with the default source's connection_info
     pointing to an unreachable URL."""
-    import copy
     bad = copy.deepcopy(metadata)
     for source in bad.get("sources", []):
         if source.get("name") == "default":
