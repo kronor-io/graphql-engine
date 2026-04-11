@@ -178,8 +178,7 @@ import Kronor.ApiLimitsEnforcer qualified as Kronor
 import Kronor.TokenValidator qualified as Kronor
 import Kronor.OpenTelemetryReporter qualified as Kronor
 import Kronor.IntrospectionOptionsEnforcer qualified as Kronor
-
-import Data.HashMap.Strict.NonEmpty qualified as NEMap
+import Kronor.ConnectionRouting qualified as Kronor
 
 --------------------------------------------------------------------------------
 -- Error handling (move to another module!)
@@ -1562,70 +1561,11 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   pgPool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
   connInfoWithFinalizer <- liftIO $ mkConnInfoWithFinalizer connInfo (pure ())
 
-  -- Create read replica pools
-  (replicaConnInfos, replicaPools) <- case pccReadReplicas config of
-    Nothing -> pure (Nothing, Nothing)
-    Just replicas -> do
-      results <- forM replicas $ \replicaInfo -> do
-        let PostgresSourceConnInfo rUrlConf rPoolSettings rAllowPrepare _rIsoLevel _ = replicaInfo
-            (rMaxConns, rIdleTimeout, rRetries, rConnLifetime) = getDefaultPGPoolSettingIfNotExists rPoolSettings defaultPostgresPoolSettings
-        rConnDetails <- resolveUrlConf env rUrlConf
-        let rConnInfo = PG.ConnInfo rRetries rConnDetails
-            rConnParams =
-              PG.defaultConnParams
-                { PG.cpIdleTime = rIdleTimeout,
-                  PG.cpConns = rMaxConns,
-                  PG.cpAllowPrepare = rAllowPrepare,
-                  PG.cpMbLifetime = rConnLifetime,
-                  PG.cpTimeout = ppsPoolTimeout =<< rPoolSettings
-                }
-        pool <- liftIO $ Q.initPGPool rConnInfo context rConnParams pgLogger
-        ciwf <- liftIO $ mkConnInfoWithFinalizer rConnInfo (pure ())
-        pure (ciwf, pool)
-      let (ciwfs, pools) = unzipNE results
-      pure (Just ciwfs, Just pools)
+  -- Resolve read replica pools, connection set pools, and template config
+  Kronor.ResolvedSourcePools {..} <- Kronor.resolveSourcePools pgLogger env context config
 
-  -- Create connection set pools and ConnInfo map
-  (connSetInfoMap, connSetPoolMap) <- case pccConnectionSet config of
-    Nothing -> pure (mempty, mempty)
-    Just (PostgresConnectionSet neMap) -> do
-      let members = NEMap.toList neMap
-      results <- forM members $ \(name, PostgresConnectionSetMember _ csConnInfo) -> do
-        let PostgresSourceConnInfo csUrlConf csPoolSettings csAllowPrepare _csIsoLevel _ = csConnInfo
-            (csMaxConns, csIdleTimeout, csRetries, csConnLifetime) = getDefaultPGPoolSettingIfNotExists csPoolSettings defaultPostgresPoolSettings
-        csConnDetails <- resolveUrlConf env csUrlConf
-        let csConnInfo' = PG.ConnInfo csRetries csConnDetails
-            csConnParams =
-              PG.defaultConnParams
-                { PG.cpIdleTime = csIdleTimeout,
-                  PG.cpConns = csMaxConns,
-                  PG.cpAllowPrepare = csAllowPrepare,
-                  PG.cpMbLifetime = csConnLifetime,
-                  PG.cpTimeout = ppsPoolTimeout =<< csPoolSettings
-                }
-        pool <- liftIO $ Q.initPGPool csConnInfo' context csConnParams pgLogger
-        pure (name, csConnInfo', pool)
-      let infoMap = HashMap.fromList [(n, ci) | (n, ci, _) <- results]
-          poolMap = HashMap.fromList [(n, p) | (n, _, p) <- results]
-      pure (infoMap, poolMap)
-
-  -- Build connection template config
-  let connectionTemplateConfig = case pccConnectionTemplate config of
-        Nothing -> ConnTemplate_NotConfigured
-        Just connTemplate ->
-          let memberNames = HashMap.keys connSetInfoMap
-              resolver = ConnectionTemplateResolver $ \sessionVars headers queryCtx ->
-                resolvePostgresConnectionTemplate connTemplate memberNames sessionVars headers queryCtx
-           in ConnTemplate_Resolver (ktParsedAST $ ctTemplate connTemplate) resolver
-
-  let pgExecCtx = mkPGExecCtxWithConnRouting isoLevel pgPool replicaPools connSetPoolMap NeverResizePool
-  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer replicaConnInfos mempty (pccExtensionsSchema config) connSetInfoMap connectionTemplateConfig
-  where
-    -- Unzip a NonEmpty of pairs into a pair of NonEmpty lists
-    unzipNE :: NonEmpty (a, b) -> (NonEmpty a, NonEmpty b)
-    unzipNE ((a, b) :| rest) =
-      let (as, bs) = unzip rest
-       in (a :| as, b :| bs)
+  let pgExecCtx = Kronor.mkPGExecCtxWithConnRouting isoLevel pgPool rspReplicaPools rspConnSetPoolMap NeverResizePool
+  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer rspReplicaConnInfos mempty (pccExtensionsSchema config) rspConnSetInfoMap rspConnectionTemplateConfig
 
 mkMSSQLSourceResolver :: SourceResolver 'MSSQL
 mkMSSQLSourceResolver env _name (MSSQLConnConfiguration connInfo _) = runExceptT do

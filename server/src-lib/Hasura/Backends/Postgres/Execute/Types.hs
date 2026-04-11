@@ -8,7 +8,6 @@ module Hasura.Backends.Postgres.Execute.Types
     PGExecCtxInfo (..),
     PGExecTxType (..),
     mkPGExecCtx,
-    mkPGExecCtxWithConnRouting,
     mkTxErrorHandler,
     defaultTxErrorHandler,
     dmlTxErrorHandler,
@@ -17,6 +16,7 @@ module Hasura.Backends.Postgres.Execute.Types
 
     -- * Execution in a Postgres Source
     PGSourceConfig (..),
+    ConnInfoWithFinalizer (..),
     getConnInfo,
     mkConnInfoWithFinalizer,
     ConnectionTemplateConfig (..),
@@ -64,7 +64,6 @@ import Hasura.SQL.Types (ExtensionsSchema, toSQL)
 import Kriti.Error qualified as Kriti
 import Kriti.Parser qualified as Kriti
 import Network.HTTP.Types qualified as HTTP
-import System.Random (randomRIO)
 
 -- See Note [Existentially Quantified Types]
 type RunTx =
@@ -144,71 +143,6 @@ mkPGExecCtx defaultIsoLevel pool resizeStrategy =
             _srpsReadReplicasResized = False,
             _srpsConnectionSet = []
           }
-
--- | Creates a Postgres execution context with connection routing support.
--- Routes transactions to different pools based on the resolved connection template.
-mkPGExecCtxWithConnRouting ::
-  PG.TxIsolation ->
-  PG.PGPool ->
-  Maybe (NonEmpty PG.PGPool) ->
-  HashMap PostgresConnectionSetMemberName PG.PGPool ->
-  ResizePoolStrategy ->
-  PGExecCtx
-mkPGExecCtxWithConnRouting defaultIsoLevel primaryPool replicaPools connSetPools resizeStrategy =
-  PGExecCtx
-    { _pecDestroyConnections = do
-        PG.destroyPGPool primaryPool
-        for_ replicaPools (mapM_ PG.destroyPGPool)
-        mapM_ PG.destroyPGPool connSetPools,
-      _pecResizePools = \serverReplicas ->
-        case resizeStrategy of
-          NeverResizePool -> pure noPoolsResizedSummary
-          ResizePool maxConnections -> do
-            resizePostgresPool primaryPool maxConnections serverReplicas
-            let replicasResized = isJust replicaPools
-            for_ replicaPools $ \replicas ->
-              mapM_ (\p -> resizePostgresPool p maxConnections serverReplicas) replicas
-            mapM_ (\p -> resizePostgresPool p maxConnections serverReplicas) connSetPools
-            pure
-              $ SourceResizePoolSummary
-                { _srpsPrimaryResized = True,
-                  _srpsReadReplicasResized = replicasResized,
-                  _srpsConnectionSet = map toTxt (Map.keys connSetPools)
-                },
-      _pecRunTx = \(PGExecCtxInfo txType pgExecFrom) tx -> do
-        pool <- selectPool pgExecFrom txType
-        case txType of
-          NoTxRead -> PG.runTx' pool tx
-          NoTxReadWrite -> PG.runTx' pool tx
-          Tx txAccess (Just isolationLevel) -> PG.runTx pool (isolationLevel, Just txAccess) tx
-          Tx txAccess Nothing -> PG.runTx pool (defaultIsoLevel, Just txAccess) tx
-    }
-  where
-    selectPool :: (MonadIO m, MonadError QErr m) => PGExecFrom -> PGExecTxType -> m PG.PGPool
-    selectPool pgExecFrom txType = case pgExecFrom of
-      GraphQLQuery (Just (PCTOPrimary _)) -> pure primaryPool
-      GraphQLQuery (Just (PCTOReadReplicas _)) -> selectReplica
-      GraphQLQuery (Just (PCTOConnectionSet name)) ->
-        case Map.lookup name connSetPools of
-          Just pool -> pure pool
-          Nothing ->
-            throw400 NotFound
-              $ "Connection set member '"
-              <> toTxt name
-              <> "' not found"
-      GraphQLQuery (Just (PCTODefault _)) -> case txType of
-        NoTxRead -> selectReplica
-        Tx PG.ReadOnly _ -> selectReplica
-        _ -> pure primaryPool
-      _ -> pure primaryPool
-
-    selectReplica :: (MonadIO m) => m PG.PGPool
-    selectReplica = case replicaPools of
-      Nothing -> pure primaryPool
-      Just replicas -> liftIO $ do
-        let replicaList = toList replicas
-        idx <- randomRIO (0, length replicaList - 1)
-        pure $ replicaList !! idx
 
 -- | Resize Postgres pool by setting the number of connections equal to
 -- allowed maximum connections across all server instances divided by
