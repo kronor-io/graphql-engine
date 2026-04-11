@@ -2,6 +2,9 @@
 Black-box tests for the fork's API Limits feature.
 
 Covers: depth limit, node limit, time limit, batch limit, and lifecycle.
+
+Note: GraphQL always returns HTTP 200. Limit violations are returned as
+errors in the response body, not via HTTP status codes.
 """
 
 import json
@@ -79,6 +82,22 @@ def remove_api_limits(hge_ctx):
     return resp
 
 
+def assert_no_errors(resp, msg=""):
+    """Assert the GraphQL response has data and no errors."""
+    body = resp.json()
+    assert "data" in body, f"{msg} Expected data, got: {body}"
+    assert "errors" not in body, f"{msg} Unexpected errors: {body.get('errors')}"
+
+
+def assert_graphql_error(resp, error_substring, msg=""):
+    """Assert the GraphQL response contains an error with the given substring."""
+    body = resp.json()
+    errors = body.get("errors", [])
+    assert len(errors) > 0, f"{msg} Expected errors containing '{error_substring}', got: {body}"
+    assert any(error_substring in str(e) for e in errors), \
+        f"{msg} Expected error containing '{error_substring}', got: {errors}"
+
+
 # ---------------------------------------------------------------------------
 # Depth Limit
 # ---------------------------------------------------------------------------
@@ -102,7 +121,6 @@ class TestDepthLimit:
 
     def test_query_at_depth_limit_succeeds(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, depth_limit={"global": 5})
-        # Depth: fork_articles(1) > author(2) > articles(3) > author(4) > name(5)
         query = """
         query {
           fork_articles {
@@ -117,13 +135,10 @@ class TestDepthLimit:
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert "data" in body, f"Expected data in response, got: {body}"
+        assert_no_errors(resp)
 
     def test_query_exceeding_depth_limit_rejected(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, depth_limit={"global": 3})
-        # Depth 5, exceeds global limit of 3
         query = """
         query {
           fork_articles {
@@ -138,41 +153,45 @@ class TestDepthLimit:
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 429, f"Expected 429, got {resp.status_code}: {resp.text}"
+        assert_graphql_error(resp, "depth limit exceeded")
 
     def test_per_role_override_respected(self, hge_ctx, jwt_configuration):
+        # Depth counting: leaf=0, nested=1+max(children).
+        # fork_articles > author > articles > title: depth = 3
         set_api_limits(hge_ctx, depth_limit={"global": 10, "per_role": {"user": 2}})
-        # Depth 3: fork_articles > author > name
         query = """
         query {
           fork_articles {
             author {
-              name
+              articles {
+                title
+              }
             }
           }
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 429, f"Expected 429 for user, got {resp.status_code}: {resp.text}"
+        assert_graphql_error(resp, "depth limit exceeded")
 
     def test_role_without_override_uses_global(self, hge_ctx, jwt_configuration):
+        # Same query but as anonymous (no per-role override), within global limit
         set_api_limits(hge_ctx, depth_limit={"global": 10, "per_role": {"user": 2}})
-        # Depth 3, within global limit of 10
         query = """
         query {
           fork_articles {
             author {
-              name
+              articles {
+                title
+              }
             }
           }
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "anonymous")
-        assert resp.status_code == 200, f"Expected 200 for anonymous, got {resp.status_code}: {resp.text}"
+        assert_no_errors(resp)
 
     def test_introspection_fields_exempt(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, depth_limit={"global": 1})
-        # Deep introspection query — depth comes from __schema/__type
         query = """
         query {
           __schema {
@@ -189,7 +208,7 @@ class TestDepthLimit:
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, f"Expected 200 for introspection, got {resp.status_code}: {resp.text}"
+        assert_no_errors(resp)
 
     def test_limits_disabled_globally(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, depth_limit={"global": 1}, disabled=True)
@@ -205,7 +224,7 @@ class TestDepthLimit:
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, f"Expected 200 when disabled, got {resp.status_code}: {resp.text}"
+        assert_no_errors(resp)
 
 
 # ---------------------------------------------------------------------------
@@ -231,27 +250,46 @@ class TestNodeLimit:
 
     def test_query_at_node_limit_succeeds(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, node_limit={"global": 10})
-        # A few nodes; limit is generous enough to pass
         query = "query { fork_articles { id title content } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, resp.text
+        assert_no_errors(resp)
 
     def test_query_exceeding_node_limit_rejected(self, hge_ctx, jwt_configuration):
+        # Node counting: only fields with nested sub-selections count as 1.
+        # fork_articles(1) > author(1) > articles(1) = 3 nodes
         set_api_limits(hge_ctx, node_limit={"global": 2})
-        # 4 nodes, exceeds limit of 2
-        query = "query { fork_articles { id title content } }"
+        query = """
+        query {
+          fork_articles {
+            author {
+              articles {
+                title
+              }
+            }
+          }
+        }
+        """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 429, f"Expected 429, got {resp.status_code}: {resp.text}"
+        assert_graphql_error(resp, "too many nodes")
 
     def test_per_role_override_respected(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, node_limit={"global": 100, "per_role": {"user": 2}})
-        query = "query { fork_articles { id title content } }"
+        query = """
+        query {
+          fork_articles {
+            author {
+              articles {
+                title
+              }
+            }
+          }
+        }
+        """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 429, f"Expected 429 for user, got {resp.status_code}: {resp.text}"
+        assert_graphql_error(resp, "too many nodes")
 
     def test_introspection_fields_exempt(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, node_limit={"global": 2})
-        # __typename is an introspection field and should be exempt
         query = """
         query {
           fork_articles {
@@ -261,8 +299,7 @@ class TestNodeLimit:
         }
         """
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        # fork_articles + id = 2 nodes; __typename is exempt
-        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        assert_no_errors(resp)
 
 
 # ---------------------------------------------------------------------------
@@ -290,26 +327,29 @@ class TestTimeLimit:
         set_api_limits(hge_ctx, time_limit={"global": 30})
         query = "query { fork_articles { id title } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, resp.text
+        assert_no_errors(resp)
 
     def test_slow_query_exceeding_time_limit_killed(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, time_limit={"global": 1})
-        # fork_slow_function does pg_sleep(3), exceeding the 1-second limit
         query = "query { fork_slow_function { id title } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 500, f"Expected 500, got {resp.status_code}: {resp.text}"
         body = resp.json()
         errors = body.get("errors", [])
         assert any(
             "time-limit-exceeded" in str(e) or "timed out" in str(e).lower()
             for e in errors
-        ), f"Expected time-limit-exceeded error, got: {errors}"
+        ), f"Expected time-limit-exceeded error, got: {body}"
 
     def test_per_role_override_respected(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, time_limit={"global": 30, "per_role": {"user": 1}})
         query = "query { fork_slow_function { id title } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 500, f"Expected 500 for user, got {resp.status_code}: {resp.text}"
+        body = resp.json()
+        errors = body.get("errors", [])
+        assert any(
+            "time-limit-exceeded" in str(e) or "timed out" in str(e).lower()
+            for e in errors
+        ), f"Expected time-limit-exceeded error, got: {body}"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +382,9 @@ class TestBatchLimit:
         ]
         resp = graphql_batch(hge_ctx, queries, jwt_configuration, "user")
         assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Batch response is a list of results
+        assert isinstance(body, list), f"Expected list response, got: {body}"
 
     def test_batch_exceeding_limit_rejected(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, batch_limit={"global": 2})
@@ -351,7 +394,7 @@ class TestBatchLimit:
             "query { fork_articles { content } }",
         ]
         resp = graphql_batch(hge_ctx, queries, jwt_configuration, "user")
-        assert resp.status_code == 429, f"Expected 429, got {resp.status_code}: {resp.text}"
+        assert_graphql_error(resp, "too many batched requests")
 
     def test_per_role_override_respected(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, batch_limit={"global": 10, "per_role": {"user": 1}})
@@ -360,7 +403,7 @@ class TestBatchLimit:
             "query { fork_articles { title } }",
         ]
         resp = graphql_batch(hge_ctx, queries, jwt_configuration, "user")
-        assert resp.status_code == 429, f"Expected 429 for user, got {resp.status_code}: {resp.text}"
+        assert_graphql_error(resp, "too many batched requests")
 
 
 # ---------------------------------------------------------------------------
@@ -388,18 +431,18 @@ class TestLimitLifecycle:
         set_api_limits(hge_ctx, depth_limit={"global": 1})
         query = "query { fork_articles { author { name } } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 429
+        assert_graphql_error(resp, "depth limit exceeded")
 
     def test_limits_removed_after_remove(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, depth_limit={"global": 1})
         remove_api_limits(hge_ctx)
         query = "query { fork_articles { author { name } } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, resp.text
+        assert_no_errors(resp)
 
     def test_updating_limits_replaces_previous(self, hge_ctx, jwt_configuration):
         set_api_limits(hge_ctx, depth_limit={"global": 1})
         set_api_limits(hge_ctx, depth_limit={"global": 10})
         query = "query { fork_articles { author { name } } }"
         resp = graphql(hge_ctx, query, jwt_configuration, "user")
-        assert resp.status_code == 200, resp.text
+        assert_no_errors(resp)

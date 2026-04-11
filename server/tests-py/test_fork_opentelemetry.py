@@ -3,9 +3,12 @@ Black-box tests for the fork's OpenTelemetry Tracing feature.
 
 Verifies that GraphQL operations produce traces that are exported to Jaeger.
 The tests query the Jaeger HTTP API to inspect collected spans.
+
+Required environment variables (set by docker-compose port discovery):
+  OTEL_EXPORTER_OTLP_ENDPOINT - OTLP HTTP endpoint (e.g. http://localhost:4318)
+  JAEGER_QUERY_URL             - Jaeger query API (e.g. http://localhost:16686)
 """
 
-import json
 import os
 import time
 
@@ -13,7 +16,6 @@ import pytest
 import requests
 
 
-JAEGER_QUERY_URL = os.environ.get("JAEGER_QUERY_URL", "http://localhost:16686")
 OTEL_SERVICE_NAME = "graphql-engine-test"
 
 
@@ -30,14 +32,17 @@ def graphql(hge_ctx, query):
     )
 
 
-def wait_for_traces(service, operation=None, retries=10, delay=1.0):
+def get_jaeger_url():
+    return os.environ.get("JAEGER_QUERY_URL", "http://localhost:16686")
+
+
+def wait_for_traces(service, retries=10, delay=1.0):
     """Poll Jaeger until at least one trace appears for the given service."""
+    jaeger_url = get_jaeger_url()
     params = {"service": service, "limit": 10}
-    if operation:
-        params["operation"] = operation
     for _ in range(retries):
         try:
-            resp = requests.get(f"{JAEGER_QUERY_URL}/api/traces", params=params, timeout=5)
+            resp = requests.get(f"{jaeger_url}/api/traces", params=params, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 if data:
@@ -67,12 +72,10 @@ def get_resource_tags(traces):
 
 
 def span_has_tag(span, key):
-    """Check if a span has a specific tag."""
     return any(t["key"] == key for t in span.get("tags", []))
 
 
 def get_span_tag(span, key):
-    """Get the value of a specific tag from a span."""
     for t in span.get("tags", []):
         if t["key"] == key:
             return t["value"]
@@ -98,19 +101,16 @@ class TestOpenTelemetry:
         resp = graphql(hge_ctx, query)
         assert resp.status_code == 200, resp.text
 
-        # Give the exporter time to flush
         time.sleep(2)
 
         traces = wait_for_traces(OTEL_SERVICE_NAME)
         assert len(traces) > 0, (
             f"No traces found for service '{OTEL_SERVICE_NAME}'. "
-            "Is Jaeger running and OTLP endpoint configured?"
+            "Is Jaeger running and OTEL_EXPORTER_OTLP_ENDPOINT set?"
         )
 
         spans = get_all_spans(traces)
         assert len(spans) > 0, "Expected at least one span"
-
-        # Verify at least one span has a non-zero trace ID
         assert any(
             span.get("traceID") and span["traceID"] != "0" * 32
             for span in spans
@@ -127,17 +127,12 @@ class TestOpenTelemetry:
         assert len(traces) > 0, "No traces found"
 
         spans = get_all_spans(traces)
-        # Look for HTTP-related spans that have request attributes
         http_spans = [s for s in spans if span_has_tag(s, "http.request.method")]
         if http_spans:
             span = http_spans[0]
             assert get_span_tag(span, "http.request.method") is not None
-            # The fork adds body size and URI attributes to outgoing HTTP spans
-            # These may only appear on outgoing calls (actions, remote schemas)
-            # For direct GraphQL, at minimum we should have the method
 
     def test_datadog_tags_appear_as_resource_attributes(self, hge_ctx):
-        # Send a query to generate at least one trace
         query = "query { fork_items { id name } }"
         resp = graphql(hge_ctx, query)
         assert resp.status_code == 200, resp.text
@@ -148,8 +143,10 @@ class TestOpenTelemetry:
         assert len(traces) > 0, "No traces found"
 
         resource_tags = get_resource_tags(traces)
-        # DD_ENV=test should map to an "env" or "deployment.environment" resource attribute
-        # DD_SERVICE should map to "service.name"
-        assert resource_tags.get("service.name") == OTEL_SERVICE_NAME or \
-            any(OTEL_SERVICE_NAME in str(v) for v in resource_tags.values()), \
-            f"Expected service.name={OTEL_SERVICE_NAME} in resource tags: {resource_tags}"
+        # DD_ENV=test should appear as the "env" resource attribute
+        assert resource_tags.get("env") == "test", \
+            f"Expected env=test in resource tags: {resource_tags}"
+        # DD_VERSION should appear as "version" or "service.version"
+        assert "0.0.0-test" in resource_tags.get("version", "") or \
+            "0.0.0-test" in resource_tags.get("service.version", ""), \
+            f"Expected version=0.0.0-test in resource tags: {resource_tags}"

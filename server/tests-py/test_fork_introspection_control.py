@@ -91,11 +91,10 @@ class TestIntrospectionControl:
     def test_introspection_disabled_for_role(self, hge_ctx, jwt_configuration):
         set_introspection_options(hge_ctx, ["user"])
         resp = graphql(hge_ctx, INTROSPECTION_QUERY, jwt_configuration, "user")
-        assert resp.status_code == 401, f"Expected 401, got {resp.status_code}: {resp.text}"
         body = resp.json()
         errors = body.get("errors", [])
         assert any("ntrospection disabled" in str(e) for e in errors), \
-            f"Expected introspection disabled error, got: {errors}"
+            f"Expected introspection disabled error, got: {body}"
 
     def test_introspection_still_works_for_non_disabled_role(self, hge_ctx, jwt_configuration):
         set_introspection_options(hge_ctx, ["user"])
@@ -124,9 +123,11 @@ class TestIntrospectionControl:
         set_introspection_options(hge_ctx, ["user", "anonymous"])
 
         resp_user = graphql(hge_ctx, INTROSPECTION_QUERY, jwt_configuration, "user")
-        assert resp_user.status_code == 401, \
-            f"Expected 401 for user, got {resp_user.status_code}"
+        user_errors = resp_user.json().get("errors", [])
+        assert any("ntrospection disabled" in str(e) for e in user_errors), \
+            f"Expected introspection disabled for user, got: {resp_user.json()}"
 
         resp_anon = graphql(hge_ctx, INTROSPECTION_QUERY, jwt_configuration, "anonymous")
-        assert resp_anon.status_code == 401, \
-            f"Expected 401 for anonymous, got {resp_anon.status_code}"
+        anon_errors = resp_anon.json().get("errors", [])
+        assert any("ntrospection disabled" in str(e) for e in anon_errors), \
+            f"Expected introspection disabled for anonymous, got: {resp_anon.json()}"

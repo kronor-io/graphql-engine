@@ -4,13 +4,6 @@ args:
 - type: run_sql
   args:
     sql: |
-      CREATE SCHEMA IF NOT EXISTS tenant;
-      CREATE TABLE IF NOT EXISTS tenant.tokens (
-        token_id UUID NOT NULL,
-        blocked BOOLEAN NOT NULL DEFAULT false,
-        token_type TEXT NOT NULL
-      );
-      -- A simple test table for queries
       CREATE TABLE IF NOT EXISTS fork_items (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL

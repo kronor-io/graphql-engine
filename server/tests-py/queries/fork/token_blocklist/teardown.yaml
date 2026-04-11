@@ -6,5 +6,3 @@ args:
     cascade: true
     sql: |
       DROP TABLE IF EXISTS fork_items CASCADE;
-      DROP TABLE IF EXISTS tenant.tokens CASCADE;
-      DROP SCHEMA IF EXISTS tenant CASCADE;
