@@ -168,15 +168,12 @@ mkPGExecCtxWithConnRouting defaultIsoLevel primaryPool replicaPools connSetPools
             let replicasResized = isJust replicaPools
             for_ replicaPools $ \replicas ->
               mapM_ (\p -> resizePostgresPool p maxConnections serverReplicas) replicas
-            let connSetNames = Map.keys connSetPools
-            for_ connSetNames $ \name ->
-              for_ (Map.lookup name connSetPools) $ \p ->
-                resizePostgresPool p maxConnections serverReplicas
+            mapM_ (\p -> resizePostgresPool p maxConnections serverReplicas) connSetPools
             pure
               $ SourceResizePoolSummary
                 { _srpsPrimaryResized = True,
                   _srpsReadReplicasResized = replicasResized,
-                  _srpsConnectionSet = map toTxt connSetNames
+                  _srpsConnectionSet = map toTxt (Map.keys connSetPools)
                 },
       _pecRunTx = \(PGExecCtxInfo txType pgExecFrom) tx -> do
         pool <- selectPool pgExecFrom txType
