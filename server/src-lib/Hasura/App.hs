@@ -471,7 +471,7 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
 
   -- Kronor Stuff
   invalidTokensRef <- liftIO $ STM.newTVarIO mempty
-  void $ Kronor.startInvalidTokensListenerThread logger metadataDbPool 5000 invalidTokensRef
+  void $ Kronor.startInvalidTokensListenerThread logger metadataDbPool soTokenPollInterval invalidTokensRef
   (tracer, _) <- allocate
     (liftIO (Kronor.initializeTracer env))
     (\(_, provider) -> liftIO $ Kronor.shutdownTracer provider)

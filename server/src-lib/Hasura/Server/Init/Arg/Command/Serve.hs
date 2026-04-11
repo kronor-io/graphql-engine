@@ -70,6 +70,7 @@ module Hasura.Server.Init.Arg.Command.Serve
     closeWebsocketsOnMetadataChangeOption,
     maxTotalHeaderLengthOption,
     maxRequestBodyLengthOption,
+    tokenPollIntervalOption,
     asyncActionsFetchBatchSizeOption,
     persistedQueriesOption,
     persistedQueriesTtlOption,
@@ -171,6 +172,7 @@ serveCommandParser =
     <*> parseEnableCloseWebsocketsOnMetadataChange
     <*> parseMaxTotalHeaderLength
     <*> parseMaxRequestBodyLength
+    <*> parseTokenPollInterval
     <*> parseTriggersErrorLoglevelStatus
     <*> parseAsyncActionsFetchBatchSize
     <*> parsePersistedQueries
@@ -1313,6 +1315,23 @@ maxRequestBodyLengthOption =
       Config._helpMessage = "Max length of the request body in bytes (Default: 50KiB)"
     }
 
+parseTokenPollInterval :: Opt.Parser (Maybe Int)
+parseTokenPollInterval =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "token-poll-interval"
+          <> Opt.help (Config._helpMessage tokenPollIntervalOption)
+      )
+
+tokenPollIntervalOption :: Config.Option Int
+tokenPollIntervalOption =
+  Config.Option
+    { Config._default = 5000,
+      Config._envVar = "HASURA_GRAPHQL_TOKEN_POLL_INTERVAL",
+      Config._helpMessage = "Token block-list poll interval in milliseconds (Default: 5000)"
+    }
+
 triggersErrorLogLevelStatusOption :: Config.Option (Types.TriggersErrorLogLevelStatus)
 triggersErrorLogLevelStatusOption =
   Config.Option
@@ -1569,6 +1588,7 @@ serveCmdFooter =
         Config.optionPP closeWebsocketsOnMetadataChangeOption,
         Config.optionPP maxTotalHeaderLengthOption,
         Config.optionPP maxRequestBodyLengthOption,
+        Config.optionPP tokenPollIntervalOption,
         Config.optionPP remoteNullForwardingPolicyOption,
         Config.optionPP triggersErrorLogLevelStatusOption,
         Config.optionPP asyncActionsFetchBatchSizeOption,
