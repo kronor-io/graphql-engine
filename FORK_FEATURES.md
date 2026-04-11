@@ -354,7 +354,7 @@ POST /v1/metadata
       ],
       "connection_template": {
         "version": 1,
-        "template": "{{ if ($.request.session.x-hasura-role == \"analyst\") $.connection_set.analytics else $.primary }}"
+        "template": "{{ if ($.request.session?.x-hasura-role == \"analyst\") }} {{ $.connection_set.analytics }} {{ else }} {{ $.primary }} {{ end }}"
       }
     }
   }
