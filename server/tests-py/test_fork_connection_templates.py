@@ -56,14 +56,7 @@ def metadata_api(hge_ctx, payload):
 # The Kriti connection template used in tests.
 # Routes to "secondary" connection set member when x-hasura-route == "secondary",
 # otherwise routes to primary.
-CONNECTION_TEMPLATE = """
-{{
-  if ($.request.session.x-hasura-route == "secondary")
-    $.connection_set.secondary
-  else
-    $.primary
-}}
-""".strip()
+CONNECTION_TEMPLATE = '{{ if ($.request.session?.x-hasura-route == "secondary") }} {{ $.connection_set.secondary }} {{ else }} {{ $.primary }} {{ end }}'
 
 
 def _skip_unless_two_pg_urls():
