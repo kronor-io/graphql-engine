@@ -78,6 +78,10 @@ module Hasura.Server.Init.Arg.Command.Serve
     configuredHeaderPrecedenceOption,
     traceQueryStatusOption,
     serverTimeoutOption,
+    webSocketFramePayloadSizeLimitOption,
+    webSocketMessageDataSizeLimitOption,
+    webSocketMessageRateLimitOption,
+    webSocketMessageRateLimitWindowOption,
 
     -- * Pretty Printer
     serveCmdFooter,
@@ -183,6 +187,10 @@ serveCommandParser =
     <*> parseDisableNativeQueryValidation
     <*> parsePreserve401Errors
     <*> parseServerTimeout
+    <*> parseWebSocketFramePayloadSizeLimit
+    <*> parseWebSocketMessageDataSizeLimit
+    <*> parseWebSocketMessageRateLimit
+    <*> parseWebSocketMessageRateLimitWindow
 
 --------------------------------------------------------------------------------
 -- Serve Options
@@ -1486,6 +1494,78 @@ parseServerTimeout =
           <> Opt.help (Config._helpMessage serverTimeoutOption)
       )
 
+parseWebSocketFramePayloadSizeLimit :: Opt.Parser (Maybe (Refined Positive Int))
+parseWebSocketFramePayloadSizeLimit =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "websocket-frame-payload-size-limit"
+          <> Opt.metavar "<BYTES>"
+          <> Opt.help (Config._helpMessage webSocketFramePayloadSizeLimitOption)
+      )
+
+webSocketFramePayloadSizeLimitOption :: Config.Option (Refined Positive Int)
+webSocketFramePayloadSizeLimitOption =
+  Config.Option
+    { Config._default = $$(refineTH @Positive @Int (50 * 1024)),
+      Config._envVar = "HASURA_GRAPHQL_WEBSOCKET_FRAME_PAYLOAD_SIZE_LIMIT",
+      Config._helpMessage = "Max size of a single WebSocket frame payload in bytes (default: 50KiB)"
+    }
+
+parseWebSocketMessageDataSizeLimit :: Opt.Parser (Maybe (Refined Positive Int))
+parseWebSocketMessageDataSizeLimit =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "websocket-message-data-size-limit"
+          <> Opt.metavar "<BYTES>"
+          <> Opt.help (Config._helpMessage webSocketMessageDataSizeLimitOption)
+      )
+
+webSocketMessageDataSizeLimitOption :: Config.Option (Refined Positive Int)
+webSocketMessageDataSizeLimitOption =
+  Config.Option
+    { Config._default = $$(refineTH @Positive @Int (150 * 1024)),
+      Config._envVar = "HASURA_GRAPHQL_WEBSOCKET_MESSAGE_DATA_SIZE_LIMIT",
+      Config._helpMessage = "Max size of a WebSocket message (spanning multiple frames) in bytes (default: 150KiB)"
+    }
+
+parseWebSocketMessageRateLimit :: Opt.Parser (Maybe (Refined Positive Int))
+parseWebSocketMessageRateLimit =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "websocket-message-rate-limit"
+          <> Opt.metavar "<MESSAGES>"
+          <> Opt.help (Config._helpMessage webSocketMessageRateLimitOption)
+      )
+
+webSocketMessageRateLimitOption :: Config.Option ()
+webSocketMessageRateLimitOption =
+  Config.Option
+    { Config._default = (),
+      Config._envVar = "HASURA_GRAPHQL_WEBSOCKET_MESSAGE_RATE_LIMIT",
+      Config._helpMessage = "Max number of WebSocket messages per connection per rate limit window (default: no limit)"
+    }
+
+parseWebSocketMessageRateLimitWindow :: Opt.Parser (Maybe (Refined Positive Int))
+parseWebSocketMessageRateLimitWindow =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "websocket-message-rate-limit-window"
+          <> Opt.metavar "<SECONDS>"
+          <> Opt.help (Config._helpMessage webSocketMessageRateLimitWindowOption)
+      )
+
+webSocketMessageRateLimitWindowOption :: Config.Option (Refined Positive Int)
+webSocketMessageRateLimitWindowOption =
+  Config.Option
+    { Config._default = $$(refineTH @Positive @Int 1),
+      Config._envVar = "HASURA_GRAPHQL_WEBSOCKET_MESSAGE_RATE_LIMIT_WINDOW",
+      Config._helpMessage = "Time window in seconds for WebSocket message rate limiting (default: 1)"
+    }
+
 --------------------------------------------------------------------------------
 -- Pretty Printer
 
@@ -1596,6 +1676,10 @@ serveCmdFooter =
         Config.optionPP persistedQueriesTtlOption,
         Config.optionPP configuredHeaderPrecedenceOption,
         Config.optionPP preserve401ErrorsOption,
-        Config.optionPP serverTimeoutOption
+        Config.optionPP serverTimeoutOption,
+        Config.optionPP webSocketFramePayloadSizeLimitOption,
+        Config.optionPP webSocketMessageDataSizeLimitOption,
+        Config.optionPP webSocketMessageRateLimitOption,
+        Config.optionPP webSocketMessageRateLimitWindowOption
       ]
     eventEnvs = [Config.optionPP graphqlEventsHttpPoolSizeOption, Config.optionPP graphqlEventsFetchIntervalOption]
