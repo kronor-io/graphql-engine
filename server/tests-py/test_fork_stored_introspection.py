@@ -88,9 +88,11 @@ class TestStoredIntrospection:
         engine = sqlalchemy.create_engine(metadata_schema_url)
         try:
             with engine.connect() as conn:
+                # Hasura's hasuraJSON encodes HashMaps as arrays of pairs,
+                # e.g. [["default", {...}]]. Use a JSONB path check.
                 result = conn.execute(
                     sqlalchemy.text(
-                        "SELECT introspection -> 'backend_introspection' "
+                        "SELECT introspection::text "
                         "FROM hdb_catalog.hdb_stored_introspection "
                         "WHERE id = 1"
                     )
@@ -98,12 +100,13 @@ class TestStoredIntrospection:
                 row = result.fetchone()
 
             assert row is not None, "No stored introspection found"
-            backend_introspection = row[0]
-            assert backend_introspection is not None, (
-                "backend_introspection key is missing from stored introspection"
-            )
-            assert "default" in backend_introspection, (
-                "default source not found in stored backend_introspection"
+            import json
+            introspection = json.loads(row[0])
+            backend = introspection.get("backend_introspection", [])
+            source_names = [pair[0] for pair in backend if isinstance(pair, list)]
+            assert "default" in source_names, (
+                f"default source not found in stored backend_introspection, "
+                f"got source names: {source_names}"
             )
         finally:
             engine.dispose()
@@ -119,27 +122,29 @@ class TestStoredIntrospection:
         assert "data" in body, f"Expected data before breaking source, got: {body}"
         assert "errors" not in body, f"Unexpected errors: {body.get('errors')}"
 
+        # 2. Export the current metadata so we can restore it later
+        original_metadata = metadata_api(hge_ctx, {
+            "type": "export_metadata",
+            "args": {},
+        }).json()
+
         try:
-            # 2. Point the default source at an unreachable URL.
-            #    pg_update_source triggers a schema cache rebuild internally.
-            #    The rebuild will fail to introspect the source and should
-            #    fall back to stored introspection.
+            # 3. Replace metadata with the source pointing to an unreachable URL.
+            #    Using replace_metadata v2 with allow_inconsistent_metadata
+            #    ensures the operation succeeds even though the source can't be
+            #    reached. The schema cache rebuild will fall back to stored
+            #    introspection for the unreachable source.
+            bad_metadata = _deep_copy_metadata_with_bad_url(original_metadata)
             metadata_api(hge_ctx, {
-                "type": "pg_update_source",
+                "type": "replace_metadata",
+                "version": 2,
                 "args": {
-                    "name": "default",
-                    "configuration": {
-                        "connection_info": {
-                            "database_url": "postgresql://localhost:1/nonexistent",
-                            "pool_settings": {
-                                "retries": 0,
-                            },
-                        },
-                    },
+                    "allow_inconsistent_metadata": True,
+                    "metadata": bad_metadata,
                 },
             })
 
-            # 3. Check for the stale-introspection inconsistency
+            # 4. Check for the stale-introspection inconsistency
             resp = metadata_api(hge_ctx, {
                 "type": "get_inconsistent_metadata",
                 "args": {},
@@ -158,8 +163,9 @@ class TestStoredIntrospection:
                 f"got: {inconsistent_objects}"
             )
 
-            # 4. Verify the source's tables are still in the GraphQL schema
-            #    via an introspection query.
+            # 5. Verify the source's tables are still in the GraphQL schema
+            #    via an introspection query. Without stored introspection the
+            #    source would be fully inconsistent and its tables would vanish.
             introspection_query = """
             {
               __schema {
@@ -186,23 +192,25 @@ class TestStoredIntrospection:
             )
 
         finally:
-            # 5. Restore the source to the working connection URL
+            # 6. Restore the original metadata with the working connection
             metadata_api(hge_ctx, {
-                "type": "pg_update_source",
+                "type": "replace_metadata",
+                "version": 2,
                 "args": {
-                    "name": "default",
-                    "configuration": {
-                        "connection_info": {
-                            "database_url": {
-                                "from_env": "HASURA_GRAPHQL_PG_SOURCE_URL_1",
-                            },
-                        },
-                    },
+                    "allow_inconsistent_metadata": True,
+                    "metadata": original_metadata,
                 },
             })
 
-            # Reload to rebuild schema cache with the working source
-            metadata_api(hge_ctx, {
-                "type": "reload_metadata",
-                "args": {"reload_sources": True},
-            })
+
+def _deep_copy_metadata_with_bad_url(metadata):
+    """Return a copy of the metadata with the default source's connection_info
+    pointing to an unreachable URL."""
+    import copy
+    bad = copy.deepcopy(metadata)
+    for source in bad.get("sources", []):
+        if source.get("name") == "default":
+            source["configuration"]["connection_info"]["database_url"] = (
+                "postgresql://localhost:1/nonexistent"
+            )
+    return bad
