@@ -51,6 +51,7 @@ import Data.ByteString.Char8 qualified as B
 import Data.ByteString.Lazy qualified as BL
 import Data.CaseInsensitive qualified as CI
 import Data.HashSet qualified as Set
+import Kronor.WebSocketRateLimiter qualified as RateLimit
 import Data.SerializableBlob qualified as SB
 import Data.String
 import Data.Text qualified as T
@@ -373,7 +374,8 @@ type HasuraServerApp m = IpAddress -> WS.PendingConnection -> m ()
 data WSHandlers m a = WSHandlers
   { _hOnConn :: (WSId -> WS.RequestHead -> IpAddress -> WSSubProtocol -> m (Either WS.RejectRequest (AcceptWith a))),
     _hOnMessage :: (WSConn a -> BL.ByteString -> WSSubProtocol -> m ()),
-    _hOnClose :: OnCloseH m a
+    _hOnClose :: OnCloseH m a,
+    _hOnRateLimitExceeded :: WSConn a -> m ()
   }
 
 -- | The background thread responsible for closing all websocket connections
@@ -512,12 +514,13 @@ createServerApp ::
   WSConnectionInitTimeout ->
   WSServer a ->
   PrometheusMetrics ->
+  Maybe RateLimit.RateLimitConfig ->
   -- | user provided handlers
   WSHandlers m a ->
   -- | aka WS.ServerApp
   HasuraServerApp m
 {-# INLINE createServerApp #-}
-createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger writeLog) _ serverStatus) prometheusMetrics wsHandlers !ipAddress !pendingConn = do
+createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger writeLog) _ serverStatus) prometheusMetrics rateLimitConfig wsHandlers !ipAddress !pendingConn = do
   wsId <- WSId <$> liftIO UUID.nextRandom
   logWSLog logger $ WSLog wsId EConnectionRequest Nothing
   -- if the client doesn't send a `connection_init` message within the timeout period
@@ -542,6 +545,7 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
     connHandler = _hOnConn wsHandlers
     messageHandler = _hOnMessage wsHandlers
     closeHandler = _hOnClose wsHandlers
+    rateLimitExceededHandler = _hOnRateLimitExceeded wsHandlers
 
     logUnexpectedExceptions = flip catches handlers
       where
@@ -601,6 +605,7 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
       conn <- liftIO $ WS.acceptRequestWith pendingConn acceptWithParams
       logWSLog logger $ WSLog wsId EAccepted Nothing
       sendQ <- liftIO STM.newTQueueIO
+      rateLimiterState <- liftIO $ traverse (const RateLimit.newRateLimiterState) rateLimitConfig
       let !wsConn = WSConn wsId logger conn sendQ wsConnInitTimer a
       -- TODO there are many thunks here. Difficult to trace how much is retained, and
       --      how much of that would be shared anyway.
@@ -644,17 +649,26 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
                         -- Regardless this should be safe:
                         handleJust (guard . E.isResourceVanishedError) (\() -> throw WS.ConnectionClosed)
                         $ WS.receiveData conn
-                    let messageLength = BL.length msg
-                        censoredMessage =
-                          MessageDetails
-                            (SB.fromLBS (if shouldCaptureVariables then msg else "<censored>"))
+                    -- Check rate limit before processing the message
+                    rateLimited <- liftIO $ case (rateLimitConfig, rateLimiterState) of
+                      (Just cfg, Just st) -> RateLimit.checkRateLimit cfg st
+                      _ -> pure RateLimit.RateLimitOk
+                    case rateLimited of
+                      RateLimit.RateLimitExceeded -> do
+                        logWSLog logger $ WSLog wsId (EMessageReceived (MessageDetails "<rate-limited>" 0)) Nothing
+                        rateLimitExceededHandler wsConn
+                      RateLimit.RateLimitOk -> do
+                        let messageLength = BL.length msg
+                            censoredMessage =
+                              MessageDetails
+                                (SB.fromLBS (if shouldCaptureVariables then msg else "<censored>"))
+                                messageLength
+                        liftIO
+                          $ Prometheus.Counter.add
+                            (pmWebSocketBytesReceived prometheusMetrics)
                             messageLength
-                    liftIO
-                      $ Prometheus.Counter.add
-                        (pmWebSocketBytesReceived prometheusMetrics)
-                        messageLength
-                    logWSLog logger $ WSLog wsId (EMessageReceived censoredMessage) Nothing
-                    messageHandler wsConn msg subProtocol
+                        logWSLog logger $ WSLog wsId (EMessageReceived censoredMessage) Nothing
+                        messageHandler wsConn msg subProtocol
 
             let send = do
                   labelMe "WebSocket send"

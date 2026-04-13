@@ -1060,6 +1060,7 @@ library
                      , Kronor.IntrospectionOptionsEnforcer
                      , Kronor.TokenValidator
                      , Kronor.OpenTelemetryReporter
+                     , Kronor.WebSocketRateLimiter
 
 executable graphql-engine
   import: common-all, common-exe

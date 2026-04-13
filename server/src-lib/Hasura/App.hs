@@ -521,7 +521,9 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvPreserve401Errors = soPreserve401Errors,
           appServerTimeout = soServerTimeout,
           appEnvInvalidTokens = invalidTokensRef,
-          appEnvTracer = tracer
+          appEnvTracer = tracer,
+          appEnvWebSocketMessageRateLimit = soWebSocketMessageRateLimit,
+          appEnvWebSocketMessageRateLimitWindow = soWebSocketMessageRateLimitWindow
         }
     )
 

@@ -195,7 +195,16 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
       enableRemoteSchemaPermissions -> pure enableRemoteSchemaPermissions
   webSocketCompressionFromEnv <-
     withOptionSwitch' rsoWebSocketCompression (isWebSocketCompressionEnabled, bool WebSockets.NoCompression (WebSockets.PermessageDeflateCompression WebSockets.defaultPermessageDeflate)) webSocketCompressionOption
-  let soConnectionOptions = WebSockets.defaultConnectionOptions {WebSockets.connectionCompressionOptions = webSocketCompressionFromEnv}
+  soWebSocketFramePayloadSizeLimit <- withOptionDefault rsoWebSocketFramePayloadSizeLimit webSocketFramePayloadSizeLimitOption
+  soWebSocketMessageDataSizeLimit <- withOptionDefault rsoWebSocketMessageDataSizeLimit webSocketMessageDataSizeLimitOption
+  soWebSocketMessageRateLimit <- withOption rsoWebSocketMessageRateLimit webSocketMessageRateLimitOption
+  soWebSocketMessageRateLimitWindow <- withOptionDefault rsoWebSocketMessageRateLimitWindow webSocketMessageRateLimitWindowOption
+  let soConnectionOptions =
+        WebSockets.defaultConnectionOptions
+          { WebSockets.connectionCompressionOptions = webSocketCompressionFromEnv,
+            WebSockets.connectionFramePayloadSizeLimit = WebSockets.SizeLimit (fromIntegral $ unrefine soWebSocketFramePayloadSizeLimit),
+            WebSockets.connectionMessageDataSizeLimit = WebSockets.SizeLimit (fromIntegral $ unrefine soWebSocketMessageDataSizeLimit)
+          }
   soWebSocketKeepAlive <- withOptionDefault rsoWebSocketKeepAlive webSocketKeepAliveOption
   soInferFunctionPermissions <- withOptionDefault rsoInferFunctionPermissions inferFunctionPermsOption
   soEnableMaintenanceMode <- case rsoEnableMaintenanceMode of

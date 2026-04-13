@@ -61,7 +61,7 @@ import Hasura.Tracing qualified as Tracing
 import Network.HTTP.Client qualified as HTTP
 import Network.Wai.Handler.Warp (HostPreference)
 import Network.WebSockets.Connection qualified as WebSockets
-import Refined (NonNegative, Refined)
+import Refined (NonNegative, Positive, Refined)
 import OpenTelemetry.Trace.Core qualified as OpenTelemetry
 
 --------------------------------------------------------------------------------
@@ -155,7 +155,9 @@ data AppEnv = AppEnv
     appServerTimeout :: Refined NonNegative Int,
     -- Kronor Stuff
     appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID),
-    appEnvTracer :: OpenTelemetry.Tracer
+    appEnvTracer :: OpenTelemetry.Tracer,
+    appEnvWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
+    appEnvWebSocketMessageRateLimitWindow :: Refined Positive Int
   }
 
 -- | Represents the Dynamic Hasura State, these field are mutable and can be changed

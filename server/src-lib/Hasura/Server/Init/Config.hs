@@ -342,7 +342,11 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoTraceQueryStatus :: Maybe Server.Types.TraceQueryStatus,
     rsoDisableNativeQueryValidation :: NativeQuery.Validation.DisableNativeQueryValidation,
     rsoPreserve401Errors :: Preserve401ErrorsStatus,
-    rsoServerTimeout :: Maybe (Refined NonNegative Int)
+    rsoServerTimeout :: Maybe (Refined NonNegative Int),
+    rsoWebSocketFramePayloadSizeLimit :: Maybe (Refined Positive Int),
+    rsoWebSocketMessageDataSizeLimit :: Maybe (Refined Positive Int),
+    rsoWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
+    rsoWebSocketMessageRateLimitWindow :: Maybe (Refined Positive Int)
   }
 
 deriving stock instance (Show (Logging.EngineLogType impl)) => Show (ServeOptionsRaw impl)
@@ -673,7 +677,11 @@ data ServeOptions impl = ServeOptions
     soTraceQueryStatus :: Server.Types.TraceQueryStatus,
     soDisableNativeQueryValidation :: NativeQuery.Validation.DisableNativeQueryValidation,
     soPreserve401Errors :: Preserve401ErrorsStatus,
-    soServerTimeout :: Refined NonNegative Int
+    soServerTimeout :: Refined NonNegative Int,
+    soWebSocketFramePayloadSizeLimit :: Refined Positive Int,
+    soWebSocketMessageDataSizeLimit :: Refined Positive Int,
+    soWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
+    soWebSocketMessageRateLimitWindow :: Refined Positive Int
   }
 
 -- | 'ResponseInternalErrorsConfig' represents the encoding of the

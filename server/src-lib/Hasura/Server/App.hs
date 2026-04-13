@@ -115,7 +115,9 @@ import Hasura.Tracing qualified as Tracing
 import Network.HTTP.Types qualified as HTTP
 import Network.Mime (defaultMimeLookup)
 import Network.Wai.Extended qualified as Wai
+import Kronor.WebSocketRateLimiter qualified as RateLimit
 import Network.Wai.Handler.WebSockets.Custom qualified as WSC
+import Refined (unrefine)
 import System.FilePath (isRelative, joinPath, splitExtension, takeFileName)
 import System.Mem (performMajorGC)
 import System.Metrics qualified as EKG
@@ -868,7 +870,8 @@ mkWaiApp setupHook appStateRef consoleType ekgStore wsServerEnv = do
       $ httpApp setupHook appStateRef appEnv consoleType ekgStore
       $ WS.mkCloseWebsocketsOnMetadataChangeAction (WS._wseServer wsServerEnv)
 
-  let wsServerApp = WS.createWSServerApp (_lsEnabledLogTypes appEnvLoggingSettings) wsServerEnv appEnvWebSocketConnectionInitTimeout appEnvLicenseKeyCache
+  let wsRateLimitConfig = fmap (\maxMsgs -> RateLimit.RateLimitConfig (unrefine maxMsgs) (unrefine appEnvWebSocketMessageRateLimitWindow)) appEnvWebSocketMessageRateLimit
+      wsServerApp = WS.createWSServerApp (_lsEnabledLogTypes appEnvLoggingSettings) wsServerEnv appEnvWebSocketConnectionInitTimeout appEnvLicenseKeyCache wsRateLimitConfig
       stopWSServer = WS.stopWSServerApp wsServerEnv
 
   waiApp <- liftWithStateless $ \lowerIO ->

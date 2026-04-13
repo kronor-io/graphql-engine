@@ -35,6 +35,7 @@ import Hasura.Server.Auth (UserAuthentication)
 import Hasura.Server.Init.Config
   ( WSConnectionInitTimeout,
   )
+import Kronor.WebSocketRateLimiter qualified as RateLimit
 import Hasura.Server.Limits
 import Hasura.Server.Metrics (ServerMetrics (..))
 import Hasura.Server.Prometheus
@@ -71,17 +72,19 @@ createWSServerApp ::
   WSServerEnv impl ->
   WSConnectionInitTimeout ->
   Maybe (CredentialCache AgentLicenseKey) ->
+  Maybe RateLimit.RateLimitConfig ->
   -- | aka generalized 'WS.ServerApp'
   WS.HasuraServerApp m
-createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache = \ !ipAddress !pendingConn -> do
+createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache rateLimitConfig = \ !ipAddress !pendingConn -> do
   let getMetricsConfig = scMetricsConfig <$> getSchemaCache (_wseAppStateRef serverEnv)
-  WS.createServerApp getMetricsConfig connInitTimeout (_wseServer serverEnv) prometheusMetrics handlers ipAddress pendingConn
+  WS.createServerApp getMetricsConfig connInitTimeout (_wseServer serverEnv) prometheusMetrics rateLimitConfig handlers ipAddress pendingConn
   where
     handlers =
       WS.WSHandlers
         onConnHandler
         onMessageHandler
         onCloseHandler
+        onRateLimitExceededHandler
 
     logger = _wseLogger serverEnv
     serverMetrics = _wseServerMetrics serverEnv
@@ -109,6 +112,9 @@ createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache = \ 
       liftIO $ EKG.Gauge.dec $ smWebsocketConnections serverMetrics
       liftIO $ decWebsocketConnections $ pmConnections prometheusMetrics
       onClose logger serverMetrics prometheusMetrics (_wseSubscriptionState serverEnv) conn granularPrometheusMetricsState
+
+    onRateLimitExceededHandler conn =
+      sendCloseWithMsg logger conn TooManyRequests4429 Nothing Nothing
 
 stopWSServerApp :: WSServerEnv impl -> IO ()
 stopWSServerApp wsEnv = WS.shutdown (_wseServer wsEnv)
