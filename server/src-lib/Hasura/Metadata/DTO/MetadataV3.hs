@@ -25,7 +25,7 @@ import Hasura.RQL.Types.ApiLimit (ApiLimit, emptyApiLimit)
 import Hasura.RQL.Types.Common (MetricsConfig, emptyMetricsConfig)
 import Hasura.RQL.Types.CustomTypes (CustomTypes, emptyCustomTypes)
 import Hasura.RQL.Types.Endpoint (_ceName)
-import Hasura.RQL.Types.GraphqlSchemaIntrospection (SetGraphqlIntrospectionOptions)
+import Hasura.RQL.Types.GraphqlSchemaIntrospection (SetGraphqlIntrospectionOptions, emptySetGraphqlIntrospectionOptions)
 import Hasura.RQL.Types.Metadata.Common (Actions, BackendConfigWrapper, CronTriggers, Endpoints, InheritedRoles, QueryCollections, RemoteSchemas, Sources, sourcesCodec)
 import Hasura.RQL.Types.OpenTelemetry (OpenTelemetryConfig, emptyOpenTelemetryConfig)
 import Hasura.RQL.Types.QueryCollection qualified as QC
@@ -92,7 +92,7 @@ instance HasCodec MetadataV3 where
       .= metaV3MetricsConfig
         <*> optionalFieldWithOmittedDefaultWith "inherited_roles" (sortedElemsCodec _rRoleName) [] "an inherited role is a way to create a new role which inherits permissions from two or more roles"
       .= metaV3InheritedRoles
-        <*> optionalFieldWithOmittedDefault' "graphql_schema_introspection" mempty
+        <*> optionalFieldWithOmittedDefault' "graphql_schema_introspection" emptySetGraphqlIntrospectionOptions
       .= metaV3GraphqlSchemaIntrospection
         <*> optionalFieldWithOmittedDefault' "network" emptyNetwork
       .= metaV3Network

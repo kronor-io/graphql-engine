@@ -48,6 +48,7 @@ import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.CustomTypes
+import Hasura.RQL.Types.GraphqlSchemaIntrospection
 import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.OpenTelemetry (emptyOpenTelemetryConfig)
 import Hasura.RQL.Types.SchemaCache
@@ -350,7 +351,7 @@ migrations maybeDefaultSourceConfig dryRun maintenanceMode =
                       emptyApiLimit
                       emptyMetricsConfig
                       mempty
-                      mempty
+                      emptySetGraphqlIntrospectionOptions
                       emptyNetwork
                       mempty
                       emptyOpenTelemetryConfig
