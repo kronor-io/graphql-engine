@@ -169,10 +169,10 @@ POST /v1/metadata
 }
 ```
 
-The allow-list takes precedence over the deny-list semantics: when
-`enabled_for_roles` is set, any role not in the list is denied. This is the
-safer default when adding new roles, since a new role does not automatically
-gain introspection access.
+`enabled_for_roles` is the recommended mode for new deployments: a role not
+in the list is denied, so adding a new role cannot accidentally grant
+introspection access. `disabled_for_roles` is preserved for backwards
+compatibility.
 
 ### CLI Metadata File
 
