@@ -325,7 +325,7 @@ parseNonSourcesMetadata o = do
       $ o
       .:? "inherited_roles"
       .!= []
-  introspectionDisabledForRoles <- o .:? "graphql_schema_introspection" .!= mempty
+  introspectionDisabledForRoles <- o .:? "graphql_schema_introspection" .!= emptySetGraphqlIntrospectionOptions
   pure
     ( remoteSchemas,
       queryCollections,

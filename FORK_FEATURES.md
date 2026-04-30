@@ -134,11 +134,18 @@ variables as `x-hasura-jwt-id` during JWT processing
 
 ## 3. GraphQL Introspection Control
 
-Allows disabling GraphQL introspection for specific roles. Users authenticated
-with `X-Hasura-Admin-Secret` always bypass the restriction, regardless of their
-effective role.
+Controls which roles can run GraphQL introspection. Configurable as either a
+deny-list (`disabled_for_roles`) or an allow-list (`enabled_for_roles`). Users
+authenticated with `X-Hasura-Admin-Secret` always bypass the restriction,
+regardless of their effective role.
 
 ### Configuration
+
+The metadata accepts **exactly one** of `disabled_for_roles` or
+`enabled_for_roles` — never both. Sending both is rejected by the server and by
+the CLI metadata loader.
+
+Deny-list (introspection on by default, disabled for the listed roles):
 
 ```json
 POST /v1/metadata
@@ -150,12 +157,51 @@ POST /v1/metadata
 }
 ```
 
+Allow-list (introspection off by default, enabled only for the listed roles):
+
+```json
+POST /v1/metadata
+{
+  "type": "set_graphql_schema_introspection_options",
+  "args": {
+    "enabled_for_roles": ["developer"]
+  }
+}
+```
+
+`enabled_for_roles` is the recommended mode for new deployments: a role not
+in the list is denied, so adding a new role cannot accidentally grant
+introspection access. `disabled_for_roles` is preserved for backwards
+compatibility.
+
+### CLI Metadata File
+
+`metadata/graphql_schema_introspection.yaml` mirrors the same shape:
+
+```yaml
+disabled_for_roles:
+  - user
+  - anonymous
+```
+
+or
+
+```yaml
+enabled_for_roles:
+  - developer
+```
+
+Empty arrays are valid and are sent through to the server. An empty file
+defaults to `disabled_for_roles: []` (introspection enabled for all roles), to
+match the server-side empty default.
+
 ### Admin Bypass
 
 When a request includes `X-Hasura-Admin-Secret`, the `_uiFallbackRole` field on
 `UserInfo` is set to the fallback role from authentication. The introspection
 enforcer checks this: if the fallback role is `admin`, introspection is allowed
-even if the effective role is in the disabled list.
+even if the effective role is in the disabled list (or absent from the enabled
+list).
 
 **Error:** HTTP 401 `"Introspection disabled"`
 
@@ -164,6 +210,7 @@ even if the effective role is in the disabled list.
 - Enforcer: `server/src-lib/Kronor/IntrospectionOptionsEnforcer.hs`
 - Fallback role: `server/src-lib/Hasura/Authentication/User.hs` (`_uiFallbackRole` field)
 - Types: `server/src-lib/Hasura/RQL/Types/GraphqlSchemaIntrospection.hs`
+- CLI metadata object: `cli/internal/metadataobject/graphql_schema_introspection/graphql_schema_introspection.go`
 
 ---
 

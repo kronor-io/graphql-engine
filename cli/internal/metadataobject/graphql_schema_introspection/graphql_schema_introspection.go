@@ -2,6 +2,7 @@ package graphqlschemaintrospection
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"path/filepath"
 
@@ -45,8 +46,32 @@ func (o *MetadataObject) CreateFiles() error {
 	return nil
 }
 
+// graphQLSchemaIntrospectionObject is "either or": exactly one of
+// DisabledForRoles or EnabledForRoles may be set, never both. This mirrors
+// the server-side SetGraphqlIntrospectionOptions sum type.
+//
+// Pointer slices are used to distinguish "field absent" (nil) from
+// "field present but empty" (non-nil, length 0) — both empty arrays are
+// valid and should be sent through to the server.
 type graphQLSchemaIntrospectionObject struct {
-	DisabledForRoles []yaml.Node `yaml:"disabled_for_roles"`
+	DisabledForRoles *[]yaml.Node `yaml:"disabled_for_roles,omitempty"`
+	EnabledForRoles  *[]yaml.Node `yaml:"enabled_for_roles,omitempty"`
+}
+
+func (g *graphQLSchemaIntrospectionObject) validate() error {
+	if g.DisabledForRoles != nil && g.EnabledForRoles != nil {
+		return fmt.Errorf("graphql_schema_introspection: only one of 'disabled_for_roles' or 'enabled_for_roles' may be set, not both")
+	}
+	return nil
+}
+
+// applyDefaults sets disabled_for_roles to an empty list when neither field is
+// specified, matching the server-side empty default.
+func (g *graphQLSchemaIntrospectionObject) applyDefaults() {
+	if g.DisabledForRoles == nil && g.EnabledForRoles == nil {
+		empty := []yaml.Node{}
+		g.DisabledForRoles = &empty
+	}
 }
 
 func (o *MetadataObject) Build() (map[string]interface{}, error) {
@@ -60,6 +85,10 @@ func (o *MetadataObject) Build() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, errors.E(op, o.error(err))
 	}
+	if err := obj.validate(); err != nil {
+		return nil, errors.E(op, o.error(err))
+	}
+	obj.applyDefaults()
 
 	return map[string]interface{}{o.Key(): obj}, nil
 }
@@ -91,6 +120,9 @@ func (o *MetadataObject) Export(metadata map[string]yaml.Node) (map[string][]byt
 			return nil, errors.E(op, o.error(err))
 		}
 		if err := yaml.Unmarshal(objectbs, &object); err != nil {
+			return nil, errors.E(op, o.error(err))
+		}
+		if err := object.validate(); err != nil {
 			return nil, errors.E(op, o.error(err))
 		}
 	}

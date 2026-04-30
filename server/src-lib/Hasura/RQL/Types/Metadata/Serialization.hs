@@ -58,7 +58,7 @@ import Hasura.RQL.Types.CustomTypes
   )
 import Hasura.RQL.Types.Endpoint (EndpointMetadata (..))
 import Hasura.RQL.Types.EventTrigger (EventTriggerConf (..))
-import Hasura.RQL.Types.GraphqlSchemaIntrospection (SetGraphqlIntrospectionOptions)
+import Hasura.RQL.Types.GraphqlSchemaIntrospection
 import Hasura.RQL.Types.Metadata.Common
   ( Actions,
     BackendConfigWrapper (..),
@@ -576,7 +576,7 @@ endpointsToOrdJSONList :: Endpoints -> Maybe AO.Array
 endpointsToOrdJSONList = listToMaybeArraySort AO.toOrdered _ceUrl
 
 introspectionDisabledRolesToOrdJSON :: SetGraphqlIntrospectionOptions -> Maybe AO.Value
-introspectionDisabledRolesToOrdJSON = ifNotEmpty (== mempty) AO.toOrdered
+introspectionDisabledRolesToOrdJSON = ifNotEmpty (== emptySetGraphqlIntrospectionOptions) AO.toOrdered
 
 metricsConfigToOrdJSON :: MetricsConfig -> Maybe AO.Value
 metricsConfigToOrdJSON = ifNotEmpty (== emptyMetricsConfig) AO.toOrdered

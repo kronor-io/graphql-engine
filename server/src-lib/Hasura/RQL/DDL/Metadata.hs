@@ -73,6 +73,7 @@ import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Endpoint
 import Hasura.RQL.Types.EventTrigger
 import Hasura.RQL.Types.EventTrigger qualified as ET
+import Hasura.RQL.Types.GraphqlSchemaIntrospection
 import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.Metadata.Backend
 import Hasura.RQL.Types.Metadata.Object
@@ -280,7 +281,7 @@ runReplaceMetadataV2' ReplaceMetadataV2 {..} = do
   let introspectionDisabledRoles =
         case _rmv2Metadata of
           RMWithSources m -> _metaSetGraphqlIntrospectionOptions m
-          RMWithoutSources _ -> mempty
+          RMWithoutSources _ -> emptySetGraphqlIntrospectionOptions
   oldMetadata <- getMetadata
   oldSchemaCache <- askSchemaCache
 
