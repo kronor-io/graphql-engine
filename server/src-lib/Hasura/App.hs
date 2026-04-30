@@ -178,6 +178,7 @@ import Kronor.ApiLimitsEnforcer qualified as Kronor
 import Kronor.TokenValidator qualified as Kronor
 import Kronor.OpenTelemetryReporter qualified as Kronor
 import Kronor.IntrospectionOptionsEnforcer qualified as Kronor
+import Kronor.ConnectionRouting qualified as Kronor
 
 --------------------------------------------------------------------------------
 -- Error handling (move to another module!)
@@ -1558,9 +1559,13 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
           }
   let context = J.object [("source" J..= sourceName)]
   pgPool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
-  let pgExecCtx = mkPGExecCtx isoLevel pgPool NeverResizePool
   connInfoWithFinalizer <- liftIO $ mkConnInfoWithFinalizer connInfo (pure ())
-  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) mempty ConnTemplate_NotApplicable
+
+  -- Resolve read replica pools, connection set pools, and template config
+  Kronor.ResolvedSourcePools {..} <- Kronor.resolveSourcePools pgLogger env context config
+
+  let pgExecCtx = Kronor.mkPGExecCtxWithConnRouting isoLevel pgPool rspReplicaPools rspConnSetPoolMap NeverResizePool
+  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer rspReplicaConnInfos mempty (pccExtensionsSchema config) rspConnSetInfoMap rspConnectionTemplateConfig
 
 mkMSSQLSourceResolver :: SourceResolver 'MSSQL
 mkMSSQLSourceResolver env _name (MSSQLConnConfiguration connInfo _) = runExceptT do

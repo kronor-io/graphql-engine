@@ -1057,6 +1057,7 @@ library
                      , Hasura.QueryTags.Types
                      -- Kronor additions
                      , Kronor.ApiLimitsEnforcer
+                     , Kronor.ConnectionRouting
                      , Kronor.IntrospectionOptionsEnforcer
                      , Kronor.TokenValidator
                      , Kronor.OpenTelemetryReporter

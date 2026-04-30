@@ -16,6 +16,7 @@ module Hasura.Backends.Postgres.Execute.Types
 
     -- * Execution in a Postgres Source
     PGSourceConfig (..),
+    ConnInfoWithFinalizer (..),
     getConnInfo,
     mkConnInfoWithFinalizer,
     ConnectionTemplateConfig (..),
