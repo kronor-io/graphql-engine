@@ -435,3 +435,60 @@ POST /v1/metadata
 - Template resolution: `server/src-lib/Hasura/Backends/Postgres/Execute/ConnectionTemplate.hs`
 - Metadata types: `server/src-lib/Hasura/Backends/Postgres/Connection/Settings.hs`
 - Test API: `server/src-lib/Hasura/RQL/DDL/ConnectionTemplate.hs`
+
+---
+
+## 8. Stored Source Introspection
+
+Activates the existing but dormant `StoredIntrospection` pipeline in Hasura's
+open-source codebase. Source introspection results are persisted to a new
+catalog table (`hdb_catalog.hdb_stored_introspection`) after every successful
+full schema cache build.
+
+### What it does
+
+- **Faster restarts**: On startup, if a source database is temporarily
+  unreachable, the engine falls back to stored introspection. The source
+  remains in the GraphQL schema (with an inconsistency warning) rather than
+  disappearing entirely.
+- **Resilience during reloads**: If a source becomes unreachable during
+  `reload_metadata`, the same fallback applies — the source stays in the
+  schema with stale-but-available data.
+
+### How it works
+
+1. After a successful schema cache build where all sources were introspected,
+   the introspection result is serialized as JSONB and upserted into
+   `hdb_stored_introspection` along with the current `metadata_resource_version`.
+2. Before each schema cache build, the engine loads stored introspection for
+   the current metadata version.
+3. If live introspection of a source fails, the engine checks for stored
+   introspection for that source. If found, it uses the stale data and records
+   an inconsistency warning.
+4. Stored introspection is only valid for a specific metadata version. If
+   metadata changes (tables added, sources modified, etc.), stale introspection
+   is discarded (version mismatch).
+
+### Storage
+
+Single-row table in the metadata catalog database:
+
+```sql
+hdb_catalog.hdb_stored_introspection (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  introspection JSONB NOT NULL,
+  metadata_resource_version INTEGER NOT NULL
+)
+```
+
+Uses `appEnvMetadataDbPool` (the metadata database connection pool) via
+`runInSeparateTx`.
+
+### Code
+
+- Transaction functions: `server/src-lib/Kronor/StoredIntrospection.hs`
+- `MonadMetadataStorage` integration: `server/src-lib/Hasura/App.hs`
+  (`fetchSourceIntrospection`, `storeSourceIntrospection`)
+- Catalog migration: `server/src-rsr/migrations/48_to_49.sql`
+- Schema cache pipeline (upstream): `server/src-lib/Hasura/RQL/DDL/Schema/Cache.hs`
+  (`loadStoredIntrospection`, `saveSourcesIntrospection`)

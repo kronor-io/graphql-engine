@@ -179,6 +179,7 @@ import Kronor.TokenValidator qualified as Kronor
 import Kronor.OpenTelemetryReporter qualified as Kronor
 import Kronor.IntrospectionOptionsEnforcer qualified as Kronor
 import Kronor.ConnectionRouting qualified as Kronor
+import Kronor.StoredIntrospection qualified as Kronor
 
 --------------------------------------------------------------------------------
 -- Error handling (move to another module!)
@@ -852,9 +853,12 @@ instance MonadMetadataStorage AppM where
       notifySchemaCacheSyncTx newResourceVersion instanceId cacheInvalidations
       pure newResourceVersion
 
-  -- stored source introspection is not available in this distribution
-  fetchSourceIntrospection _ = pure $ Right Nothing
-  storeSourceIntrospection _ _ = pure $ Right ()
+  -- Stored source introspection — persisted to the metadata catalog DB.
+  -- See Kronor.StoredIntrospection for details. Currently uses
+  -- appEnvMetadataDbPool via runInSeparateTx; in the future we may want to use
+  -- a dedicated appEnvIntrospectionDbPool if the payload size warrants it.
+  fetchSourceIntrospection = runInSeparateTx . Kronor.fetchStoredIntrospectionTx
+  storeSourceIntrospection si = runInSeparateTx . Kronor.storeStoredIntrospectionTx si
 
   getMetadataDbUid = runInSeparateTx getDbId
   checkMetadataStorageHealth = runInSeparateTx $ checkDbConnection

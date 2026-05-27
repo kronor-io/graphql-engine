@@ -1059,6 +1059,7 @@ library
                      , Kronor.ApiLimitsEnforcer
                      , Kronor.ConnectionRouting
                      , Kronor.IntrospectionOptionsEnforcer
+                     , Kronor.StoredIntrospection
                      , Kronor.TokenValidator
                      , Kronor.OpenTelemetryReporter
                      , Kronor.WebSocketRateLimiter
