@@ -36,6 +36,7 @@ ALL_FORK_TESTS=(
   test_fork_introspection_control.py
   test_fork_opentelemetry.py
   test_fork_request_body_limit.py
+  test_fork_stored_introspection.py
   test_fork_token_blocklist.py
 )
 
@@ -58,5 +59,4 @@ exec pytest \
   --hge-bin="$HGE_BIN" \
   --pg-urls "$PG_URL_1" "$PG_URL_2" \
   --dist=loadscope -n1 -v \
-  "${TEST_FILES[@]}" \
-  "$@"
+  "${TEST_FILES[@]}"
