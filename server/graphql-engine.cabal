@@ -22,15 +22,15 @@ extra-source-files:
   -- These are files referenced by functions from 'file-embed' which uses
   -- addDependentFile internally and has the same issue as above:
   -- To easily rebuild this list, use the command 'find server/src-rsr -type f | sort'.
-  src-rsr/catalog_version.txt
   src-rsr/catalog_versions.txt
+  src-rsr/catalog_version.txt
   src-rsr/citus_table_metadata.sql
   src-rsr/clear_system_metadata.sql
   src-rsr/cockroach_table_metadata.sql
   src-rsr/console.html
   src-rsr/drop_pg_source.sql
-  src-rsr/init_pg_source.sql
   src-rsr/initialise.sql
+  src-rsr/init_pg_source.sql
   src-rsr/introspection.json
   src-rsr/migrations/08_to_1.sql
   src-rsr/migrations/10_to_11.sql
@@ -106,6 +106,10 @@ extra-source-files:
   src-rsr/migrations/46_to_45.sql
   src-rsr/migrations/46_to_47.sql
   src-rsr/migrations/47_to_46.sql
+  src-rsr/migrations/47_to_48.sql
+  src-rsr/migrations/48_to_47.sql
+  src-rsr/migrations/48_to_49.sql
+  src-rsr/migrations/49_to_48.sql
   src-rsr/migrations/4_to_5.sql
   src-rsr/migrations/5_to_6.sql
   src-rsr/migrations/6_to_7.sql
@@ -119,6 +123,7 @@ extra-source-files:
   src-rsr/mssql/mssql_insert_trigger.sql.shakespeare
   src-rsr/mssql/mssql_source_migrations/1_to_2.sql
   src-rsr/mssql/mssql_source_migrations/2_to_3.sql
+  src-rsr/mssql/mssql_source_migrations/3_to_4.sql
   src-rsr/mssql/mssql_table_metadata.sql
   src-rsr/mssql/mssql_unlock_events.sql.shakespeare
   src-rsr/mssql/mssql_update_trigger.sql.shakespeare
@@ -126,6 +131,7 @@ extra-source-files:
   src-rsr/pg_source_migrations/0_to_1.sql
   src-rsr/pg_source_migrations/1_to_2.sql
   src-rsr/pg_source_migrations/2_to_3.sql
+  src-rsr/pg_source_migrations/3_to_4.sql
   src-rsr/pg_table_metadata.sql
   src-rsr/table_meta.sql
   src-rsr/trigger.sql.shakespeare
