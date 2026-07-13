@@ -14,6 +14,10 @@ pub mod login;
 pub mod movie;
 pub mod name_query;
 pub mod staff_member;
+pub mod streaming_error;
+pub mod r#where;
+pub mod where_int;
+pub mod where_string;
 
 pub(crate) fn scalar_types() -> BTreeMap<ndc_models::ScalarTypeName, ndc_models::ScalarType> {
     BTreeMap::from_iter([
@@ -200,6 +204,17 @@ pub(crate) fn scalar_types() -> BTreeMap<ndc_models::ScalarTypeName, ndc_models:
                 extraction_functions: BTreeMap::new(),
             },
         ),
+        (
+            "YesNo".into(),
+            ndc_models::ScalarType {
+                representation: ndc_models::TypeRepresentation::Enum {
+                    one_of: vec!["yes".into(), "no".into()],
+                },
+                aggregate_functions: BTreeMap::new(),
+                comparison_operators: BTreeMap::new(),
+                extraction_functions: BTreeMap::new(),
+            },
+        ),
     ])
 }
 
@@ -223,11 +238,15 @@ pub(crate) fn object_types() -> BTreeMap<ndc_models::ObjectTypeName, ndc_models:
             location_pascalcase::definition(),
         ),
         ("staff_member".into(), staff_member::definition()),
+        ("streaming_error".into(), streaming_error::definition()),
         ("login_response".into(), login::definition_login_response()),
         (
             "session_response".into(),
             login::definition_session_response(),
         ),
         ("session_info".into(), login::definition_session_info()),
+        ("where".into(), r#where::definition()),
+        ("where_string".into(), where_string::definition()),
+        ("where_int".into(), where_int::definition()),
     ])
 }

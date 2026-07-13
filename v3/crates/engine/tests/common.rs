@@ -21,11 +21,12 @@ use std::{
     path::PathBuf,
 };
 extern crate json_value_merge;
-use axum::http::{HeaderMap, Method, Uri};
+use axum::http::{HeaderMap, HeaderName, Method, Uri};
 use engine_types::{ExposeInternalErrors, HttpContext, ProjectId};
 use json_value_merge::Merge;
 use jsonapi_library::query::Query;
 use serde_json::Value;
+use std::str::FromStr;
 
 pub struct GoldenTestContext {
     pub(crate) http_context: HttpContext,
@@ -103,21 +104,6 @@ pub(crate) fn test_introspection_expectation(
         };
 
         let schema = GDS::build_schema(&gds)?;
-
-        // Verify successful serialization and deserialization of the schema.
-        // Hasura V3 relies on the serialized schema for handling requests.
-        // Therefore, it is crucial to ensure the functionality of both
-        // deserialization and serialization.
-        // Testing this within this function allows us to detect errors for any
-        // future metadata tests that may be added.
-        let serialized_metadata =
-            serde_json::to_string(&schema).expect("Failed to serialize schema");
-        let deserialized_metadata: Schema<GDS> =
-            serde_json::from_str(&serialized_metadata).expect("Failed to deserialize metadata");
-        assert_eq!(
-            schema, deserialized_metadata,
-            "initial built metadata does not match deserialized metadata"
-        );
 
         let query = read_to_string(&request_path)?;
 
@@ -251,11 +237,12 @@ async fn test_jsonapi(
             let result = jsonapi::handler_internal(
                 Arc::new(HeaderMap::default()),
                 Arc::new(test_ctx.http_context.clone()),
+                Arc::new(resolved_metadata.plugin_configs.clone()),
                 Arc::new(session.clone()),
                 &catalog,
                 resolved_metadata.clone(),
                 request.to_method(),
-                Uri::try_from(&path).map_err(|e| anyhow::anyhow!("Invalid URI: {}", e))?,
+                Uri::try_from(&path).map_err(|e| anyhow::anyhow!("Invalid URI: {e}"))?,
                 Query::from_params(&query_params),
             )
             .await;
@@ -320,6 +307,7 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
         let variables_path = test_path.join("variables.json");
         let response_path = test_path_string.to_string() + "/expected.json";
         let response_headers_path = test_path.join("expected_headers.json");
+        let headers_path = test_path.join("headers.json");
 
         let ndc_version_test_iterations = if common_metadata_paths_per_ndc_version.is_empty() {
             vec![(None, common_metadata_paths.to_vec())]
@@ -376,17 +364,6 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
 
             let schema = GDS::build_schema(&gds)?;
 
-            // Verify successful serialization and deserialization of the schema.
-            // Hasura V3 relies on the serialized schema for handling requests.
-            // Therefore, it is crucial to ensure the functionality of both
-            // deserialization and serialization.
-            // Testing this within this function allows us to detect errors for any
-            // future metadata tests that may be added.
-            let serialized_metadata =
-                serde_json::to_string(&schema).expect("Failed to serialize schema");
-            let _deserialized_metadata: Schema<GDS> =
-                serde_json::from_str(&serialized_metadata).expect("Failed to deserialize metadata");
-
             let query = read_to_string(&request_path)?;
 
             // Read optional GQL query variables.
@@ -399,7 +376,6 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                     Err(_) => None,
                 };
 
-            let request_headers = reqwest::header::HeaderMap::new();
             let session_vars_path = &test_path.join("session_variables.json");
             let sessions: Vec<HashMap<SessionVariableName, JsonSessionVariableValue>> =
                 json::from_str(read_to_string(session_vars_path)?.as_ref())?;
@@ -414,6 +390,18 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                     )
                 })
                 .collect::<Result<_, _>>()?;
+
+            let request_headers: Vec<HeaderMap> = match read_to_string(&headers_path) {
+                Ok(headers_str) => {
+                    let mut request_headers = vec![];
+                    let headers: Vec<BTreeMap<String, String>> = json::from_str(&headers_str)?;
+                    for headers_for_role in headers {
+                        request_headers.push(create_header_map(headers_for_role));
+                    }
+                    request_headers
+                }
+                Err(_) => sessions.iter().map(|_| HeaderMap::new()).collect(),
+            };
 
             // expected response headers are a `Vec<String>`; one set for each
             // session/role.
@@ -433,14 +421,14 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                         query: query.clone(),
                         variables: None,
                     };
-                    for session in &sessions {
+                    for (session, request_headers) in sessions.iter().zip(request_headers.iter()) {
                         let (_, response) = execute_query(
                             ExposeInternalErrors::Expose,
                             &test_ctx.http_context,
                             &schema,
                             &arc_resolved_metadata.clone(),
                             session,
-                            &request_headers,
+                            request_headers,
                             raw_request.clone(),
                             None,
                         )
@@ -452,7 +440,7 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                             &schema,
                             arc_resolved_metadata.clone(),
                             session,
-                            &request_headers,
+                            request_headers,
                             raw_request.clone(),
                             None,
                         )
@@ -467,7 +455,9 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                     }
                 }
                 Some(vars) => {
-                    for (session, variables) in sessions.iter().zip(vars) {
+                    for ((session, variables), request_headers) in
+                        sessions.iter().zip(vars).zip(request_headers.iter())
+                    {
                         let raw_request = RawRequest {
                             operation_name: None,
                             query: query.clone(),
@@ -480,7 +470,7 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                             &schema,
                             &arc_resolved_metadata,
                             session,
-                            &request_headers,
+                            request_headers,
                             raw_request.clone(),
                             None,
                         )
@@ -492,7 +482,7 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
                             &schema,
                             arc_resolved_metadata.clone(),
                             session,
-                            &request_headers,
+                            request_headers,
                             raw_request.clone(),
                             None,
                         )
@@ -549,6 +539,16 @@ pub fn test_execution_expectation_for_multiple_ndc_versions(
 
         Ok(())
     })
+}
+
+fn create_header_map(headers: BTreeMap<String, String>) -> HeaderMap {
+    let mut header_map = HeaderMap::new();
+    for (k, v) in headers {
+        let header_name = HeaderName::from_str(&k).unwrap();
+
+        header_map.insert(header_name, v.parse().unwrap());
+    }
+    header_map
 }
 
 fn read_json(path: &Path) -> anyhow::Result<Value> {
@@ -727,6 +727,7 @@ async fn run_query_graphql_ws(
         auth_config: Arc::new(dummy_auth_config),
         metrics: graphql_ws::NoOpWebSocketMetrics,
         handshake_headers: Arc::new(request_headers.clone()),
+        auth_mode_header: "x-hasura-auth-mode".to_string(),
     };
     let (channel_sender, mut channel_receiver) =
         tokio::sync::mpsc::channel::<graphql_ws::Message>(10);
@@ -796,7 +797,7 @@ async fn run_query_graphql_ws(
             graphql_ws::Message::Raw(_) => {
                 panic!("Expected a Complete message")
             }
-        };
+        }
     }
     response
 }

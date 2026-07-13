@@ -29,6 +29,16 @@ data SpanStatus
   | SpanStatusError Text
   deriving (Eq, Show)
 
+-- | The status of a span, corresponding to the OpenTelemetry span status.
+-- https://opentelemetry.io/docs/specs/otel/trace/api/#set-status
+--
+-- Spans are 'SpanStatusUnset' by default. Set to 'SpanStatusError' (with an
+-- optional description) when the span represents a failed operation.
+data SpanStatus
+  = SpanStatusUnset
+  | SpanStatusError Text
+  deriving (Eq, Show)
+
 -- | Any additional human-readable key-value pairs relevant to the execution of
 -- a span.
 --

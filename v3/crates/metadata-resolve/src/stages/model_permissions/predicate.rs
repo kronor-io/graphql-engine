@@ -24,7 +24,7 @@ use open_dds::{
     data_connector::DataConnectorName, models::ModelName, query::ComparisonOperator,
     types::CustomTypeName,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub fn resolve_model_predicate_with_model(
     flags: &open_dds::flags::OpenDdFlags,
@@ -119,6 +119,7 @@ pub(crate) fn resolve_model_predicate_with_type(
             data_connector_link,
             data_connector_scalars,
             object_types,
+            &boolean_expression_types.get_type_names(),
         )?),
         open_dds::permissions::ModelPredicate::FieldIsNull(
             open_dds::permissions::FieldIsNullPredicate { field },
@@ -176,12 +177,9 @@ pub(crate) fn resolve_model_predicate_with_type(
                     boolean_expression_types,
                 )
             } else {
-                Err(
-                    TypePredicateError::NoPredicateDefinedForRelationshipPredicate {
-                        type_name: type_name.clone(),
-                        relationship_name: relationship_name.clone(),
-                    },
-                )
+                // a `predicate` of `null` in metadata means `const True` and is equivalent to...
+                Ok(ModelPredicate::And(vec![]))
+                // see: https://hasura.io/docs/3.0/reference/metadata-reference/permissions/#modelpermissions-relationshippredicate
             }
         }
 
@@ -352,7 +350,7 @@ fn resolve_nested_field(
         column_path,
         nested_type_name,
         nested_object_type_representation,
-        nested_boolean_expression_type,
+        nested_boolean_expression_type.map(|v| &**v),
         data_connector_type_mappings,
         data_connector_link,
         data_connector_scalars,
@@ -566,7 +564,7 @@ fn resolve_relationship(
     )?;
 
     Ok(ModelPredicate::Relationship {
-        relationship_info: annotation,
+        relationship_info: Box::new(annotation),
         column_path,
         predicate: Box::new(target_model_predicate),
     })
@@ -681,6 +679,7 @@ fn resolve_field_comparison(
         Qualified<CustomTypeName>,
         object_relationships::ObjectTypeWithRelationships,
     >,
+    boolean_expression_type_names: &BTreeSet<&Qualified<CustomTypeName>>,
 ) -> Result<ModelPredicate, TypePredicateError> {
     let field_definition = object_type_representation
         .object_type
@@ -795,6 +794,7 @@ fn resolve_field_comparison(
             .iter()
             .map(|(field_name, object_type)| (field_name, &object_type.object_type))
             .collect(),
+        boolean_expression_type_names,
         &field_definition.field_type,
         value,
     )?;
@@ -804,12 +804,14 @@ fn resolve_field_comparison(
             ValueExpression::Literal(json_value.clone())
         }
         open_dds::permissions::ValueExpression::SessionVariable(session_variable) => {
-            ValueExpression::SessionVariable(hasura_authn_core::SessionVariableReference {
-                name: session_variable.clone(),
-                passed_as_json: flags.contains(open_dds::flags::Flag::JsonSessionVariables),
-                disallow_unknown_fields: flags
-                    .contains(open_dds::flags::Flag::DisallowUnknownValuesInArguments),
-            })
+            ValueExpression::SessionVariable(
+                open_dds::session_variables::SessionVariableReference {
+                    name: session_variable.clone(),
+                    passed_as_json: flags.contains(open_dds::flags::Flag::JsonSessionVariables),
+                    disallow_unknown_fields: flags
+                        .contains(open_dds::flags::Flag::DisallowUnknownValuesInArguments),
+                },
+            )
         }
     };
 

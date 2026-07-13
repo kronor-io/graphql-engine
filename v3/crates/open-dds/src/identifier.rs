@@ -24,7 +24,15 @@ macro_rules! identifier {
 /// - starts with an alphabet or underscore
 /// - all characters are either alphanumeric or underscore
 #[derive(
-    Clone, Debug, derive_more::Display, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize,
+    Clone,
+    Debug,
+    derive_more::with_trait::Display,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
 )]
 pub struct Identifier(SmolStr);
 
@@ -72,16 +80,16 @@ impl From<Identifier> for String {
 impl OpenDd for Identifier {
     fn deserialize(
         json: serde_json::Value,
-        _path: jsonpath::JSONPath,
+        path: jsonpath::JSONPath,
     ) -> Result<Self, OpenDdDeserializeError> {
         let string: String =
             serde_json::from_value(json).map_err(|error| OpenDdDeserializeError {
                 error,
-                path: jsonpath::JSONPath::default(),
+                path: path.clone(),
             })?;
         Identifier::new(string).map_err(|e| OpenDdDeserializeError {
             error: serde_json::Error::custom(e),
-            path: jsonpath::JSONPath::default(),
+            path,
         })
     }
 
@@ -130,7 +138,15 @@ impl<'de> Deserialize<'de> for Identifier {
 /// - starts with an alphabet or underscore
 /// - all characters are either alphanumeric or underscore
 #[derive(
-    Clone, Debug, derive_more::Display, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize,
+    Clone,
+    Debug,
+    derive_more::with_trait::Display,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
 )]
 pub struct SubgraphNameInput(SmolStr);
 
@@ -166,16 +182,16 @@ impl std::borrow::Borrow<str> for SubgraphNameInput {
 impl OpenDd for SubgraphNameInput {
     fn deserialize(
         json: serde_json::Value,
-        _path: jsonpath::JSONPath,
+        path: jsonpath::JSONPath,
     ) -> Result<Self, OpenDdDeserializeError> {
         let string: String =
             serde_json::from_value(json).map_err(|error| OpenDdDeserializeError {
                 error,
-                path: jsonpath::JSONPath::default(),
+                path: path.clone(),
             })?;
         SubgraphNameInput::new(string).map_err(|e| OpenDdDeserializeError {
             error: serde_json::Error::custom(e),
-            path: jsonpath::JSONPath::default(),
+            path,
         })
     }
 
@@ -234,7 +250,7 @@ impl_JsonSchema_with_OpenDd_for!(SubgraphNameInput);
 #[derive(
     Clone,
     Debug,
-    derive_more::Display,
+    derive_more::with_trait::Display,
     PartialEq,
     Eq,
     PartialOrd,

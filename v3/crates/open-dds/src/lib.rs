@@ -6,9 +6,12 @@ use open_dds::spanned::Spanned;
 use schemars::{JsonSchema, schema::Schema::Object as SchemaObjectVariant};
 use serde::{Deserialize, Serialize};
 
+use crate::views::View;
+
 pub mod accessor;
 pub mod aggregates;
 pub mod arguments;
+pub mod authorization;
 pub mod boolean_expression;
 pub mod commands;
 pub mod data_connector;
@@ -26,12 +29,13 @@ pub mod spanned;
 pub mod test_utils;
 pub mod traits;
 pub mod types;
+pub mod views;
 
 // In the user facing configuration, the connection string can either be a literal or a reference
 // to a secret, so we advertize either in the JSON schema. However, when building the configuration,
 // we expect the metadata build service to have resolved the secret reference so we deserialize
 // only to a literal value.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, derive_more::Display)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, derive_more::with_trait::Display)]
 pub struct EnvironmentValue {
     pub value: String,
 }
@@ -42,19 +46,19 @@ impl traits::OpenDd for EnvironmentValue {
         json: serde_json::Value,
         _path: jsonpath::JSONPath,
     ) -> Result<Self, traits::OpenDdDeserializeError> {
-        serde_path_to_error::deserialize(json).map_err(|e| traits::OpenDdDeserializeError {
-            path: jsonpath::JSONPath::from_serde_path(e.path()),
-            error: e.into_inner(),
+        serde_json::from_value(json).map_err(|e| traits::OpenDdDeserializeError {
+            path: _path,
+            error: e,
         })
     }
 
     fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         // This is copied from ndc-sdk to avoid establishing a dependency.
         let mut s = EnvironmentValueImpl::json_schema(generator);
-        if let SchemaObjectVariant(o) = &mut s {
-            if let Some(m) = &mut o.metadata {
-                m.id = Some("https://hasura.io/jsonschemas/EnvironmentValue".into());
-            }
+        if let SchemaObjectVariant(o) = &mut s
+            && let Some(m) = &mut o.metadata
+        {
+            m.id = Some("https://hasura.io/jsonschemas/EnvironmentValue".into());
         }
         s
     }
@@ -85,6 +89,7 @@ enum EnvironmentValueImpl {
 )]
 #[serde(tag = "kind")]
 #[opendd(as_kind)]
+#[allow(clippy::large_enum_variant)]
 pub enum OpenDdSubgraphObject {
     // Data connector
     DataConnectorLink(Spanned<data_connector::DataConnectorLink>),
@@ -125,6 +130,10 @@ pub enum OpenDdSubgraphObject {
 
     // Plugin
     LifecyclePluginHook(Spanned<plugins::LifecyclePluginHook>),
+
+    // View
+    View(Spanned<View>),
+    ViewPermissions(Spanned<permissions::ViewPermissions>),
 }
 
 /// All of the metadata required to run Hasura v3 engine.
@@ -193,28 +202,20 @@ impl traits::OpenDd for Metadata {
 
 impl Metadata {
     pub fn from_json_str(s: &str) -> Result<Self, traits::OpenDdDeserializeError> {
-        // First deserialize the JSON string into a serde_json::Value using serde_path_to_error
-        // to record the path to the error in case of a parse error.
-
-        let json_deserializer = &mut serde_json::Deserializer::from_str(s);
-
-        let mut track = serde_path_to_error::Track::new();
-        let json_deserializer_with_path =
-            serde_path_to_error::Deserializer::new(json_deserializer, &mut track);
-
-        match serde_json::Value::deserialize(json_deserializer_with_path) {
-            Ok(json) => {
-                // Then deserialize the serde_json::Value into the OpenDd type using the OpenDd trait.
-                <Metadata as traits::OpenDd>::deserialize(json, jsonpath::JSONPath::new())
-            }
-            Err(e) => Err(traits::OpenDdDeserializeError {
-                path: jsonpath::JSONPath::from_serde_path(&track.path()),
+        // First deserialize the JSON string into a serde_json::Value.
+        // serde_path_to_error is not needed here since serde_json::Value always
+        // deserializes successfully from valid JSON, and syntax errors already
+        // include line/column information.
+        let json: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| traits::OpenDdDeserializeError {
+                path: jsonpath::JSONPath::new(),
                 error: e,
-            }),
-        }
+            })?;
+        // Then deserialize the serde_json::Value into the OpenDd type using the OpenDd trait.
+        <Metadata as traits::OpenDd>::deserialize(json, jsonpath::JSONPath::new())
     }
 
-    pub fn get_flags(&self) -> Cow<flags::OpenDdFlags> {
+    pub fn get_flags(&self) -> Cow<'_, flags::OpenDdFlags> {
         match self {
             Metadata::WithoutNamespaces(_) => Cow::Owned(flags::OpenDdFlags::default()),
             Metadata::Versioned(metadata) => match metadata {

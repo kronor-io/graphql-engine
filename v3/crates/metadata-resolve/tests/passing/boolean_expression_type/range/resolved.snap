@@ -65,8 +65,16 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
                     graphql_input_type_name: None,
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {
@@ -369,30 +377,63 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
                     graphql_input_type_name: None,
                     description: None,
                 },
-                type_output_permissions: {
-                    Role(
-                        "admin",
-                    ): TypeOutputPermission {
-                        allowed_fields: {
-                            FieldName(
-                                Identifier(
-                                    "id",
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [
+                        AllowFields {
+                            fields: [
+                                FieldName(
+                                    Identifier(
+                                        "id",
+                                    ),
                                 ),
-                            ),
-                            FieldName(
-                                Identifier(
-                                    "title",
+                                FieldName(
+                                    Identifier(
+                                        "title",
+                                    ),
                                 ),
-                            ),
-                            FieldName(
-                                Identifier(
-                                    "rating",
+                                FieldName(
+                                    Identifier(
+                                        "rating",
+                                    ),
+                                ),
+                            ],
+                            condition: Some(
+                                ConditionHash(
+                                    14539879520726521060,
                                 ),
                             ),
                         },
+                    ],
+                    by_role: {
+                        Role(
+                            "admin",
+                        ): TypeOutputPermission {
+                            allowed_fields: {
+                                FieldName(
+                                    Identifier(
+                                        "id",
+                                    ),
+                                ),
+                                FieldName(
+                                    Identifier(
+                                        "title",
+                                    ),
+                                ),
+                                FieldName(
+                                    Identifier(
+                                        "rating",
+                                    ),
+                                ),
+                            },
+                        },
                     },
+                    uses_rules_based_auth: false,
                 },
-                type_input_permissions: {},
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {
@@ -888,6 +929,7 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
                                         },
                                     ),
                                     supports_relational_queries: None,
+                                    supports_relational_mutations: None,
                                 },
                             },
                             collection: CollectionName(
@@ -1215,6 +1257,7 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
                     global_id_source: None,
                     apollo_federation_key_source: None,
                     aggregate_expression: None,
+                    unique_identifiers: [],
                     raw: ModelRaw {
                         filter_expression_type: Some(
                             Qualified {
@@ -1285,13 +1328,42 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
                         },
                     },
                 },
-                select_permissions: {
-                    Role(
-                        "admin",
-                    ): SelectPermission {
-                        filter: AllowAll,
-                        argument_presets: {},
-                        allow_subscriptions: false,
+                arguments: {},
+                permissions: ModelPermissions {
+                    authorization_rules: [
+                        Access {
+                            condition: Some(
+                                ConditionHash(
+                                    14539879520726521060,
+                                ),
+                            ),
+                            allow_or_deny: Allow,
+                        },
+                        Subscription {
+                            condition: Some(
+                                ConditionHash(
+                                    14539879520726521060,
+                                ),
+                            ),
+                            allow_or_deny: Deny,
+                        },
+                    ],
+                    by_role: {
+                        Role(
+                            "admin",
+                        ): ModelPermission {
+                            select: Some(
+                                SelectPermission {
+                                    filter: AllowAll,
+                                    allow_subscriptions: false,
+                                },
+                            ),
+                            input: Some(
+                                ModelInputPermission {
+                                    argument_presets: {},
+                                },
+                            ),
+                        },
                     },
                 },
                 filter_expression_type: Some(
@@ -1564,6 +1636,7 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
                     ),
                     filter_input_type_name: None,
                 },
+                description: None,
             },
         },
         commands: {},
@@ -2132,6 +2205,7 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
             scalars: {},
         },
         aggregate_expressions: {},
+        views: {},
         graphql_config: GlobalGraphqlConfig {
             query_root_type_name: TypeName(
                 Name(
@@ -2166,13 +2240,39 @@ input_file: crates/metadata-resolve/tests/passing/boolean_expression_type/range/
         },
         plugin_configs: LifecyclePluginConfigs {
             pre_parse_plugins: [],
-            pre_response_plugins: [],
+            pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks {
+                sync_hooks: [],
+                async_hooks: [],
+            },
             pre_route_plugins: [],
+            pre_ndc_request_plugins: {},
+            pre_ndc_response_plugins: {},
         },
         roles: {
             Role(
                 "admin",
             ),
+        },
+        conditions: Conditions {
+            conditions: {
+                ConditionHash(
+                    14539879520726521060,
+                ): BinaryOperation {
+                    op: Equals,
+                    left: SessionVariable(
+                        SessionVariableReference {
+                            name: SessionVariableName(
+                                "x-hasura-role",
+                            ),
+                            passed_as_json: false,
+                            disallow_unknown_fields: false,
+                        },
+                    ),
+                    right: Literal(
+                        String("admin"),
+                    ),
+                },
+            },
         },
         runtime_flags: RuntimeFlags(
             {},

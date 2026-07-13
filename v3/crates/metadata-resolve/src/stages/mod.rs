@@ -24,6 +24,8 @@ pub mod scalar_type_representations;
 pub mod scalar_types;
 pub mod type_permissions;
 mod types;
+pub mod view_permissions;
+pub mod views;
 
 use command_permissions::CommandPermissionsOutput;
 use model_permissions::ModelPermissionsOutput;
@@ -32,6 +34,7 @@ pub use types::Metadata;
 
 use crate::flags::RuntimeFlags;
 use crate::helpers::types::TrackGraphQLRootFields;
+use crate::types::condition::Conditions;
 use crate::types::configuration::Configuration;
 use crate::types::error::{ContextualError, Error, SeparatedBy, ShouldBeAnError, WithContext};
 use crate::types::warning::Warning;
@@ -65,6 +68,9 @@ fn resolve_internal(
     // and which features should be enabled or disabled. We check this structure is valid.
     let graphql_config =
         graphql_config::resolve(&metadata_accessor.graphql_config, &metadata_accessor.flags)?;
+
+    // Resolve SQL views and their dependencies
+    let views::ViewsOutput { views } = views::resolve(&metadata_accessor.views)?;
 
     // Fetch and check schema information for all our data connectors
     let data_connectors::DataConnectorsOutput {
@@ -126,9 +132,13 @@ fn resolve_internal(
 
     all_issues.extend(issues.into_iter().map(Warning::from));
 
+    // we de-dupe Conditions as we collect them, recording the hash
+    // in their place
+    let mut conditions = Conditions::new();
+
     // Fetch and validate permissions, and attach them to the relevant object types
     let (object_types_with_permissions, type_permission_issues) =
-        type_permissions::resolve(&metadata_accessor, object_types)
+        type_permissions::resolve(&metadata_accessor, object_types, &mut conditions)
             .map_err(flatten_multiple_errors)?;
 
     all_issues.extend(type_permission_issues.into_iter().map(Warning::from));
@@ -264,12 +274,13 @@ fn resolve_internal(
 
     // now we know about relationships, we can check our arguments (particularly, any
     // boolean expressions they use and whether their relationships are valid)
-    let issues = arguments::resolve(
+    let arguments::ArgumentsOutput { issues, arguments } = arguments::resolve(
         &commands,
         &models,
         &object_types_with_relationships,
         &scalar_types,
         &boolean_expression_types,
+        &data_connector_scalars,
         &metadata_accessor.flags,
     )
     .map_err(flatten_multiple_errors)?;
@@ -283,9 +294,10 @@ fn resolve_internal(
         issues,
     } = models_graphql::resolve(
         &metadata_accessor,
-        &models,
+        models,
         &commands,
         &object_types_with_relationships,
+        &arguments,
         &boolean_expression_types,
         &mut track_root_fields,
         &graphql_config,
@@ -305,9 +317,11 @@ fn resolve_internal(
         &commands,
         &object_types_with_relationships,
         &scalar_types,
+        &arguments,
         &boolean_expression_types,
         &models_with_graphql,
         &data_connector_scalars,
+        &mut conditions,
     )
     .map_err(flatten_multiple_errors)?;
 
@@ -318,15 +332,22 @@ fn resolve_internal(
         issues: model_permission_issues,
     } = model_permissions::resolve(
         &metadata_accessor,
+        &data_connectors,
         &data_connector_scalars,
         &object_types_with_relationships,
         &scalar_types,
-        &models_with_graphql,
+        models_with_graphql,
         &boolean_expression_types,
+        &mut conditions,
     )
     .map_err(flatten_multiple_errors)?;
 
     all_issues.extend(model_permission_issues.into_iter().map(Warning::from));
+
+    let view_permissions::ViewPermissionsOutput {
+        permissions: views_with_permissions,
+    } = view_permissions::resolve(&metadata_accessor, &views, &mut conditions)
+        .map_err(flatten_multiple_errors)?;
 
     let roles = roles::resolve(
         &object_types_with_relationships,
@@ -338,7 +359,7 @@ fn resolve_internal(
     let scalar_types_with_representations =
         scalar_type_representations::resolve(&data_connector_scalars, &scalar_types);
 
-    let plugin_configs = plugins::resolve(&metadata_accessor);
+    let plugin_configs = plugins::resolve(&metadata_accessor).map_err(flatten_multiple_errors)?;
 
     // check for duplicate names across types
     all_issues.extend(conflicting_types::check_conflicting_names_across_types(
@@ -363,7 +384,9 @@ fn resolve_internal(
             graphql_config: graphql_config.global,
             roles,
             plugin_configs,
+            conditions,
             runtime_flags,
+            views: views_with_permissions,
         },
         all_warnings,
     ))
@@ -378,7 +401,7 @@ fn flatten_multiple_errors<E: Into<Error>>(errors: Vec<E>) -> Error {
             errors: SeparatedBy {
                 lines_of: errors
                     .into_iter()
-                    .map(derive_more::Into::into)
+                    .map(derive_more::with_trait::Into::into)
                     .map(ContextualError::add_context_if_exists)
                     .collect(),
             },

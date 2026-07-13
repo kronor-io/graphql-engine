@@ -1,8 +1,9 @@
+use open_dds::views::ViewName;
 use serde_with::serde_as;
 use std::collections::{BTreeMap, BTreeSet};
 
-use hasura_authn_core::Role;
 use indexmap::IndexMap;
+use open_dds::permissions::Role;
 use serde::{Deserialize, Serialize};
 
 use open_dds::{
@@ -11,6 +12,7 @@ use open_dds::{
 };
 
 use crate::flags::RuntimeFlags;
+use crate::types::condition::Conditions;
 use crate::types::subgraph::Qualified;
 
 use crate::stages::{
@@ -39,8 +41,11 @@ pub struct Metadata {
     #[serde_as(as = "Vec<(_, _)>")]
     pub aggregate_expressions:
         BTreeMap<Qualified<AggregateExpressionName>, aggregates::AggregateExpression>,
+    #[serde_as(as = "Vec<(_, _)>")]
+    pub views: IndexMap<Qualified<ViewName>, crate::stages::view_permissions::ViewWithPermissions>,
     pub graphql_config: graphql_config::GlobalGraphqlConfig,
     pub plugin_configs: LifecyclePluginConfigs,
     pub roles: BTreeSet<Role>,
+    pub conditions: Conditions,
     pub runtime_flags: RuntimeFlags,
 }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::http::{HeaderMap, HeaderValue};
 use cookie::{self, Cookie};
 use hasura_authn_core::{JsonSessionVariableValue, Role};
-use jsonptr::Pointer;
+use jsonptr::PointerBuf;
 use jsonwebtoken::{self as jwt, DecodingKey, Validation, decode};
 use jwt::decode_header;
 use open_dds::session_variables::SessionVariableName;
@@ -34,6 +34,8 @@ pub enum Error {
     ExpectedStringifiedJson,
     #[error("The default role is not present in the allowed roles")]
     DisallowedDefaultRole,
+    #[error("The specified role is not present in the allowed roles")]
+    DisallowedRole,
     #[error("Error while parsing the claims map entry: {claim_name} - {err}")]
     ParseClaimsMapEntryError {
         claim_name: String,
@@ -57,6 +59,8 @@ pub enum Error {
     CookieParseError { err: cookie::ParseError },
     #[error("Missing corresponding value for the cookie with cookie name: {cookie_name}")]
     MissingCookieValue { cookie_name: String },
+    #[error("JWT validation error: {0}")]
+    JWTValidationError(jwt::errors::Error),
     #[error("Internal Error - {0}")]
     Internal(#[from] InternalError),
 }
@@ -102,6 +106,7 @@ impl Error {
             | Error::KidHeaderNotFound
             | Error::ExpectedStringifiedJson
             | Error::DisallowedDefaultRole
+            | Error::DisallowedRole
             | Error::ParseClaimsMapEntryError {
                 claim_name: _,
                 err: _,
@@ -116,7 +121,8 @@ impl Error {
             }
             | Error::CookieParseError { err: _ }
             | Error::MissingCookieValue { cookie_name: _ }
-            | Error::ClaimMustBeAString { claim_name: _ } => StatusCode::BAD_REQUEST,
+            | Error::ClaimMustBeAString { claim_name: _ }
+            | Error::JWTValidationError(_) => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -127,6 +133,7 @@ impl Error {
             | Error::KidHeaderNotFound
             | Error::ExpectedStringifiedJson
             | Error::DisallowedDefaultRole
+            | Error::DisallowedRole
             | Error::ParseClaimsMapEntryError {
                 claim_name: _,
                 err: _,
@@ -141,7 +148,8 @@ impl Error {
             }
             | Error::CookieParseError { err: _ }
             | Error::MissingCookieValue { cookie_name: _ }
-            | Error::ClaimMustBeAString { claim_name: _ } => false,
+            | Error::ClaimMustBeAString { claim_name: _ }
+            | Error::JWTValidationError(_) => false,
         };
         engine_types::MiddlewareError {
             status: self.to_status_code(),
@@ -244,7 +252,7 @@ pub struct JWTClaimsMappingPathEntry<T> {
     /// JSON pointer to find the particular claim in the decoded
     /// JWT token.
     #[schemars(schema_with = "json_pointer_schema")]
-    path: Pointer,
+    path: PointerBuf,
     /// Default value to be used when no value is found when
     /// looking up the value using the `path`.
     default: Option<T>,
@@ -292,7 +300,7 @@ pub struct JWTClaimsNamespace {
     pub claims_format: JWTClaimsFormat,
     /// Pointer to lookup the Hasura claims within the decoded claims.
     #[schemars(schema_with = "json_pointer_schema")]
-    pub location: Pointer,
+    pub location: PointerBuf,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, JsonSchema, Debug)]
@@ -379,7 +387,7 @@ impl JWTConfig {
                 "claimsConfig": {
                     "namespace": {
                         "claimsFormat": "Json",
-                        "location": jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
+                        "location": jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
                     }
                 }
             }
@@ -534,7 +542,7 @@ fn get_claims_mapping_entry_value<T: for<'de> serde::Deserialize<'de> + Clone>(
     match claims_mapping_entry {
         JWTClaimsMappingEntry::Literal(literal_value) => Ok(Some(literal_value.clone())),
         JWTClaimsMappingEntry::Path(JWTClaimsMappingPathEntry { path, default }) => {
-            Ok(match json_value.pointer(path) {
+            Ok(match json_value.pointer(path.as_str()) {
                 Some(v) => Some(
                     serde_json::from_value(v.clone())
                         .map_err(|e| Error::ParseClaimsMapEntryError { claim_name, err: e })?,
@@ -555,6 +563,46 @@ pub enum AudienceValidationMode {
     /// but only if one is configured. This is a serious security issue, but this behaviour is retained for
     /// backwards compatibility and is disabled via the OpenDDFlag `RequireJwtAudienceValidationIfAudClaimPresent`
     Optional,
+}
+
+/// Determines whether a JWT error should be treated as a client error (4xx) or server error (5xx)
+#[allow(clippy::match_same_arms)]
+fn categorize_jwt_error(jwt_error: jwt::errors::Error) -> Error {
+    use jwt::errors::ErrorKind;
+
+    match jwt_error.kind() {
+        // Client errors - issues with the token provided by the client These are clearly client-side validation
+        // failures
+        ErrorKind::ExpiredSignature
+        | ErrorKind::InvalidToken
+        | ErrorKind::InvalidSignature
+        | ErrorKind::InvalidIssuer
+        | ErrorKind::InvalidAudience
+        | ErrorKind::InvalidSubject
+        | ErrorKind::ImmatureSignature
+        | ErrorKind::MissingRequiredClaim(_) => Error::JWTValidationError(jwt_error),
+
+        // Server errors - issues with server configuration or key management These indicate problems with the server
+        // setup, not the client's token
+        ErrorKind::InvalidEcdsaKey
+        | ErrorKind::InvalidRsaKey(_)
+        | ErrorKind::RsaFailedSigning
+        | ErrorKind::InvalidAlgorithmName
+        | ErrorKind::InvalidKeyFormat
+        | ErrorKind::InvalidAlgorithm
+        | ErrorKind::MissingAlgorithm
+        | ErrorKind::Crypto(_) => Error::Internal(InternalError::JWTDecodingError(jwt_error)),
+
+        // Ambiguous errors - could be either client or server issues We treat these as server errors to maintain
+        // backward compatibility These could be caused by malformed tokens (client) or server parsing issues
+        ErrorKind::Base64(_) | ErrorKind::Json(_) | ErrorKind::Utf8(_) => {
+            Error::Internal(InternalError::JWTDecodingError(jwt_error))
+        }
+
+        // Catch-all for any future error variants added to the jsonwebtoken library Default to internal error for now,
+        // but when new variants are added, they should be explicitly categorized above
+        _ => Error::Internal(InternalError::JWTDecodingError(jwt_error)),
+    }
 }
 
 pub(crate) async fn decode_and_parse_hasura_claims(
@@ -580,18 +628,18 @@ pub(crate) async fn decode_and_parse_hasura_claims(
     // Additional validations according to the `jwt_config`.
     if let Some(aud) = &jwt_config.audience {
         validation.set_audience(&aud.iter().collect::<Vec<_>>());
-    };
+    }
 
     if let Some(issuer) = &jwt_config.issuer {
         validation.set_issuer(&[issuer]);
-    };
+    }
 
     if let Some(leeway) = jwt_config.allowed_skew {
         validation.leeway = leeway;
-    };
+    }
 
     let claims: serde_json::Value = decode(&jwt, &decoding_key, &validation)
-        .map_err(InternalError::JWTDecodingError)?
+        .map_err(categorize_jwt_error)?
         .claims;
 
     let hasura_claims = match &jwt_config.claims_config {
@@ -602,7 +650,7 @@ pub(crate) async fn decode_and_parse_hasura_claims(
             claims_format,
             location: claims_namespace_path,
         }) => {
-            let unprocessed_hasura_claims = claims.pointer(claims_namespace_path).ok_or(
+            let unprocessed_hasura_claims = claims.pointer(claims_namespace_path.as_str()).ok_or(
                 InternalError::HasuraClaimsNotFound {
                     path: claims_namespace_path.to_string(),
                 },
@@ -701,12 +749,12 @@ pub(crate) fn get_authorization_token(
         JWTTokenLocation::Header(JWTHeaderLocation { name }) => headers
             .get(name)
             .ok_or(Error::AuthorizationHeaderSourceNotFound {
-                header_name: name.to_string(),
+                header_name: name.clone(),
             })?
             .to_str()
             .map_err(|e| Error::AuthorizationHeaderParseError {
                 err: e.to_string(),
-                header_name: name.to_string(),
+                header_name: name.clone(),
             })?
             .to_string(),
 
@@ -728,12 +776,12 @@ pub(crate) fn get_authorization_token(
             if cookie_name == Some(name) {
                 cookie_value
                     .ok_or(Error::MissingCookieValue {
-                        cookie_name: name.to_string(),
+                        cookie_name: name.clone(),
                     })?
                     .to_string()
             } else {
                 return Err(Error::CookieNameNotFound {
-                    cookie_name: name.to_string(),
+                    cookie_name: name.clone(),
                 });
             }
         }
@@ -779,7 +827,7 @@ mod tests {
         let hasura_claims = get_default_hasura_claims();
         let claims: Claims = get_claims(
             &serde_json::to_value(hasura_claims)?,
-            jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
+            jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
         )?;
         let jwt_header = jwt::Header {
             alg,
@@ -907,7 +955,7 @@ mod tests {
                "claimsConfig": {
                   "namespace": {
                      "claimsFormat": "Json",
-                     "location": jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
+                     "location": jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
                   }
                }
             }
@@ -947,7 +995,7 @@ mod tests {
                "claimsConfig": {
                   "namespace": {
                      "claimsFormat": "StringifiedJson",
-                     "location": jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
+                     "location": jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
                   }
                }
             }
@@ -959,7 +1007,7 @@ mod tests {
         let stringified_hasura_claims = serde_json::to_string(&hasura_claims)?;
         let claims = get_claims(
             &serde_json::to_value(stringified_hasura_claims)?,
-            jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
+            jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
         )?;
         let alg = jwt::Algorithm::HS256;
         let jwt_header = jwt::Header {
@@ -1259,7 +1307,7 @@ mod tests {
         );
         assert_eq!(
             jwt_config_result.unwrap_err().to_string(),
-            "json pointer \"custom_claims/user_id\" is malformed due to missing starting slash"
+            "json pointer failed to parse; does not start with a slash ('/') and is not empty"
         );
         Ok(())
     }
@@ -1316,7 +1364,7 @@ mod tests {
 
         let claims: Claims = get_claims(
             &serde_json::to_value(&hasura_claims)?,
-            jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
+            jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
         )?;
 
         let mut jwt_header = jwt::Header::new(jwt::Algorithm::ES256);
@@ -1340,7 +1388,7 @@ mod tests {
             "claimsConfig": {
                 "namespace": {
                     "claimsFormat": "Json",
-                    "location": jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
+                    "location": jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
                 },
             },
         }
@@ -1385,6 +1433,84 @@ mod tests {
             .to_string(),
             "Internal Error - No matching JWK found for the given kid: random_kid_3"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    // This test verifies that expired JWT tokens return a client error (400) instead of server error (500)
+    // while other JWT errors maintain backward compatibility and still return 500
+    async fn test_expired_jwt_returns_client_error() -> anyhow::Result<()> {
+        let hasura_claims = get_default_hasura_claims();
+
+        // Create a JWT with an expired timestamp
+        let expired_claims = json!(
+            {
+                "sub": "1234567890",
+                "name": "John Doe",
+                "iat": 1693439022,
+                "exp": 1693439022, // Same as iat, so it's immediately expired
+                "claims.jwt.hasura.io": hasura_claims
+            }
+        );
+        let claims: Claims = serde_json::from_value(expired_claims)?;
+
+        let jwt_header = jwt::Header {
+            alg: jwt::Algorithm::HS256,
+            ..Default::default()
+        };
+
+        let encoded_claims = encode(
+            &jwt_header,
+            &claims,
+            &EncodingKey::from_secret("token".as_ref()),
+        )?;
+
+        let jwt_secret_config_json = json!(
+            {
+               "key": {
+                 "fixed": {
+                    "algorithm": "HS256",
+                    "key": {
+                       "value": "token"
+                    }
+                 }
+               },
+               "tokenLocation": {
+                  "type": "BearerAuthorization"
+               },
+               "claimsConfig": {
+                  "namespace": {
+                     "claimsFormat": "Json",
+                     "location": jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
+                  }
+               }
+            }
+        );
+
+        let jwt_config: JWTConfig = serde_json::from_value(jwt_secret_config_json)?;
+        let http_client = reqwest::Client::new();
+
+        let result = decode_and_parse_hasura_claims(
+            &http_client,
+            &jwt_config,
+            encoded_claims,
+            AudienceValidationMode::Required,
+        )
+        .await;
+
+        // Verify that we get a JWTValidationError (client error) not an Internal error
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        match &error {
+            Error::JWTValidationError(jwt_error) => {
+                assert_eq!(jwt_error.kind(), &jwt::errors::ErrorKind::ExpiredSignature);
+            }
+            _ => panic!("Expected JWTValidationError but got: {error:?}"),
+        }
+
+        // Verify the status code is 400 (Bad Request)
+        assert_eq!(error.to_status_code(), StatusCode::BAD_REQUEST);
+
         Ok(())
     }
 
@@ -1553,7 +1679,7 @@ mod tests {
         let hasura_claims = get_default_hasura_claims();
         let claims: Claims = get_claims(
             &serde_json::to_value(hasura_claims.clone())?,
-            jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
+            jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]).as_str(),
         )?;
         let encoded_claims = encode(&jwt_header, &claims, &encoding_key)?;
         let jwt_secret_config_json = json!({
@@ -1564,7 +1690,7 @@ mod tests {
             "claimsConfig": {
                 "namespace": {
                     "claimsFormat": "Json",
-                    "location": jsonptr::Pointer::new([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
+                    "location": jsonptr::PointerBuf::from_tokens([DEFAULT_HASURA_CLAIMS_NAMESPACE]),
                 },
             },
         });

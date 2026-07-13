@@ -5,6 +5,7 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     arguments::ArgumentName,
+    authorization,
     commands::CommandName,
     impl_JsonSchema_with_OpenDd_for,
     models::ModelName,
@@ -13,6 +14,7 @@ use crate::{
     spanned::Spanned,
     traits::{self, OpenDd, OpenDdDeserializeError},
     types::{CustomTypeName, FieldName, OperatorName},
+    views::ViewName,
 };
 
 #[derive(
@@ -26,7 +28,7 @@ use crate::{
     Ord,
     JsonSchema,
     Hash,
-    derive_more::Display,
+    derive_more::with_trait::Display,
     opendds_derive::OpenDd,
 )]
 pub struct Role(pub String);
@@ -52,15 +54,21 @@ pub struct ArgumentPreset {
 #[serde(rename_all = "camelCase")]
 #[opendd(
     as_versioned_with_definition,
-    json_schema(title = "TypePermissions", example = "TypePermissions::example")
+    json_schema(
+        title = "TypePermissions",
+        example = "TypePermissions::example_v1",
+        example = "TypePermissions::example_v2_role_based",
+        example = "TypePermissions::example_v2_rules_based"
+    )
 )]
 /// Definition of permissions for an OpenDD type.
 pub enum TypePermissions {
     V1(TypePermissionsV1),
+    V2(TypePermissionsV2),
 }
 
 impl TypePermissions {
-    fn example() -> serde_json::Value {
+    fn example_v1() -> serde_json::Value {
         serde_json::json!(
             {
                 "kind": "TypePermissions",
@@ -93,9 +101,101 @@ impl TypePermissions {
         )
     }
 
-    pub fn upgrade(self) -> TypePermissionsV1 {
+    fn example_v2_role_based() -> serde_json::Value {
+        serde_json::json!(
+            {
+                "kind": "TypePermissions",
+                "version": "v2",
+                "definition": {
+                    "typeName": "article",
+                    "roleBased": {
+                        "permissions": [
+                            {
+                                "role": "admin",
+                                "output": {
+                                    "allowedFields": [
+                                        "article_id",
+                                        "author_id",
+                                        "title"
+                                    ]
+                                }
+                            },
+                            {
+                                "role": "user",
+                                "output": {
+                                    "allowedFields": [
+                                        "article_id",
+                                        "author_id"
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+    }
+
+    fn example_v2_rules_based() -> serde_json::Value {
+        serde_json::json!(
+        {
+            "kind": "TypePermissions",
+            "version": "v2",
+            "definition": {
+                "typeName": "movie",
+                "permissions": {
+                    "rulesBased": [
+                        {
+                            "allowFields": {
+                                "condition": {
+                                    "contains": {
+                                        "left": {
+                                            "sessionVariable": "x-hasura-role"
+                                        },
+                                        "right": {
+                                            "literal": [
+                                                "admin",
+                                                "user",
+                                                "user_not",
+                                                "user_and",
+                                                "user_or",
+                                                "limited_fields_user"
+                                            ]
+                                        }
+                                    }
+                                },
+                                "fields": ["movie_id", "rating", "title", "release_date"]
+                            }
+                        },
+                        {
+                            "denyFields": {
+                                "condition": {
+                                    "contains": {
+                                        "left": {
+                                            "sessionVariable": "x-hasura-role"
+                                        },
+                                        "right": {
+                                            "literal": ["limited_fields_user"]
+                                        }
+                                    }
+                                },
+                                "fields": ["rating"]
+                            }
+                        }
+                    ]
+                }
+            }
+            }
+        )
+    }
+
+    pub fn upgrade(self) -> TypePermissionsV2 {
         match self {
-            TypePermissions::V1(v1) => v1,
+            TypePermissions::V1(v1) => TypePermissionsV2 {
+                type_name: v1.type_name,
+                permissions: TypePermissionOperand::RoleBased(v1.permissions),
+            },
+            TypePermissions::V2(v2) => v2,
         }
     }
 }
@@ -109,6 +209,30 @@ pub struct TypePermissionsV1 {
     pub type_name: CustomTypeName,
     /// A list of type permissions, one for each role.
     pub permissions: Vec<TypePermission>,
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[opendd(json_schema(title = "TypePermissionsV1"))]
+/// Definition of permissions for an OpenDD type.
+pub struct TypePermissionsV2 {
+    /// The name of the type for which permissions are being defined. Must be an object type.
+    pub type_name: CustomTypeName,
+    /// Type permissions definitions
+    pub permissions: TypePermissionOperand,
+}
+
+/// Configuration for type permissions
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[opendd(externally_tagged, json_schema(title = "TypePermissionOperand"))]
+pub enum TypePermissionOperand {
+    /// Definition of role-based type permissions on an OpenDD object type
+    #[opendd(json_schema(title = "RoleBased"))]
+    RoleBased(Vec<TypePermission>),
+    /// Definition of rules-based type permissions on an OpenDD object type
+    #[opendd(json_schema(title = "RulesBased"))]
+    RulesBased(Vec<authorization::TypeAuthorizationRule>),
 }
 
 #[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
@@ -192,17 +316,20 @@ pub struct FieldPreset {
     as_versioned_with_definition,
     json_schema(
         title = "ModelPermissions",
-        example = "ModelPermissions::field_comparison_example",
-        example = "ModelPermissions::relationship_comparison_example"
+        example = "ModelPermissions::v1_field_comparison_example",
+        example = "ModelPermissions::v1_relationship_comparison_example",
+        example = "ModelPermissions::v2_rules_based_argument_preset",
+        example = "ModelPermissions::v2_rules_based_filters",
     )
 )]
 /// Definition of permissions for an OpenDD model.
 pub enum ModelPermissions {
     V1(ModelPermissionsV1),
+    V2(ModelPermissionsV2),
 }
 
 impl ModelPermissions {
-    fn field_comparison_example() -> serde_json::Value {
+    fn v1_field_comparison_example() -> serde_json::Value {
         serde_json::json!(
             {
                 "kind": "ModelPermissions",
@@ -236,7 +363,7 @@ impl ModelPermissions {
         )
     }
 
-    fn relationship_comparison_example() -> serde_json::Value {
+    fn v1_relationship_comparison_example() -> serde_json::Value {
         serde_json::json!(
             {
                 "kind": "ModelPermissions",
@@ -275,9 +402,122 @@ impl ModelPermissions {
         )
     }
 
-    pub fn upgrade(self) -> ModelPermissionsV1 {
+    fn v2_rules_based_argument_preset() -> serde_json::Value {
+        serde_json::json!(
+        {
+          "kind": "ModelPermissions",
+          "version": "v2",
+          "definition": {
+            "modelName": "actors_by_movie",
+            "permissions": {
+              "rulesBased": [
+                {
+                  "allow": {
+                    "condition": {
+                      "contains": {
+                        "left": {
+                          "sessionVariable": "x-hasura-role"
+                        },
+                        "right": {
+                          "literal": ["admin", "user_with_preset_movie_id"]
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "presetArgument": {
+                    "condition": {
+                      "equal": {
+                        "left": {
+                          "sessionVariable": "x-hasura-role"
+                        },
+                        "right": {
+                          "literal": "user_with_preset_movie_id"
+                        }
+                      }
+                    },
+                    "argumentName": "movie_id",
+                    "value": {
+                      "literal": 1
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+        )
+    }
+
+    fn v2_rules_based_filters() -> serde_json::Value {
+        serde_json::json!(
+        {
+          "kind": "ModelPermissions",
+          "version": "v2",
+          "definition": {
+            "modelName": "actors",
+            "permissions": {
+              "rulesBased": [
+                {
+                  "allow": {
+                    "condition": {
+                      "contains": {
+                        "left": {
+                          "sessionVariable": "x-hasura-role"
+                        },
+                        "right": {
+                          "literal": [
+                            "admin",
+                            "object_relationship_user"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "filter": {
+                    "condition": {
+                      "equal": {
+                        "left": {
+                          "sessionVariable": "x-hasura-role"
+                        },
+                        "right": {
+                          "literal": "object_relationship_user"
+                        }
+                      }
+                    },
+                    "predicate": {
+                      "relationship": {
+                        "name": "Country",
+                        "predicate": {
+                          "fieldComparison": {
+                            "field": "name",
+                            "operator": "_eq",
+                            "value": {
+                              "literal": "UK"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+        )
+    }
+
+    pub fn upgrade(self) -> ModelPermissionsV2 {
         match self {
-            ModelPermissions::V1(v1) => v1,
+            ModelPermissions::V1(v1) => ModelPermissionsV2 {
+                model_name: v1.model_name,
+                permissions: ModelPermissionOperand::RoleBased(v1.permissions),
+            },
+            ModelPermissions::V2(v2) => v2,
         }
     }
 }
@@ -293,6 +533,30 @@ pub struct ModelPermissionsV1 {
     pub permissions: Vec<ModelPermission>,
 }
 
+/// Configuration for role-based model permissions
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[opendd(externally_tagged, json_schema(title = "ModelPermissionOperand"))]
+pub enum ModelPermissionOperand {
+    /// Definition of role-based type permissions on an OpenDD model
+    #[opendd(json_schema(title = "RoleBased"))]
+    RoleBased(Vec<ModelPermission>),
+    /// Definition of rules-based type permissions on an OpenDD model
+    #[opendd(json_schema(title = "RulesBased"))]
+    RulesBased(Vec<authorization::ModelAuthorizationRule>),
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[opendd(json_schema(title = "ModelPermissionsV2"))]
+/// Definition of permissions for an OpenDD model.
+pub struct ModelPermissionsV2 {
+    /// The name of the model for which permissions are being defined.
+    pub model_name: Spanned<ModelName>,
+    /// Permissions for this model
+    pub permissions: ModelPermissionOperand,
+}
+
 #[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
 #[serde(rename_all = "camelCase")]
 #[opendd(json_schema(title = "ModelPermission", example = "ModelPermission::example"))]
@@ -303,6 +567,21 @@ pub struct ModelPermission {
     /// The permissions for selecting from this model for this role.
     /// If this is null, the role is not allowed to query the model.
     pub select: Option<SelectPermission>,
+    /// The permissions for relational insert operations on this model for this role.
+    /// If this is null, the role is not allowed to perform relational inserts on this model.
+    /// This is only applicable for data connectors that support relational operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relational_insert: Option<RelationalInsertPermission>,
+    /// The permissions for relational update operations on this model for this role.
+    /// If this is null, the role is not allowed to perform relational updates on this model.
+    /// This is only applicable for data connectors that support relational operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relational_update: Option<RelationalUpdatePermission>,
+    /// The permissions for relational delete operations on this model for this role.
+    /// If this is null, the role is not allowed to perform relational deletes on this model.
+    /// This is only applicable for data connectors that support relational operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relational_delete: Option<RelationalDeletePermission>,
 }
 
 impl ModelPermission {
@@ -431,15 +710,20 @@ impl CommandPermission {
 #[serde(rename_all = "camelCase")]
 #[opendd(
     as_versioned_with_definition,
-    json_schema(title = "CommandPermissions", example = "CommandPermissions::example")
+    json_schema(
+        title = "CommandPermissions",
+        example = "CommandPermissions::v1_example",
+        example = "CommandPermissions::v2_example",
+    )
 )]
 /// Definition of permissions for an OpenDD command.
 pub enum CommandPermissions {
     V1(CommandPermissionsV1),
+    V2(CommandPermissionsV2),
 }
 
 impl CommandPermissions {
-    fn example() -> serde_json::Value {
+    fn v1_example() -> serde_json::Value {
         serde_json::json!(
             {
                 "kind": "CommandPermissions",
@@ -461,9 +745,69 @@ impl CommandPermissions {
         )
     }
 
-    pub fn upgrade(self) -> CommandPermissionsV1 {
+    fn v2_example() -> serde_json::Value {
+        serde_json::json!(
+        {
+          "kind": "CommandPermissions",
+          "version": "v2",
+          "definition": {
+            "commandName": "get_actors_with_filter",
+            "permissions": {
+              "rulesBased": [
+                {
+                  "allow": {
+                    "condition": {
+                      "contains": {
+                        "left": {
+                          "sessionVariable": "x-hasura-role"
+                        },
+                        "right": {
+                          "literal": ["filter_user"]
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "presetArgument": {
+                    "condition": {
+                      "equal": {
+                        "left": {
+                          "sessionVariable": "x-hasura-role"
+                        },
+                        "right": {
+                          "literal": "filter_user"
+                        }
+                      }
+                    },
+                    "argumentName": "actor_bool_exp",
+                    "value": {
+                      "booleanExpression": {
+                        "fieldComparison": {
+                          "field": "actor_id",
+                          "operator": "_eq",
+                          "value": {
+                            "literal": 4
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+        )
+    }
+
+    pub fn upgrade(self) -> CommandPermissionsV2 {
         match self {
-            CommandPermissions::V1(v1) => v1,
+            CommandPermissions::V1(v1) => CommandPermissionsV2 {
+                command_name: v1.command_name,
+                permissions: CommandPermissionOperand::RoleBased(v1.permissions),
+            },
+            CommandPermissions::V2(v2) => v2,
         }
     }
 }
@@ -477,6 +821,30 @@ pub struct CommandPermissionsV1 {
     pub command_name: CommandName,
     /// A list of command permissions, one for each role.
     pub permissions: Vec<CommandPermission>,
+}
+
+/// Configuration for role-based command permissions
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[opendd(externally_tagged, json_schema(title = "CommandPermissionOperand"))]
+pub enum CommandPermissionOperand {
+    /// Definition of role-based permissions on an OpenDD command
+    #[opendd(json_schema(title = "RoleBased"))]
+    RoleBased(Vec<CommandPermission>),
+    /// Definition of a rules-based permissions on an OpenDD command
+    #[opendd(json_schema(title = "RulesBased"))]
+    RulesBased(Vec<authorization::CommandAuthorizationRule>),
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[opendd(json_schema(title = "CommandPermissionsV2"))]
+/// Definition of permissions for an OpenDD command.
+pub struct CommandPermissionsV2 {
+    /// The name of the command for which permissions are being defined.
+    pub command_name: CommandName,
+    /// The permissions for the command.
+    pub permissions: CommandPermissionOperand,
 }
 
 #[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
@@ -722,17 +1090,17 @@ impl traits::OpenDd for ValueExpression {
         json: serde_json::Value,
         _path: jsonpath::JSONPath,
     ) -> Result<Self, traits::OpenDdDeserializeError> {
-        serde_path_to_error::deserialize(json).map_err(|e| traits::OpenDdDeserializeError {
-            path: jsonpath::JSONPath::from_serde_path(e.path()),
-            error: e.into_inner(),
+        serde_json::from_value(json).map_err(|e| traits::OpenDdDeserializeError {
+            path: _path,
+            error: e,
         })
     }
     fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         let mut s = ValueExpressionImpl::json_schema(generator);
-        if let schemars::schema::Schema::Object(o) = &mut s {
-            if let Some(m) = &mut o.metadata {
-                m.id = Some("https://hasura.io/jsonschemas/metadata/ValueExpression".into());
-            }
+        if let schemars::schema::Schema::Object(o) = &mut s
+            && let Some(m) = &mut o.metadata
+        {
+            m.id = Some("https://hasura.io/jsonschemas/metadata/ValueExpression".into());
         }
         s
     }
@@ -769,12 +1137,10 @@ impl traits::OpenDd for ValueExpressionOrPredicate {
     }
     fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         let mut s = ValueExpressionOrPredicateImpl::json_schema(generator);
-        if let schemars::schema::Schema::Object(o) = &mut s {
-            if let Some(m) = &mut o.metadata {
-                m.id = Some(
-                    "https://hasura.io/jsonschemas/metadata/ValueExpressionOrPredicate".into(),
-                );
-            }
+        if let schemars::schema::Schema::Object(o) = &mut s
+            && let Some(m) = &mut o.metadata
+        {
+            m.id = Some("https://hasura.io/jsonschemas/metadata/ValueExpressionOrPredicate".into());
         }
         s
     }
@@ -787,3 +1153,80 @@ impl traits::OpenDd for ValueExpressionOrPredicate {
 }
 
 impl_JsonSchema_with_OpenDd_for!(ValueExpressionOrPredicate);
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[opendd(json_schema(title = "RelationalInsertPermission"))]
+/// Defines the permissions for relational insert operations on a model for a role.
+/// If null, the role is not allowed to perform relational inserts on this model.
+/// This is only applicable for data connectors that support relational operations.
+pub struct RelationalInsertPermission {
+    // Empty for now, will be extended later with filter predicates and argument presets
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[opendd(json_schema(title = "RelationalUpdatePermission"))]
+/// Defines the permissions for relational update operations on a model for a role.
+/// If null, the role is not allowed to perform relational updates on this model.
+/// This is only applicable for data connectors that support relational operations.
+pub struct RelationalUpdatePermission {
+    // Empty for now, will be extended later with filter predicates and argument presets
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[opendd(json_schema(title = "RelationalDeletePermission"))]
+/// Defines the permissions for relational delete operations on a model for a role.
+/// If null, the role is not allowed to perform relational deletes on this model.
+/// This is only applicable for data connectors that support relational operations.
+pub struct RelationalDeletePermission {
+    // Empty for now, will be extended later with filter predicates and argument presets
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(tag = "version", content = "definition")]
+#[serde(rename_all = "camelCase")]
+#[opendd(as_versioned_with_definition, json_schema(title = "ViewPermissions",))]
+/// Definition of permissions for an OpenDD view.
+pub enum ViewPermissions {
+    V1(ViewPermissionsV1),
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[opendd(json_schema(title = "ViewPermissionsV1"))]
+/// Definition of permissions for an OpenDD view.
+pub struct ViewPermissionsV1 {
+    /// The name of the view for which permissions are being defined.
+    pub view_name: ViewName,
+    /// View permissions definitions
+    pub permissions: ViewPermissionOperand,
+}
+
+/// Configuration for view permissions
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[opendd(externally_tagged, json_schema(title = "ViewPermissionOperand"))]
+pub enum ViewPermissionOperand {
+    /// Definition of role-based view permissions on an OpenDD view
+    #[opendd(json_schema(title = "RoleBased"))]
+    RoleBased(Vec<ViewPermission>),
+    /// Definition of rules-based view permissions on an OpenDD view
+    #[opendd(json_schema(title = "RulesBased"))]
+    RulesBased(Vec<authorization::ViewAuthorizationRule>),
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[opendd(json_schema(title = "ViewPermission"))]
+/// Defines the permissions for a view for a role.
+pub struct ViewPermission {
+    /// The role for which permissions are being defined.
+    pub role: Role,
+    /// Whether access is allowed or denied for this role.
+    pub allow: bool,
+}

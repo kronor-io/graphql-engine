@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use indexmap::IndexMap;
 
-use lang_graphql::ast::common::{self as ast};
+use graphql_types::{self as ast};
 use open_dds::aggregates::AggregateExpressionName;
 use open_dds::commands::DataConnectorCommand;
 use open_dds::query::ArgumentName;
@@ -502,7 +502,7 @@ fn resolve_relationship_mappings_command(
                     type_name: source_type_name.clone(),
                 },
             );
-        };
+        }
 
         // Check if the source field is already mapped to a target argument
         let resolved_relationship_mapping = {
@@ -593,7 +593,7 @@ fn get_relationship_capabilities(
             relationship_name: relationship_name.clone(),
             data_connector_name: data_connector.name.clone(),
         });
-    };
+    }
 
     // if relationship is local, error if relationship and variables capabilities are not available
     if Some(&data_connector.name) == target_data_connector.as_ref()
@@ -701,7 +701,7 @@ fn resolve_aggregate_relationship(
 
 fn resolve_model_relationship_fields(
     target_model: &open_dds::relationships::ModelRelationshipTarget,
-    models: &IndexMap<Qualified<ModelName>, crate::Model>,
+    models: &IndexMap<Qualified<ModelName>, models::Model>,
     data_connectors: &data_connectors::DataConnectors,
     source_type_name: &Qualified<CustomTypeName>,
     relationship: &RelationshipV1,

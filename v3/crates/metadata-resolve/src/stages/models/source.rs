@@ -71,10 +71,14 @@ pub(crate) fn resolve_model_source(
         DataConnectorObjectType::from(source_collection.collection_type.as_str());
 
     let source_arguments = source_collection
-        .clone()
         .arguments
-        .into_iter()
-        .map(|(k, v)| (DataConnectorArgumentName::from(k.as_str()), v.argument_type))
+        .iter()
+        .map(|(k, v)| {
+            (
+                DataConnectorArgumentName::from(k.as_str()),
+                v.argument_type.clone(),
+            )
+        })
         .collect();
 
     let data_connector_scalar_types = data_connector_scalars
@@ -179,28 +183,27 @@ pub(crate) fn resolve_model_source(
         }
     }
 
-    if let Some(apollo_federation_key_source) = &mut model.apollo_federation_key_source {
-        if let Some(apollo_federation_config) =
+    if let Some(apollo_federation_key_source) = &mut model.apollo_federation_key_source
+        && let Some(apollo_federation_config) =
             &model_object_type.object_type.apollo_federation_config
-        {
-            for key in &apollo_federation_config.keys {
-                for field in &key.fields {
-                    apollo_federation_key_source.ndc_mapping.insert(
-                        field.clone(),
-                        helpers::get_ndc_column_for_comparison(
-                            &model.name,
-                            &model.data_type,
-                            &resolved_model_source,
-                            field,
-                            || {
-                                format!(
-                                    "the apollo federation key fields of type {}",
-                                    model.data_type
-                                )
-                            },
-                        )?,
-                    );
-                }
+    {
+        for key in &apollo_federation_config.keys {
+            for field in &key.fields {
+                apollo_federation_key_source.ndc_mapping.insert(
+                    field.clone(),
+                    helpers::get_ndc_column_for_comparison(
+                        &model.name,
+                        &model.data_type,
+                        &resolved_model_source,
+                        field,
+                        || {
+                            format!(
+                                "the apollo federation key fields of type {}",
+                                model.data_type
+                            )
+                        },
+                    )?,
+                );
             }
         }
     }

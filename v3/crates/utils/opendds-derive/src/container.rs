@@ -1,3 +1,6 @@
+#![allow(clippy::needless_continue)]
+/// There are a lot of `continue` statements in `darling` proc macros
+/// so suppress the warning for the whole file.
 use convert_case::{Case, Casing};
 use std::sync::OnceLock;
 
@@ -34,6 +37,7 @@ struct FieldOpts {
     #[darling(default)]
     json_schema: JsonSchemaFieldOpts,
     hidden: Option<bool>,
+    deserialize_with: Option<String>,
 }
 
 pub enum DefaultAttribute {
@@ -81,8 +85,14 @@ struct EnumOpts {
     as_versioned_with_definition: Option<bool>,
     untagged_with_kind: Option<bool>,
     externally_tagged: Option<bool>,
+    internally_tagged: Option<InternallyTaggedOpts>,
     #[darling(default)]
     json_schema: JsonSchemaOpts,
+}
+
+#[derive(FromMeta)]
+struct InternallyTaggedOpts {
+    pub tag: String,
 }
 
 /// Variant JSON schema attributes
@@ -224,6 +234,7 @@ pub struct NamedField<'a> {
     pub description: Option<String>,
     pub title: Option<String>,
     pub hidden: bool,
+    pub deserialize_with: Option<String>,
 }
 
 impl<'a> NamedField<'a> {
@@ -245,6 +256,7 @@ impl<'a> NamedField<'a> {
         let default_exp = field_opts.json_schema.default_exp;
         let title = field_opts.json_schema.title;
         let hidden = field_opts.hidden.unwrap_or(false);
+        let deserialize_with = field_opts.deserialize_with;
         if hidden && !is_default && !is_optional {
             Err(syn::Error::new_spanned(
                 field,
@@ -262,6 +274,7 @@ impl<'a> NamedField<'a> {
             description,
             title,
             hidden,
+            deserialize_with,
         })
     }
 }
@@ -304,6 +317,8 @@ impl EnumImplStyle {
             Some(Self::UntaggedWithKind)
         } else if opts.externally_tagged.unwrap_or(false) {
             Some(Self::Tagged(Tagged::External))
+        } else if let Some(InternallyTaggedOpts { tag }) = &opts.internally_tagged {
+            Some(Self::Tagged(Tagged::Internal { tag: tag.clone() }))
         } else {
             None
         }
@@ -315,6 +330,7 @@ pub enum Tagged {
     VersionInternal,
     VersionWithDefinition,
     External,
+    Internal { tag: String },
 }
 
 pub struct EnumVariant<'a> {
@@ -339,9 +355,10 @@ impl<'a> EnumVariant<'a> {
                     // Preserve casing for kinded enums
                     Tagged::KindInternal => variant_name.to_string(),
                     // Use camel-casing for versioned enums and externally-tagged enums
-                    Tagged::VersionInternal | Tagged::VersionWithDefinition | Tagged::External => {
-                        variant_name.to_string().to_case(Case::Camel)
-                    }
+                    Tagged::VersionInternal
+                    | Tagged::VersionWithDefinition
+                    | Tagged::External
+                    | Tagged::Internal { .. } => variant_name.to_string().to_case(Case::Camel),
                 },
             }
         });
@@ -378,12 +395,12 @@ impl<'a> EnumVariant<'a> {
 
 /// Check whether the type is `Option<T>`
 fn is_option_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(syn::TypePath { path, .. }) = ty {
-        if path.segments.len() == 1 {
-            let segment = &path.segments[0];
-            if segment.ident == "Option" {
-                return true;
-            }
+    if let syn::Type::Path(syn::TypePath { path, .. }) = ty
+        && path.segments.len() == 1
+    {
+        let segment = &path.segments[0];
+        if segment.ident == "Option" {
+            return true;
         }
     }
     false

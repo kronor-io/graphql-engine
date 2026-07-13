@@ -14,10 +14,16 @@ use open_dds::{
     types::{CustomTypeName, Deprecated, FieldName},
 };
 
-use crate::types::error::ContextualError;
-use crate::types::permission::{ValueExpression, ValueExpressionOrPredicate};
-use crate::types::subgraph::{Qualified, QualifiedTypeReference};
 use crate::types::subgraph::{deserialize_qualified_btreemap, serialize_qualified_btreemap};
+use crate::{
+    AllowOrDeny,
+    types::subgraph::{Qualified, QualifiedTypeReference},
+};
+use crate::{ArgumentInfo, types::error::ContextualError};
+use crate::{
+    ConditionHash,
+    types::permission::{ValueExpression, ValueExpressionOrPredicate},
+};
 use crate::{
     helpers::typecheck,
     stages::{
@@ -28,27 +34,122 @@ use crate::{
 };
 use error_context::{Context, Step};
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RelationalInsertPermission {
+    // Empty for now, will be extended later with filter predicates
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RelationalUpdatePermission {
+    // Empty for now, will be extended later with filter predicates
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RelationalDeletePermission {
+    // Empty for now, will be extended later with filter predicates
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ModelWithPermissions {
-    pub model: models::Model,
-    pub select_permissions: BTreeMap<Role, SelectPermission>,
-    pub filter_expression_type: Option<boolean_expressions::ResolvedObjectBooleanExpressionType>,
+    pub model: Arc<models::Model>,
+    pub arguments: IndexMap<ArgumentName, ArgumentInfo>,
+    pub permissions: ModelPermissions,
+    pub filter_expression_type:
+        Option<Arc<boolean_expressions::ResolvedObjectBooleanExpressionType>>,
     pub graphql_api: models_graphql::ModelGraphQlApi,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ModelAuthorizationRule {
+    Access {
+        condition: Option<ConditionHash>,
+        allow_or_deny: AllowOrDeny,
+    },
+    Subscription {
+        condition: Option<ConditionHash>,
+        allow_or_deny: AllowOrDeny,
+    },
+    Filter {
+        condition: Option<ConditionHash>,
+        predicate: ModelPredicate,
+    },
+    // value for an argument preset. the last value wins where multiple items are used.
+    ArgumentPresetValue {
+        condition: Option<ConditionHash>,
+        argument_name: ArgumentName,
+        argument_type: QualifiedTypeReference,
+        value: ValueExpression,
+    },
+    // boolean expression for an argument preset. if multiple items are provided for one argument
+    // then we "and" them together
+    ArgumentAuthPredicate {
+        condition: Option<ConditionHash>,
+        argument_name: ArgumentName,
+        predicate: ModelPredicate,
+    },
+    RelationalPermission {
+        condition: Option<ConditionHash>,
+        allow_or_deny: AllowOrDeny,
+        relational_operation: RelationalOperation,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum RelationalOperation {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModelPermissions {
+    pub authorization_rules: Vec<ModelAuthorizationRule>,
+    pub by_role: BTreeMap<Role, ModelPermission>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModelPermission {
+    pub select: Option<SelectPermission>,
+    pub input: Option<ModelInputPermission>,
+}
+
+impl ModelPermissions {
+    pub fn new() -> Self {
+        Self {
+            by_role: BTreeMap::new(),
+            authorization_rules: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_role.is_empty() && self.authorization_rules.is_empty()
+    }
+}
+
+impl Default for ModelPermissions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum FilterPermission {
     AllowAll,
-    Filter(ModelPredicate),
+    Filter(Box<ModelPredicate>),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SelectPermission {
     pub filter: FilterPermission,
     // pub allow_aggregations: bool,
+    pub allow_subscriptions: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModelInputPermission {
     pub argument_presets:
         BTreeMap<ArgumentName, (QualifiedTypeReference, ValueExpressionOrPredicate)>,
-    pub allow_subscriptions: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -80,10 +181,11 @@ pub enum ModelPredicate {
         deprecated: Option<Deprecated>,
     },
     Relationship {
-        relationship_info: PredicateRelationshipInfo,
+        relationship_info: Box<PredicateRelationshipInfo>,
         column_path: Vec<DataConnectorColumnName>,
         predicate: Box<ModelPredicate>,
     },
+    /// Note, `And(vec![])` means `const True`
     And(Vec<ModelPredicate>),
     Or(Vec<ModelPredicate>),
     Not(Box<ModelPredicate>),
@@ -161,14 +263,33 @@ pub enum ModelPermissionIssue {
         model_name: Qualified<ModelName>,
     },
     #[error(
-        "Type error in preset argument {argument_name:} for role {role:} in model {model_name:}: {typecheck_issue:}"
+        "Type error in preset argument {argument_name:}{} in model {model_name:}: {typecheck_issue:}",
+        match role { Some(role) => format!(" for role {role:}"), None => String::new() }
     )]
     ModelArgumentPresetTypecheckIssue {
-        role: Role,
+        role: Option<Role>,
         model_name: Qualified<ModelName>,
         argument_name: ArgumentName,
         typecheck_issue: typecheck::TypecheckIssue,
     },
+    #[error(
+        "the object type {data_type} used by model {model_name} uses rules-based authorization so will not appear in the GraphQL schema"
+    )]
+    ModelDataTypeUsesRulesBasedAuthorization {
+        model_name: Qualified<ModelName>,
+        data_type: Qualified<CustomTypeName>,
+    },
+    #[error(
+        "the object type {argument_type} used in arguments for the model {model_name} uses rules-based authorization so any presets will not be applied in the GraphQL schema"
+    )]
+    ModelArgumentTypeUsesRulesBasedAuthorization {
+        model_name: Qualified<ModelName>,
+        argument_type: Qualified<CustomTypeName>,
+    },
+    #[error(
+        "the model {model_name} uses rules-based authorization so will not appear in the GraphQL schema"
+    )]
+    ModelUsesRulesBasedAuthorization { model_name: Qualified<ModelName> },
 }
 
 impl ContextualError for ModelPermissionIssue {
@@ -181,7 +302,10 @@ impl ContextualError for ModelPermissionIssue {
                     subgraph: Some(model_name.subgraph.clone()),
                 }))
             }
-            ModelPermissionIssue::ModelArgumentPresetTypecheckIssue { .. } => None,
+            ModelPermissionIssue::ModelArgumentPresetTypecheckIssue { .. }
+            | ModelPermissionIssue::ModelArgumentTypeUsesRulesBasedAuthorization { .. }
+            | ModelPermissionIssue::ModelDataTypeUsesRulesBasedAuthorization { .. }
+            | ModelPermissionIssue::ModelUsesRulesBasedAuthorization { .. } => None,
         }
     }
 }
@@ -195,6 +319,9 @@ impl ShouldBeAnError for ModelPermissionIssue {
             ModelPermissionIssue::ModelArgumentPresetTypecheckIssue {
                 typecheck_issue, ..
             } => typecheck_issue.should_be_an_error(flags),
+            ModelPermissionIssue::ModelDataTypeUsesRulesBasedAuthorization { .. }
+            | ModelPermissionIssue::ModelUsesRulesBasedAuthorization { .. }
+            | ModelPermissionIssue::ModelArgumentTypeUsesRulesBasedAuthorization { .. } => false,
         }
     }
 }

@@ -215,7 +215,9 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soEventsFetchBatchSize <- withOptionDefault rsoEventsFetchBatchSize eventsFetchBatchSizeOption
   soGracefulShutdownTimeout <- withOptionDefault rsoGracefulShutdownTimeout gracefulShutdownOption
   soWebSocketConnectionInitTimeout <- withOptionDefault rsoWebSocketConnectionInitTimeout webSocketConnectionInitTimeoutOption
-  let soEventingMode = Types.EventingEnabled
+  soEventingMode <- case rsoEventingMode of
+    Types.EventingEnabled -> withOptionDefault Nothing disableEventingOption
+    eventingDisabled -> pure eventingDisabled
   let soReadOnlyMode = Types.ReadOnlyModeDisabled
   soEnableMetadataQueryLogging <- case rsoEnableMetadataQueryLoggingEnv of
     Server.Logging.MetadataQueryLoggingDisabled -> withOptionDefault Nothing enableMetadataQueryLoggingOption
@@ -247,6 +249,8 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
       NativeQuery.NeverValidateNativeQueries -> pure NativeQuery.NeverValidateNativeQueries
   soPreserve401Errors <- withOptionSwitch' rsoPreserve401Errors (\case { MapEverythingTo200 -> False; Preserve401Errors -> True }, bool MapEverythingTo200 Preserve401Errors) preserve401ErrorsOption
   soServerTimeout <- withOptionDefault rsoServerTimeout serverTimeoutOption
+  soLogMaskedVariables <- withOptionDefault rsoLogMaskedVariables logMaskedVariablesOption
+  soRelayMode <- withOptionSwitch' rsoRelayMode (isRelayEnabled, bool RelayModeDisabled RelayModeEnabled) enableRelayOption
   pure ServeOptions {..}
 
 -- | Fetch Postgres 'Query.ConnParams' components from the environment

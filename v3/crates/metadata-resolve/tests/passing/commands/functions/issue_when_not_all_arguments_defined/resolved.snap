@@ -88,34 +88,7 @@ input_file: crates/metadata-resolve/tests/passing/commands/functions/issue_when_
                             },
                             description: None,
                             argument_kind: Other,
-                            path: JSONPath(
-                                [
-                                    Key(
-                                        "subgraphs",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "objects",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "definition",
-                                    ),
-                                    Key(
-                                        "arguments",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "name",
-                                    ),
-                                ],
-                            ),
+                            type_representation: None,
                         },
                         ArgumentName(
                             Identifier(
@@ -132,34 +105,7 @@ input_file: crates/metadata-resolve/tests/passing/commands/functions/issue_when_
                             },
                             description: None,
                             argument_kind: Other,
-                            path: JSONPath(
-                                [
-                                    Key(
-                                        "subgraphs",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "objects",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "definition",
-                                    ),
-                                    Key(
-                                        "arguments",
-                                    ),
-                                    Index(
-                                        1,
-                                    ),
-                                    Key(
-                                        "name",
-                                    ),
-                                ],
-                            ),
+                            type_representation: None,
                         },
                     },
                     graphql_api: None,
@@ -251,6 +197,7 @@ input_file: crates/metadata-resolve/tests/passing/commands/functions/issue_when_
                                         },
                                     ),
                                     supports_relational_queries: None,
+                                    supports_relational_mutations: None,
                                 },
                             },
                             source: Function(
@@ -304,7 +251,10 @@ input_file: crates/metadata-resolve/tests/passing/commands/functions/issue_when_
                     ),
                     description: None,
                 },
-                permissions: {},
+                permissions: CommandPermissions {
+                    by_role: {},
+                    authorization_rules: [],
+                },
             },
         },
         boolean_expression_types: BooleanExpressionTypes {
@@ -318,6 +268,7 @@ input_file: crates/metadata-resolve/tests/passing/commands/functions/issue_when_
             scalars: {},
         },
         aggregate_expressions: {},
+        views: {},
         graphql_config: GlobalGraphqlConfig {
             query_root_type_name: TypeName(
                 Name(
@@ -352,10 +303,18 @@ input_file: crates/metadata-resolve/tests/passing/commands/functions/issue_when_
         },
         plugin_configs: LifecyclePluginConfigs {
             pre_parse_plugins: [],
-            pre_response_plugins: [],
+            pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks {
+                sync_hooks: [],
+                async_hooks: [],
+            },
             pre_route_plugins: [],
+            pre_ndc_request_plugins: {},
+            pre_ndc_response_plugins: {},
         },
         roles: {},
+        conditions: Conditions {
+            conditions: {},
+        },
         runtime_flags: RuntimeFlags(
             {},
         ),

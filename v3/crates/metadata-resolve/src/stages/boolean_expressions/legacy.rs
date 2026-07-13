@@ -17,6 +17,7 @@ use open_dds::{
     types::{CustomTypeName, FieldName, GraphQlTypeName},
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(crate) type RawBooleanExpressionTypes<'a> = BTreeMap<
     Qualified<CustomTypeName>,
@@ -153,34 +154,31 @@ pub(crate) fn resolve_object_boolean_expression_type(
         if let Ok(scalar_type_info) = data_connector_scalar_types::get_simple_scalar(
             field_mapping.column_type.clone(),
             scalar_types,
-        ) {
-            if let Some(representation) = &scalar_type_info.representation {
-                // As of now, only `"enableAll": true` is allowed for field operators
-                match &comparable_field.operators {
-                    open_dds::models::EnableAllOrSpecific::EnableAll(true) => {}
-                    _ => {
-                        return Err(
-                            BooleanExpressionError::FieldLevelComparisonOperatorConfigurationNotSupported,
-                        )
-                    }
-                }
-
-                let qualified_type_name =
-                    mk_qualified_type_name(representation, &qualified_data_connector_name.subgraph);
-
-                let data_connector_type = DataConnectorType {
-                    data_connector_name: qualified_data_connector_name.clone(),
-                    type_name: qualified_type_name.clone(),
-                };
-
-                generated_comparable_fields.push(object::ComparableField {
-                    field_name: comparable_field.field_name.clone(),
-                    boolean_expression_type:
-                        BooleanExpressionTypeIdentifier::FromDataConnectorScalarRepresentation(
-                            data_connector_type,
-                        ),
-                });
+        ) && let Some(representation) = &scalar_type_info.representation
+        {
+            // As of now, only `"enableAll": true` is allowed for field operators
+            match &comparable_field.operators {
+                open_dds::models::EnableAllOrSpecific::EnableAll(true) => {}
+                _ => return Err(
+                    BooleanExpressionError::FieldLevelComparisonOperatorConfigurationNotSupported,
+                ),
             }
+
+            let qualified_type_name =
+                mk_qualified_type_name(representation, &qualified_data_connector_name.subgraph);
+
+            let data_connector_type = DataConnectorType {
+                data_connector_name: qualified_data_connector_name.clone(),
+                type_name: qualified_type_name.clone(),
+            };
+
+            generated_comparable_fields.push(object::ComparableField {
+                field_name: comparable_field.field_name.clone(),
+                boolean_expression_type:
+                    BooleanExpressionTypeIdentifier::FromDataConnectorScalarRepresentation(
+                        data_connector_type,
+                    ),
+            });
         }
     }
 
@@ -329,7 +327,7 @@ fn resolve_comparable_fields(
                 type_name: boolean_expression_type_name.clone(),
                 name: comparable_field.field_name.clone(),
             });
-        };
+        }
     }
 
     // doing this validation when there is no graphql configuration is a breaking change, so we
@@ -337,6 +335,7 @@ fn resolve_comparable_fields(
     if graphql.is_some()
         || flags.contains(open_dds::flags::Flag::AllowBooleanExpressionFieldsWithoutGraphql)
     {
+        let mut operator_mapping_cache = BTreeMap::new();
         for (comparable_field_name, (_comparable_field_kind, comparable_field_type_name)) in
             &resolved_comparable_fields
         {
@@ -348,28 +347,39 @@ fn resolve_comparable_fields(
                     .comparison_operators
                     .is_empty()
                 {
+                    let operator_mapping = operator_mapping_cache
+                        .entry(comparable_field_type_name.clone())
+                        .or_insert_with(|| {
+                            Arc::new(
+                                scalar_boolean_expression_type
+                                    .data_connector_operator_mappings
+                                    .iter()
+                                    .map(|(data_connector_name, mappings)| {
+                                        (
+                                            data_connector_name.clone(),
+                                            crate::OperatorMapping(
+                                                mappings.operator_mapping.clone(),
+                                            ),
+                                        )
+                                    })
+                                    .collect::<BTreeMap<_, _>>(),
+                            )
+                        })
+                        .clone();
+
                     scalar_fields.insert(
                         comparable_field_name.clone(),
                         ComparisonExpressionInfo {
                             field_kind: ScalarComparisonKind::Scalar,
                             boolean_expression_type_name: comparable_field_type_name.clone(),
                             operators: scalar_boolean_expression_type.comparison_operators.clone(),
-                            operator_mapping: scalar_boolean_expression_type
-                                .data_connector_operator_mappings
-                                .iter()
-                                .map(|(data_connector_name, mappings)| {
-                                    (
-                                        data_connector_name.clone(),
-                                        crate::OperatorMapping(mappings.operator_mapping.clone()),
-                                    )
-                                })
-                                .collect(),
+                            operator_mapping,
                             logical_operators: scalar_boolean_expression_type
                                 .logical_operators
                                 .clone(),
                         },
                     );
-                };
+                }
             }
         }
     }

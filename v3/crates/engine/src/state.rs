@@ -53,13 +53,15 @@ pub fn build_state(
     expose_internal_errors: ExposeInternalErrors,
     auth_config: hasura_authn::ResolvedAuthConfig,
     resolved_metadata: metadata_resolve::Metadata,
+    auth_mode_header: String,
+    ndc_response_size_limit: usize,
 ) -> Result<EngineState, anyhow::Error> {
     // Metadata
     let resolved_metadata = Arc::new(resolved_metadata);
 
     let http_context = HttpContext {
         client: reqwest::Client::new(),
-        ndc_response_size_limit: None,
+        ndc_response_size_limit: Some(ndc_response_size_limit),
     };
 
     let schema = graphql_schema::GDS {
@@ -77,6 +79,7 @@ pub fn build_state(
         resolved_metadata,
         auth_config: Arc::new(auth_config),
         graphql_websocket_server: Arc::new(graphql_ws::WebSocketServer::new()),
+        auth_mode_header,
     };
     Ok(state)
 }

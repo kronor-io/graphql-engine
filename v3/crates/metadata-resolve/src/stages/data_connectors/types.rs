@@ -6,10 +6,10 @@ use crate::helpers::http::{
 };
 use crate::helpers::ndc_validation::validate_ndc_argument_presets;
 use crate::ndc_migration;
-use crate::types::permission::ValueExpression;
+use crate::types::permission::{ValueExpression, resolve_value_expression};
 use crate::types::subgraph::Qualified;
+use graphql_types::OperationType;
 use indexmap::IndexMap;
-use lang_graphql::ast::common::OperationType;
 use ndc_models;
 use open_dds::accessor::MetadataAccessor;
 use open_dds::data_connector::{DataConnectorColumnName, DataConnectorScalarType};
@@ -118,13 +118,15 @@ impl<'a> DataConnectorContext<'a> {
             None
         };
 
+        let headers: IndexMap<String, String> = data_connector
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.value.clone()))
+            .collect();
+
         let context = DataConnectorContext {
             url: &data_connector.url,
-            headers: data_connector
-                .headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value.clone()))
-                .collect(),
+            headers,
             schema: resolved_schema,
             capabilities,
             argument_presets,
@@ -313,7 +315,7 @@ pub enum ResolvedDataConnectorUrl {
 }
 
 impl ResolvedDataConnectorUrl {
-    pub fn get_url(&self, operation: OperationType) -> &reqwest::Url {
+    pub fn get_url(&self, operation: OperationType) -> &url::Url {
         match self {
             ResolvedDataConnectorUrl::SingleUrl(url) => &url.0,
             ResolvedDataConnectorUrl::ReadWriteUrls(ResolvedReadWriteUrls { read, write }) => {
@@ -354,15 +356,15 @@ impl HttpHeadersPreset {
         let forward = headers_preset
             .forward
             .iter()
-            .map(|header| SerializableHeaderName::new(header.to_string()).map_err(to_error))
+            .map(|header| SerializableHeaderName::new(header.clone()).map_err(to_error))
             .collect::<Result<Vec<_>, DataConnectorError>>()?;
 
         let additional = headers_preset
             .additional
             .iter()
             .map(|(header_name, header_val)| {
-                let key = SerializableHeaderName::new(header_name.to_string()).map_err(to_error)?;
-                let val = resolve_value_expression(metadata_accessor, header_val.clone());
+                let key = SerializableHeaderName::new(header_name.clone()).map_err(to_error)?;
+                let val = resolve_value_expression(&metadata_accessor.flags, header_val.clone());
                 Ok((key, val))
             })
             .collect::<Result<IndexMap<_, _>, DataConnectorError>>()?;
@@ -371,28 +373,6 @@ impl HttpHeadersPreset {
             forward,
             additional,
         })
-    }
-}
-
-fn resolve_value_expression(
-    metadata_accessor: &MetadataAccessor,
-    value_expression_input: open_dds::permissions::ValueExpression,
-) -> ValueExpression {
-    match value_expression_input {
-        open_dds::permissions::ValueExpression::SessionVariable(session_variable) => {
-            ValueExpression::SessionVariable(hasura_authn_core::SessionVariableReference {
-                name: session_variable,
-                passed_as_json: metadata_accessor
-                    .flags
-                    .contains(open_dds::flags::Flag::JsonSessionVariables),
-                disallow_unknown_fields: metadata_accessor
-                    .flags
-                    .contains(open_dds::flags::Flag::DisallowUnknownValuesInArguments),
-            })
-        }
-        open_dds::permissions::ValueExpression::Literal(json_value) => {
-            ValueExpression::Literal(json_value)
-        }
     }
 }
 
@@ -423,7 +403,7 @@ impl CommandsResponseConfig {
         let forward_headers = response_headers
             .forward_headers
             .iter()
-            .map(|header| SerializableHeaderName::new(header.to_string()).map_err(to_error))
+            .map(|header| SerializableHeaderName::new(header.clone()).map_err(to_error))
             .collect::<Result<Vec<_>, DataConnectorError>>()?;
         Ok(Self {
             headers_field: response_headers.headers_field.clone(),
@@ -487,6 +467,11 @@ pub struct DataConnectorCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_relational_queries: Option<DataConnectorRelationalQueryCapabilities>,
+
+    /// Whether or not relational mutations are supported
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_relational_mutations: Option<DataConnectorRelationalMutationCapabilities>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -570,6 +555,14 @@ pub struct DataConnectorRelationalQueryCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_window: Option<DataConnectorRelationalWindowCapabilities>,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_union: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_streaming: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -650,13 +643,33 @@ pub struct DataConnectorRelationalExpressionCapabilities {
     pub supports_aggregate: DataConnectorRelationalAggregateExpressionCapabilities,
 
     pub supports_window: DataConnectorRelationalWindowExpressionCapabilities,
+
+    pub supports_scalar_types: Option<DataConnectorRelationalScalarTypeCapabilities>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DataConnectorRelationalScalarTypeCapabilities {
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_interval: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_from_type: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DataConnectorRelationalCaseExpressionCapabilities {
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_scrutinee: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DataConnectorRelationalConditionalExpressionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
-    pub supports_case: bool,
+    pub supports_case: Option<DataConnectorRelationalCaseExpressionCapabilities>,
 
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
@@ -721,6 +734,11 @@ pub struct DataConnectorRelationalComparisonExpressionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_less_than_eq: bool,
+
+    /// Whether the is distinct from comparison is supported
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_is_distinct_from: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -749,6 +767,10 @@ pub struct DataConnectorRelationalScalarExpressionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_concat: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_binary_concat: bool,
 
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
@@ -937,6 +959,42 @@ pub struct DataConnectorRelationalScalarExpressionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_plus: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_contains: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_get: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_get_str: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_get_int: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_get_float: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_get_bool: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_get_json: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_as_text: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_json_length: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -993,6 +1051,10 @@ pub struct DatePartScalarExpressionCapability {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_nanosecond: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_epoch: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1024,7 +1086,7 @@ pub struct DataConnectorRelationalAggregateExpressionCapabilities {
 
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
-    pub supports_string_agg: bool,
+    pub supports_string_agg: Option<DataConnectorRelationalOrderedAggregateFunctionCapabilities>,
 
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
@@ -1045,6 +1107,26 @@ pub struct DataConnectorRelationalAggregateExpressionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_max: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_stddev: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_stddev_pop: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_approx_percentile_cont: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_approx_distinct: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_array_agg: Option<DataConnectorRelationalOrderedAggregateFunctionCapabilities>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1052,6 +1134,17 @@ pub struct DataConnectorRelationalAggregateFunctionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_distinct: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DataConnectorRelationalOrderedAggregateFunctionCapabilities {
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_distinct: bool,
+
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_order_by: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1080,6 +1173,19 @@ pub struct DataConnectorRelationalWindowExpressionCapabilities {
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub supports_percent_rank: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DataConnectorRelationalMutationCapabilities {
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_insert: bool,
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_update: bool,
+    #[serde(default = "serde_ext::ser_default")]
+    #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
+    pub supports_delete: bool,
 }
 
 fn mk_ndc_01_capabilities(
@@ -1123,6 +1229,7 @@ fn mk_ndc_01_capabilities(
             }
         }),
         supports_relational_queries: None,
+        supports_relational_mutations: None, // v0.1.x did not have relational mutations
     }
 }
 
@@ -1185,6 +1292,7 @@ fn mk_ndc_02_capabilities(
         }),
         supports_relational_queries: capabilities.relational_query.as_ref().map(|r| {
             DataConnectorRelationalQueryCapabilities {
+                supports_streaming: r.streaming.is_some(),
                 supports_project: DataConnectorRelationalProjectionCapabilities {
                     expression_capabilities: mk_relational_expression_capabilities(
                         &r.project.expression,
@@ -1232,6 +1340,14 @@ fn mk_ndc_02_capabilities(
                         ),
                     }
                 }),
+                supports_union: r.union.is_some(),
+            }
+        }),
+        supports_relational_mutations: capabilities.relational_mutation.as_ref().map(|r| {
+            DataConnectorRelationalMutationCapabilities {
+                supports_insert: r.insert.is_some(),
+                supports_update: r.update.is_some(),
+                supports_delete: r.delete.is_some(),
             }
         }),
     }
@@ -1240,127 +1356,169 @@ fn mk_ndc_02_capabilities(
 fn mk_relational_expression_capabilities(
     capabilities: &ndc_models::RelationalExpressionCapabilities,
 ) -> DataConnectorRelationalExpressionCapabilities {
-    let data_connector_relational_expression_capabilities =
-        DataConnectorRelationalExpressionCapabilities {
-            supports_conditional: DataConnectorRelationalConditionalExpressionCapabilities {
-                supports_case: capabilities.conditional.case.is_some(),
-                supports_nullif: capabilities.conditional.nullif.is_some(),
-            },
-            supports_comparison: DataConnectorRelationalComparisonExpressionCapabilities {
-                supports_like: capabilities.comparison.like.is_some(),
-                supports_ilike: capabilities.comparison.ilike.is_some(),
-                supports_between: capabilities.comparison.between.is_some(),
-                supports_contains: capabilities.comparison.contains.is_some(),
-                supports_is_nan: capabilities.comparison.is_nan.is_some(),
-                supports_is_zero: capabilities.comparison.is_zero.is_some(),
-                supports_greater_than_eq: capabilities.comparison.greater_than_eq.is_some(),
-                supports_greater_than: capabilities.comparison.greater_than.is_some(),
-                supports_in_list: capabilities.comparison.in_list.is_some(),
-                supports_is_false: capabilities.comparison.is_false.is_some(),
-                supports_is_null: capabilities.comparison.is_null.is_some(),
-                supports_is_true: capabilities.comparison.is_true.is_some(),
-                supports_less_than: capabilities.comparison.less_than.is_some(),
-                supports_less_than_eq: capabilities.comparison.less_than.is_some(),
-            },
-            supports_scalar: DataConnectorRelationalScalarExpressionCapabilities {
-                supports_abs: capabilities.scalar.abs.is_some(),
-                supports_array_element: capabilities.scalar.array_element.is_some(),
-                supports_btrim: capabilities.scalar.btrim.is_some(),
-                supports_ceil: capabilities.scalar.ceil.is_some(),
-                supports_character_length: capabilities.scalar.character_length.is_some(),
-                supports_concat: capabilities.scalar.concat.is_some(),
-                supports_cos: capabilities.scalar.cos.is_some(),
-                supports_current_date: capabilities.scalar.current_date.is_some(),
-                supports_current_time: capabilities.scalar.current_time.is_some(),
-                supports_current_timestamp: capabilities.scalar.current_timestamp.is_some(),
-                supports_date_part: capabilities.scalar.date_part.as_ref().map(|c| {
-                    DatePartScalarExpressionCapability {
-                        supports_year: c.year.is_some(),
-                        supports_quarter: c.quarter.is_some(),
-                        supports_month: c.month.is_some(),
-                        supports_week: c.week.is_some(),
-                        supports_day_of_week: c.day_of_week.is_some(),
-                        supports_day_of_year: c.day_of_year.is_some(),
-                        supports_day: c.day.is_some(),
-                        supports_hour: c.hour.is_some(),
-                        supports_minute: c.minute.is_some(),
-                        supports_second: c.second.is_some(),
-                        supports_microsecond: c.microsecond.is_some(),
-                        supports_millisecond: c.millisecond.is_some(),
-                        supports_nanosecond: c.nanosecond.is_some(),
-                    }
-                }),
-                supports_date_trunc: capabilities.scalar.date_trunc.is_some(),
-                supports_exp: capabilities.scalar.exp.is_some(),
-                supports_floor: capabilities.scalar.floor.is_some(),
-                supports_get_field: capabilities.scalar.get_field.is_some(),
-                supports_greatest: capabilities.scalar.greatest.is_some(),
-                supports_least: capabilities.scalar.least.is_some(),
-                supports_left: capabilities.scalar.left.is_some(),
-                supports_ln: capabilities.scalar.ln.is_some(),
-                supports_log: capabilities.scalar.log.is_some(),
-                supports_log10: capabilities.scalar.log10.is_some(),
-                supports_log2: capabilities.scalar.log2.is_some(),
-                supports_lpad: capabilities.scalar.lpad.is_some(),
-                supports_ltrim: capabilities.scalar.ltrim.is_some(),
-                supports_nvl: capabilities.scalar.nvl.is_some(),
-                supports_power: capabilities.scalar.power.is_some(),
-                supports_random: capabilities.scalar.random.is_some(),
-                supports_replace: capabilities.scalar.replace.is_some(),
-                supports_reverse: capabilities.scalar.reverse.is_some(),
-                supports_right: capabilities.scalar.right.is_some(),
-                supports_round: capabilities.scalar.round.is_some(),
-                supports_rpad: capabilities.scalar.rpad.is_some(),
-                supports_rtrim: capabilities.scalar.rtrim.is_some(),
-                supports_sqrt: capabilities.scalar.sqrt.is_some(),
-                supports_str_pos: capabilities.scalar.str_pos.is_some(),
-                supports_substr: capabilities.scalar.substr.is_some(),
-                supports_substr_index: capabilities.scalar.substr_index.is_some(),
-                supports_tan: capabilities.scalar.tan.is_some(),
-                supports_to_date: capabilities.scalar.to_date.is_some(),
-                supports_to_timestamp: capabilities.scalar.to_timestamp.is_some(),
-                supports_trunc: capabilities.scalar.trunc.is_some(),
-                supports_to_lower: capabilities.scalar.to_lower.is_some(),
-                supports_to_upper: capabilities.scalar.to_upper.is_some(),
-                supports_and: capabilities.scalar.and.is_some(),
-                supports_coalesce: capabilities.scalar.coalesce.is_some(),
-                supports_divide: capabilities.scalar.divide.is_some(),
-                supports_minus: capabilities.scalar.minus.is_some(),
-                supports_modulo: capabilities.scalar.modulo.is_some(),
-                supports_multiply: capabilities.scalar.multiply.is_some(),
-                supports_negate: capabilities.scalar.negate.is_some(),
-                supports_not: capabilities.scalar.not.is_some(),
-                supports_or: capabilities.scalar.or.is_some(),
-                supports_plus: capabilities.scalar.plus.is_some(),
-            },
-            supports_aggregate: DataConnectorRelationalAggregateExpressionCapabilities {
-                supports_bool_and: capabilities.aggregate.bool_and.is_some(),
-                supports_bool_or: capabilities.aggregate.bool_or.is_some(),
-                supports_count: capabilities.aggregate.count.as_ref().map(|c| {
-                    DataConnectorRelationalAggregateFunctionCapabilities {
+    DataConnectorRelationalExpressionCapabilities {
+        supports_conditional: DataConnectorRelationalConditionalExpressionCapabilities {
+            supports_case: capabilities.conditional.case.as_ref().map(|c| {
+                DataConnectorRelationalCaseExpressionCapabilities {
+                    supports_scrutinee: c.scrutinee.is_some(),
+                }
+            }),
+            supports_nullif: capabilities.conditional.nullif.is_some(),
+        },
+        supports_comparison: DataConnectorRelationalComparisonExpressionCapabilities {
+            supports_like: capabilities.comparison.like.is_some(),
+            supports_ilike: capabilities.comparison.ilike.is_some(),
+            supports_between: capabilities.comparison.between.is_some(),
+            supports_contains: capabilities.comparison.contains.is_some(),
+            supports_is_distinct_from: capabilities.comparison.is_distinct_from.is_some(),
+            supports_is_nan: capabilities.comparison.is_nan.is_some(),
+            supports_is_zero: capabilities.comparison.is_zero.is_some(),
+            supports_greater_than_eq: capabilities.comparison.greater_than_eq.is_some(),
+            supports_greater_than: capabilities.comparison.greater_than.is_some(),
+            supports_in_list: capabilities.comparison.in_list.is_some(),
+            supports_is_false: capabilities.comparison.is_false.is_some(),
+            supports_is_null: capabilities.comparison.is_null.is_some(),
+            supports_is_true: capabilities.comparison.is_true.is_some(),
+            supports_less_than: capabilities.comparison.less_than.is_some(),
+            supports_less_than_eq: capabilities.comparison.less_than.is_some(),
+        },
+        supports_scalar: DataConnectorRelationalScalarExpressionCapabilities {
+            supports_abs: capabilities.scalar.abs.is_some(),
+            supports_array_element: capabilities.scalar.array_element.is_some(),
+            supports_binary_concat: capabilities.scalar.binary_concat.is_some(),
+            supports_btrim: capabilities.scalar.btrim.is_some(),
+            supports_ceil: capabilities.scalar.ceil.is_some(),
+            supports_character_length: capabilities.scalar.character_length.is_some(),
+            supports_concat: capabilities.scalar.concat.is_some(),
+            supports_cos: capabilities.scalar.cos.is_some(),
+            supports_current_date: capabilities.scalar.current_date.is_some(),
+            supports_current_time: capabilities.scalar.current_time.is_some(),
+            supports_current_timestamp: capabilities.scalar.current_timestamp.is_some(),
+            supports_date_part: capabilities.scalar.date_part.as_ref().map(|c| {
+                DatePartScalarExpressionCapability {
+                    supports_year: c.year.is_some(),
+                    supports_quarter: c.quarter.is_some(),
+                    supports_month: c.month.is_some(),
+                    supports_week: c.week.is_some(),
+                    supports_day_of_week: c.day_of_week.is_some(),
+                    supports_day_of_year: c.day_of_year.is_some(),
+                    supports_day: c.day.is_some(),
+                    supports_hour: c.hour.is_some(),
+                    supports_minute: c.minute.is_some(),
+                    supports_second: c.second.is_some(),
+                    supports_microsecond: c.microsecond.is_some(),
+                    supports_millisecond: c.millisecond.is_some(),
+                    supports_nanosecond: c.nanosecond.is_some(),
+                    supports_epoch: c.epoch.is_some(),
+                }
+            }),
+            supports_date_trunc: capabilities.scalar.date_trunc.is_some(),
+            supports_exp: capabilities.scalar.exp.is_some(),
+            supports_floor: capabilities.scalar.floor.is_some(),
+            supports_get_field: capabilities.scalar.get_field.is_some(),
+            supports_greatest: capabilities.scalar.greatest.is_some(),
+            supports_least: capabilities.scalar.least.is_some(),
+            supports_left: capabilities.scalar.left.is_some(),
+            supports_ln: capabilities.scalar.ln.is_some(),
+            supports_log: capabilities.scalar.log.is_some(),
+            supports_log10: capabilities.scalar.log10.is_some(),
+            supports_log2: capabilities.scalar.log2.is_some(),
+            supports_lpad: capabilities.scalar.lpad.is_some(),
+            supports_ltrim: capabilities.scalar.ltrim.is_some(),
+            supports_nvl: capabilities.scalar.nvl.is_some(),
+            supports_power: capabilities.scalar.power.is_some(),
+            supports_random: capabilities.scalar.random.is_some(),
+            supports_replace: capabilities.scalar.replace.is_some(),
+            supports_reverse: capabilities.scalar.reverse.is_some(),
+            supports_right: capabilities.scalar.right.is_some(),
+            supports_round: capabilities.scalar.round.is_some(),
+            supports_rpad: capabilities.scalar.rpad.is_some(),
+            supports_rtrim: capabilities.scalar.rtrim.is_some(),
+            supports_sqrt: capabilities.scalar.sqrt.is_some(),
+            supports_str_pos: capabilities.scalar.str_pos.is_some(),
+            supports_substr: capabilities.scalar.substr.is_some(),
+            supports_substr_index: capabilities.scalar.substr_index.is_some(),
+            supports_tan: capabilities.scalar.tan.is_some(),
+            supports_to_date: capabilities.scalar.to_date.is_some(),
+            supports_to_timestamp: capabilities.scalar.to_timestamp.is_some(),
+            supports_trunc: capabilities.scalar.trunc.is_some(),
+            supports_to_lower: capabilities.scalar.to_lower.is_some(),
+            supports_to_upper: capabilities.scalar.to_upper.is_some(),
+            supports_and: capabilities.scalar.and.is_some(),
+            supports_coalesce: capabilities.scalar.coalesce.is_some(),
+            supports_divide: capabilities.scalar.divide.is_some(),
+            supports_minus: capabilities.scalar.minus.is_some(),
+            supports_modulo: capabilities.scalar.modulo.is_some(),
+            supports_multiply: capabilities.scalar.multiply.is_some(),
+            supports_negate: capabilities.scalar.negate.is_some(),
+            supports_not: capabilities.scalar.not.is_some(),
+            supports_or: capabilities.scalar.or.is_some(),
+            supports_plus: capabilities.scalar.plus.is_some(),
+            supports_json_contains: capabilities.scalar.json_contains.is_some(),
+            supports_json_get: capabilities.scalar.json_get.is_some(),
+            supports_json_get_str: capabilities.scalar.json_get_str.is_some(),
+            supports_json_get_int: capabilities.scalar.json_get_int.is_some(),
+            supports_json_get_float: capabilities.scalar.json_get_float.is_some(),
+            supports_json_get_bool: capabilities.scalar.json_get_bool.is_some(),
+            supports_json_get_json: capabilities.scalar.json_get_json.is_some(),
+            supports_json_as_text: capabilities.scalar.json_as_text.is_some(),
+            supports_json_length: capabilities.scalar.json_length.is_some(),
+        },
+        supports_aggregate: DataConnectorRelationalAggregateExpressionCapabilities {
+            supports_bool_and: capabilities.aggregate.bool_and.is_some(),
+            supports_bool_or: capabilities.aggregate.bool_or.is_some(),
+            supports_count: capabilities.aggregate.count.as_ref().map(|c| {
+                DataConnectorRelationalAggregateFunctionCapabilities {
+                    supports_distinct: c.distinct.is_some(),
+                }
+            }),
+            supports_first_value: capabilities.aggregate.first_value.is_some(),
+            supports_last_value: capabilities.aggregate.last_value.is_some(),
+            supports_median: capabilities.aggregate.median.is_some(),
+            supports_string_agg: capabilities
+                .aggregate
+                .string_agg_with_separator
+                .as_ref()
+                .map(
+                    |c| DataConnectorRelationalOrderedAggregateFunctionCapabilities {
                         supports_distinct: c.distinct.is_some(),
-                    }
-                }),
-                supports_first_value: capabilities.aggregate.first_value.is_some(),
-                supports_last_value: capabilities.aggregate.last_value.is_some(),
-                supports_median: capabilities.aggregate.median.is_some(),
-                supports_string_agg: capabilities.aggregate.string_agg.is_some(),
-                supports_var: capabilities.aggregate.var.is_some(),
-                supports_avg: capabilities.aggregate.avg.is_some(),
-                supports_sum: capabilities.aggregate.sum.is_some(),
-                supports_min: capabilities.aggregate.min.is_some(),
-                supports_max: capabilities.aggregate.max.is_some(),
-            },
-            supports_window: DataConnectorRelationalWindowExpressionCapabilities {
-                supports_row_number: capabilities.window.row_number.is_some(),
-                supports_dense_rank: capabilities.window.dense_rank.is_some(),
-                supports_ntile: capabilities.window.ntile.is_some(),
-                supports_rank: capabilities.window.rank.is_some(),
-                supports_cume_dist: capabilities.window.cume_dist.is_some(),
-                supports_percent_rank: capabilities.window.percent_rank.is_some(),
-            },
-        };
-    data_connector_relational_expression_capabilities
+                        supports_order_by: c.order_by.is_some(),
+                    },
+                ),
+            supports_var: capabilities.aggregate.var.is_some(),
+            supports_avg: capabilities.aggregate.avg.is_some(),
+            supports_sum: capabilities.aggregate.sum.is_some(),
+            supports_min: capabilities.aggregate.min.is_some(),
+            supports_max: capabilities.aggregate.max.is_some(),
+            supports_stddev: capabilities.aggregate.stddev.is_some(),
+            supports_stddev_pop: capabilities.aggregate.stddev_pop.is_some(),
+            supports_approx_percentile_cont: capabilities
+                .aggregate
+                .approx_percentile_cont
+                .is_some(),
+            supports_approx_distinct: capabilities.aggregate.approx_distinct.is_some(),
+            supports_array_agg: capabilities.aggregate.array_agg.as_ref().map(|c| {
+                DataConnectorRelationalOrderedAggregateFunctionCapabilities {
+                    supports_distinct: c.distinct.is_some(),
+                    supports_order_by: c.order_by.is_some(),
+                }
+            }),
+        },
+        supports_window: DataConnectorRelationalWindowExpressionCapabilities {
+            supports_row_number: capabilities.window.row_number.is_some(),
+            supports_dense_rank: capabilities.window.dense_rank.is_some(),
+            supports_ntile: capabilities.window.ntile.is_some(),
+            supports_rank: capabilities.window.rank.is_some(),
+            supports_cume_dist: capabilities.window.cume_dist.is_some(),
+            supports_percent_rank: capabilities.window.percent_rank.is_some(),
+        },
+        supports_scalar_types: capabilities.scalar_types.as_ref().map(|scalar_types| {
+            DataConnectorRelationalScalarTypeCapabilities {
+                supports_interval: scalar_types.interval.is_some(),
+                supports_from_type: scalar_types.from_type.is_some(),
+            }
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1427,6 +1585,7 @@ mod tests {
             supports_query_variables: false,
             supports_relationships: None,
             supports_relational_queries: None,
+            supports_relational_mutations: None,
         };
 
         // With explicit capabilities specified, we should use them
@@ -1472,6 +1631,7 @@ mod tests {
             supports_query_variables: false,
             supports_relationships: None,
             supports_relational_queries: None,
+            supports_relational_mutations: None,
         };
 
         // With explicit capabilities specified, we should use them
