@@ -9,7 +9,7 @@ where
 
 import Data.Bifunctor qualified
 import Data.Environment qualified as Env
-import Data.HashMap.Strict qualified as HM
+import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as T
 import Hasura.Prelude
 import Hasura.Tracing.Reporter (Reporter (..))
@@ -37,7 +37,7 @@ openTelemetryReporter tracer = Reporter \_context spanName _spanKind getMetadata
 
   liftIO do
     metadata <- getMetadata
-    OpenTelemetry.addAttributes theSpan $ HM.fromList $ Data.Bifunctor.second OpenTelemetry.toAttribute <$> metadata
+    OpenTelemetry.addAttributes theSpan $ HashMap.fromList $ Data.Bifunctor.second OpenTelemetry.toAttribute <$> metadata
     OpenTelemetry.endSpan theSpan Nothing
     OpenTelemetry.adjustContext $ \ctx ->
       maybe (OpenTelemetry.removeSpan ctx) (`OpenTelemetry.insertSpan` ctx) parent
