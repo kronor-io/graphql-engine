@@ -298,3 +298,12 @@ source-repository-package
   location: https://github.com/testcontainers/testcontainers-hs
   tag: fe0d6bbce6ce74d5843a964ac231929ea37025e8
 
+
+-- Kronor: modern hs-opentelemetry (1.0.0.0) for the OTLP trace exporter
+-- (Kronor.OpenTelemetryReporter). The old 0.0.x/0.1.0.0 stack does not
+-- build under GHC 9.14.1 (boot text-2.1.3 added Data.Text.show, clashing
+-- with Prelude.show). See kronor-io/kronor2#5696.
+constraints: hs-opentelemetry-api ==1.0.0.0,
+             hs-opentelemetry-sdk ==1.0.0.0,
+             hs-opentelemetry-exporter-otlp ==1.0.0.0,
+             hs-opentelemetry-instrumentation-wai ==1.0.0.0

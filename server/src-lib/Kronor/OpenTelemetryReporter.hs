@@ -49,16 +49,11 @@ initializeTracer env = do
   (processors, options) <- OpenTelemetry.getTracerProviderInitializationOptions
   ddTags <- detectDatadog env
 
+  -- Keep the SDK's default id-generator/sampler/limits/propagators, but
+  -- replace the auto-detected process resources with just our Datadog tags.
   let optionsMinusProcessData =
-        emptyTracerProviderOptions
-          { tracerProviderOptionsIdGenerator = options.tracerProviderOptionsIdGenerator,
-            tracerProviderOptionsSampler = options.tracerProviderOptionsSampler,
-            tracerProviderOptionsAttributeLimits = options.tracerProviderOptionsAttributeLimits,
-            tracerProviderOptionsSpanLimits = options.tracerProviderOptionsSpanLimits,
-            tracerProviderOptionsPropagators = options.tracerProviderOptionsPropagators,
-            tracerProviderOptionsLogger = options.tracerProviderOptionsLogger,
-            tracerProviderOptionsResources = materializeResources do
-              toResource ddTags
+        options
+          { tracerProviderOptionsResources = materializeResources (toResource ddTags)
           }
 
   provider <- createTracerProvider processors optionsMinusProcessData
@@ -66,7 +61,7 @@ initializeTracer env = do
   return (makeTracer provider "graphql-engine" tracerOptions, provider)
 
 shutdownTracer :: OpenTelemetry.TracerProvider -> IO ()
-shutdownTracer = shutdownTracerProvider
+shutdownTracer provider = void (shutdownTracerProvider provider Nothing)
 
 data DatadogTags = DatadogTags
   { ddEnv :: Maybe Text,
@@ -82,9 +77,7 @@ detectDatadog env = do
   return DatadogTags {..}
 
 instance ToResource DatadogTags where
-  type ResourceSchema DatadogTags = 'Nothing
-
-  toResource :: DatadogTags -> Resource (ResourceSchema DatadogTags)
+  toResource :: DatadogTags -> Resource
   toResource dd =
     mkResource
       [ "env" .=? dd.ddEnv,

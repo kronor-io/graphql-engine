@@ -2,19 +2,19 @@
 
 module Kronor.IntrospectionOptionsEnforcer (executeIntrospection) where
 
-import Data.Aeson.Ordered qualified as JO
 import Hasura.Base.Error
 import Hasura.GraphQL.Execute
    ( ExecutionStep (..),
    )
 import Hasura.Prelude
+import Hasura.RQL.IR.Root (RFRawPayload (..))
 import Hasura.RQL.Types.GraphqlSchemaIntrospection
 import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Authentication.User (UserInfo (..))
 
 executeIntrospection :: Monad m =>
     UserInfo ->
-    JO.Value ->
+    RFRawPayload ->
     SetGraphqlIntrospectionOptions ->
     m (Either QErr ExecutionStep)
 executeIntrospection ui introspectionQuery = \case
@@ -24,12 +24,12 @@ executeIntrospection ui introspectionQuery = \case
                       && ui._uiFallbackRole /= Just adminRoleName
           if disabled
             then throw401 "Introspection disabled"
-            else pure $ ExecStepRaw introspectionQuery
+            else pure $ ExecStepRaw (irEncJSON introspectionQuery)
 
     SetGraphqlIntrospectionOptions_Enabled enabledRoles ->
         runExceptT $ do
           let enabled = ui._uiRole `elem` enabledRoles
                       || ui._uiFallbackRole == Just adminRoleName
           if enabled
-            then pure $ ExecStepRaw introspectionQuery
+            then pure $ ExecStepRaw (irEncJSON introspectionQuery)
             else throw401 "Introspection disabled"

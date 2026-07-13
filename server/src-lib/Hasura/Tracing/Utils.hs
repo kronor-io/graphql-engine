@@ -16,14 +16,11 @@ import Hasura.Prelude
 import Hasura.RQL.Types.SourceConfiguration (HasSourceConfiguration (..))
 import Hasura.Tracing.Class
 import Hasura.Tracing.Context
-import Hasura.Tracing.Propagator (HttpPropagator)
+import Hasura.Tracing.Propagator (HttpPropagator, inject)
 import Hasura.Tracing.Propagator.B3 (b3TraceContextPropagator)
 import Hasura.Tracing.Propagator.W3CTraceContext (w3cTraceContextPropagator)
 import Hasura.Tracing.TraceId (SpanKind (SKClient))
 import Network.HTTP.Client.Transformable qualified as HTTP
-import OpenTelemetry.Trace.Core qualified as OpenTelemetry
-import OpenTelemetry.Context.ThreadLocal qualified as OpenTelemetry
-import OpenTelemetry.Propagator qualified as Propagator
 
 -- | Wrap the execution of an HTTP request in a span in the current
 -- trace. Despite its name, this function does not start a new trace, and the
@@ -40,7 +37,7 @@ traceHTTPRequest ::
   -- | a function that takes the traced request and executes it
   (HTTP.Request -> m a) ->
   m a
-traceHTTPRequest _propagator req f = do
+traceHTTPRequest propagator req f = do
   let method = bsToTxt (view HTTP.method req)
       uri = view HTTP.url req
   newSpan (method <> " " <> uri) SKClient do
@@ -48,10 +45,8 @@ traceHTTPRequest _propagator req f = do
     case maybeTraceContext of
       Nothing -> f req
       Just traceContext -> do
-        let propagator = OpenTelemetry.getTracerProviderPropagators $ OpenTelemetry.getTracerTracerProvider $ tcTracer traceContext
         let reqBytes = HTTP.getReqSize req
-        context <- liftIO OpenTelemetry.getContext
-        headers <- Propagator.inject propagator context []
+            headers = inject propagator traceContext []
         attachMetadata [
             ("http.request.body.size", fromString (show reqBytes))
           , ("http.request.method", method)

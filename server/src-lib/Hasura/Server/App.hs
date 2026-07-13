@@ -355,9 +355,12 @@ mkSpockAction appStateRef qErrEncoder qErrModifier apiHandler = do
         Tracing.emptyTraceState
 
   let propagator = OpenTelemetry.getTracerProviderPropagators $ OpenTelemetry.getTracerTracerProvider $ Tracing.tcTracer tracingCtx
+  -- hs-opentelemetry 1.0.0.0 propagators carry a TextMap rather than a raw
+  -- header list, so project the inbound request headers into one.
+  let carrier = Propagator.textMapFromList [(bsToTxt (CI.original k), bsToTxt v) | (k, v) <- headers]
   let parentContextM = do
         ctx <- OpenTelemetry.getContext
-        ctxt <- Propagator.extract propagator headers ctx
+        ctxt <- Propagator.extract propagator carrier ctx
         OpenTelemetry.attachContext ctxt
         
   _ <- liftIO parentContextM
