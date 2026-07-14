@@ -6,6 +6,7 @@ use crate::catalog::{Model, ObjectType, Type};
 use crate::schema::shared::json_schema;
 use std::collections::BTreeMap;
 use std::string::ToString;
+use std::sync::Arc;
 
 pub fn page_offset_parameter() -> oas3::spec::Parameter {
     let schema = oas3::spec::ObjectOrReference::Object(int_schema());
@@ -119,15 +120,15 @@ fn build_fields_parameter(
     object_type: &ObjectType,
 ) -> oas3::spec::Parameter {
     let schema = oas3::spec::ObjectOrReference::Object(oas3::spec::ObjectSchema {
-        items: Some(Box::new(oas3::spec::ObjectOrReference::Object(
-            enum_schema(
+        items: Some(Box::new(oas3::spec::Schema::Object(Box::new(
+            oas3::spec::ObjectOrReference::Object(enum_schema(
                 object_type
                     .type_fields
                     .keys()
                     .map(ToString::to_string)
                     .collect(),
-            ),
-        ))),
+            )),
+        )))),
         ..oas3::spec::ObjectSchema::default()
     });
 
@@ -170,9 +171,9 @@ pub fn ordering_parameter(model: &Model, object_type: &ObjectType) -> oas3::spec
     }
 
     let schema = oas3::spec::ObjectOrReference::Object(oas3::spec::ObjectSchema {
-        items: Some(Box::new(oas3::spec::ObjectOrReference::Object(
-            enum_schema(sort_keys.clone()),
-        ))),
+        items: Some(Box::new(oas3::spec::Schema::Object(Box::new(
+            oas3::spec::ObjectOrReference::Object(enum_schema(sort_keys.clone())),
+        )))),
         ..oas3::spec::ObjectSchema::default()
     });
 
@@ -183,7 +184,7 @@ pub fn ordering_parameter(model: &Model, object_type: &ObjectType) -> oas3::spec
             if i > 0 && i < sort_keys.len() {
                 example.push(',');
             }
-            example.push_str(&field.to_string());
+            example.push_str(&field.clone());
         }
     }
 
@@ -250,7 +251,7 @@ pub fn filter_parameters(
     // We don't need this right away, this will be used once we start supporting nested filters
     _filter_boolean_expression_types: &BTreeMap<
         String,
-        metadata_resolve::ResolvedObjectBooleanExpressionType,
+        Arc<metadata_resolve::ResolvedObjectBooleanExpressionType>,
     >,
 ) -> Option<oas3::spec::Parameter> {
     // only include a filter if the model has a `BooleanExpressionType`
@@ -289,7 +290,7 @@ pub fn filter_parameters(
                     };
 
                     // Add the operators
-                    for (operator_name, operator_type) in &field_comparison.operators {
+                    for (operator_name, operator_type) in field_comparison.operators.as_ref() {
                         field_schema.properties.insert(
                             format!("${operator_name}"),
                             oas3::spec::ObjectOrReference::Object(type_schema(operator_type)),
@@ -348,6 +349,8 @@ pub fn filter_parameters(
                                 "#/components/schemas/{}",
                                 pretty_typename(&boolean_expression_type.name)
                             ),
+                            summary: None,
+                            description: None,
                         },
                     )),
                 );
@@ -362,6 +365,8 @@ pub fn filter_parameters(
                                 "#/components/schemas/{}",
                                 pretty_typename(&boolean_expression_type.name)
                             ),
+                            summary: None,
+                            description: None,
                         },
                     )),
                 );
@@ -381,7 +386,7 @@ pub fn filter_parameters(
                     pretty_typename(&boolean_expression_type.name),
                     oas3::spec::ObjectOrReference::Object(filter_schema.clone()),
                 );
-            };
+            }
 
             // Note: We are using the content field here because the filter is a JSON object. We cannot use schema here.
             let mut content = BTreeMap::new();
@@ -397,7 +402,10 @@ pub fn filter_parameters(
                             "#/components/schemas/{}",
                             pretty_typename(&boolean_expression_type.name)
                         ),
+                        summary: None,
+                        description: None,
                     }),
+                    extensions: BTreeMap::new(),
                 },
             );
             Some(oas3::spec::Parameter {
@@ -427,9 +435,9 @@ fn type_schema(ty: &QualifiedTypeReference) -> oas3::spec::ObjectSchema {
     let mut schema = oas3::spec::ObjectSchema::default();
     match &ty.underlying_type {
         QualifiedBaseType::List(type_reference) => {
-            schema.items = Some(Box::new(oas3::spec::ObjectOrReference::Object(
-                type_schema(type_reference),
-            )));
+            schema.items = Some(Box::new(oas3::spec::Schema::Object(Box::new(
+                oas3::spec::ObjectOrReference::Object(type_schema(type_reference)),
+            ))));
             schema.schema_type = Some(oas3::spec::SchemaTypeSet::Single(
                 oas3::spec::SchemaType::Array,
             ));

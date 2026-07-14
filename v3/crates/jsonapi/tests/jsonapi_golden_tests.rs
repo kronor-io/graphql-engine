@@ -3,6 +3,7 @@
 use engine_types::HttpContext;
 use hasura_authn_core::{Identity, Role};
 use jsonapi_library::api::{DocumentData, IdentifierData, PrimaryData};
+use metadata_resolve::{LifecyclePluginConfigs, ResolvedLifecyclePreResponsePluginHooks};
 use reqwest::header::HeaderMap;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -41,9 +42,18 @@ fn test_get_succeeding_requests() {
 
                 let session = create_default_session();
 
+                let plugins = LifecyclePluginConfigs {
+                    pre_parse_plugins: Vec::new(),
+                    pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks::new(),
+                    pre_route_plugins: Vec::new(),
+                    pre_ndc_request_plugins: BTreeMap::new(),
+                    pre_ndc_response_plugins: BTreeMap::new(),
+                };
+
                 let result = jsonapi::handler_internal(
                     Arc::new(HeaderMap::default()),
                     Arc::new(http_context.clone()),
+                    Arc::new(plugins.clone()),
                     Arc::new(session.clone()),
                     &jsonapi_catalog,
                     metadata.into(),
@@ -104,9 +114,18 @@ fn test_get_failing_requests() {
 
                 let session = create_default_session();
 
+                let plugins = LifecyclePluginConfigs {
+                    pre_parse_plugins: Vec::new(),
+                    pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks::new(),
+                    pre_route_plugins: Vec::new(),
+                    pre_ndc_request_plugins: BTreeMap::new(),
+                    pre_ndc_response_plugins: BTreeMap::new()
+                };
+
                 let result = jsonapi::handler_internal(
                     Arc::new(HeaderMap::default()),
                     Arc::new(http_context.clone()),
+                    Arc::new(plugins.clone()),
                     Arc::new(session.clone()),
                     &jsonapi_catalog,
                     metadata.into(),
@@ -206,8 +225,9 @@ fn test_request_setup(path: &Path) -> TestRequest {
 
     let mut query_params = std::fs::read_to_string(path).unwrap_or_else(|error| {
         panic!(
-            "{}: Could not read file {path:?}: {error}",
-            directory.display()
+            "{}: Could not read file {}: {error}",
+            directory.display(),
+            path.display(),
         )
     });
 
@@ -296,7 +316,7 @@ fn validate_relationships_in_included(document_data: &DocumentData) -> Result<()
         let resources_with_relationships: Vec<String> = all_resources
             .iter()
             .filter(|r| r.relationships.is_some())
-            .map(|r| r._type.to_string())
+            .map(|r| r._type.clone())
             .collect();
 
         return if resources_with_relationships.is_empty() {

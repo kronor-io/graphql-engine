@@ -1,18 +1,21 @@
-use crate::{helpers::types::DuplicateRootFieldError, types::warning::Warning};
+use std::sync::Arc;
+
+use crate::{ArgumentInfo, helpers::types::DuplicateRootFieldError, types::warning::Warning};
+use graphql_types::{self as ast};
 use indexmap::IndexMap;
-use lang_graphql::ast::common::{self as ast};
 use open_dds::{
     aggregates::AggregateExpressionName,
     data_connector::{DataConnectorColumnName, DataConnectorName},
     models::ModelName,
+    query::ArgumentName,
     types::{Deprecated, FieldName},
 };
 use serde::{Deserialize, Serialize};
 
+use crate::OrderByExpressionIdentifier;
 use crate::stages::{boolean_expressions, models};
 use crate::types::error::ShouldBeAnError;
 use crate::types::subgraph::{Qualified, QualifiedTypeReference};
-use crate::{OrderByExpressionIdentifier, helpers::types::NdcColumnForComparison};
 
 #[derive(Debug)]
 pub struct ModelsWithGraphqlOutput {
@@ -23,21 +26,18 @@ pub struct ModelsWithGraphqlOutput {
 /// A Model resolved with regards to it's data source
 #[derive(Debug)]
 pub(crate) struct ModelWithGraphql {
-    pub inner: models::Model,
-    pub filter_expression_type: Option<boolean_expressions::ResolvedObjectBooleanExpressionType>,
+    pub inner: Arc<models::Model>,
+    pub filter_expression_type:
+        Option<Arc<boolean_expressions::ResolvedObjectBooleanExpressionType>>,
     pub graphql_api: ModelGraphQlApi,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct UniqueIdentifierField {
-    pub field_type: QualifiedTypeReference,
-    pub ndc_column: Option<NdcColumnForComparison>,
+    pub arguments: IndexMap<ArgumentName, ArgumentInfo>,
+    pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SelectUniqueGraphQlDefinition {
     pub query_root_field: ast::Name,
-    pub unique_identifier: IndexMap<FieldName, UniqueIdentifierField>,
+    pub unique_identifier: IndexMap<FieldName, QualifiedTypeReference>,
     #[serde(default = "serde_ext::ser_default")]
     #[serde(skip_serializing_if = "serde_ext::is_ser_default")]
     pub description: Option<String>,

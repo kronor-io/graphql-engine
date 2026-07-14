@@ -24,7 +24,7 @@ enum JsonApiFilter {
     },
 }
 
-#[derive(Debug, derive_more::Display, Serialize, Deserialize)]
+#[derive(Debug, derive_more::with_trait::Display, Serialize, Deserialize)]
 pub enum FilterError {
     NoBooleanExpressionDefined(Qualified<ModelName>),
 }
@@ -267,10 +267,10 @@ fn parse_filter_value(
             }
 
             // if there is only one filter, skip the AND wrapper
-            if jsonapi_filters.len() == 1 {
-                if let Some(jsonapi_filter) = jsonapi_filters.first() {
-                    return Ok(jsonapi_filter.clone());
-                }
+            if jsonapi_filters.len() == 1
+                && let Some(jsonapi_filter) = jsonapi_filters.first()
+            {
+                return Ok(jsonapi_filter.clone());
             }
             Ok(JsonApiFilter::And {
                 and: jsonapi_filters,

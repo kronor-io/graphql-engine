@@ -1,18 +1,17 @@
-/// Macro to use serde's deserialize and schamars' JsonSchema impl OpenDd for any type using serde_path_to_error with path information
+/// Macro to use serde's deserialize and schemars' JsonSchema impl OpenDd for any type.
+/// For simple leaf types (String, bool, i32, etc.), serde_path_to_error is not needed
+/// since the error path would always be empty. We use serde_json::from_value directly
+/// to avoid the TrackedSeed/Wrap overhead.
 #[macro_export]
 macro_rules! impl_OpenDd_default_for {
     ($ty: ty) => {
         impl open_dds::traits::OpenDd for $ty {
             fn deserialize(
                 json: serde_json::Value,
-                _path: jsonpath::JSONPath,
+                path: jsonpath::JSONPath,
             ) -> Result<Self, open_dds::traits::OpenDdDeserializeError> {
-                ::serde_path_to_error::deserialize(json).map_err(|e| {
-                    open_dds::traits::OpenDdDeserializeError {
-                        path: jsonpath::JSONPath::from_serde_path(e.path()),
-                        error: e.into_inner(),
-                    }
-                })
+                serde_json::from_value(json)
+                    .map_err(|e| open_dds::traits::OpenDdDeserializeError { path, error: e })
             }
 
             fn json_schema(
@@ -53,7 +52,7 @@ macro_rules! seq_impl {
                             serde::de::Unexpected::Other("not an array"),
                             &"array",
                         ),
-                        path: jsonpath::JSONPath::new(),
+                        path,
                     }),
                 }
             }
@@ -106,7 +105,7 @@ macro_rules! map_impl {
                             serde::de::Unexpected::Other("not an object"),
                             &"object",
                         ),
-                        path: jsonpath::JSONPath::new(),
+                        path,
                     }),
                 }
             }
@@ -156,7 +155,8 @@ macro_rules! impl_JsonSchema_with_OpenDd_for {
 /// Macro to implement newtype wrappers for string identifiers
 #[macro_export]
 macro_rules! str_newtype {
-    ($name:ident over $oldtype:ty | doc $doc:expr) => {
+    // Internal: common implementation for all variants
+    (@base $name:ident over $oldtype:ty | doc $doc:expr) => {
         #[derive(
             Clone,
             Debug,
@@ -168,7 +168,7 @@ macro_rules! str_newtype {
             serde::Serialize,
             serde::Deserialize,
             ref_cast::RefCast,
-            derive_more::Display,
+            derive_more::with_trait::Display,
             opendds_derive::OpenDd,
         )]
         #[repr(transparent)]
@@ -205,12 +205,6 @@ macro_rules! str_newtype {
             }
         }
 
-        impl From<$name> for String {
-            fn from(value: $name) -> Self {
-                value.0.into()
-            }
-        }
-
         impl $name {
             pub fn new(value: $oldtype) -> Self {
                 $name(value)
@@ -231,8 +225,20 @@ macro_rules! str_newtype {
 
         $crate::impl_JsonSchema_with_OpenDd_for!($name);
     };
-    ($name:ident | doc $doc:expr) => {
-        str_newtype! {$name over smol_str::SmolStr | doc $doc}
+
+    // Case 1: over String
+    ($name:ident over String | doc $doc:expr) => {
+        str_newtype! {@base $name over String | doc $doc}
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                $name(value.into())
+            }
+        }
+    };
+
+    // Case 2: over SmolStr
+    ($name:ident over smol_str::SmolStr | doc $doc:expr) => {
+        str_newtype! {@base $name over smol_str::SmolStr | doc $doc}
 
         impl From<&str> for $name {
             fn from(value: &str) -> Self {
@@ -245,5 +251,27 @@ macro_rules! str_newtype {
                 $name(value.into())
             }
         }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0.into()
+            }
+        }
+    };
+
+    // Case 3: over $oldtype (not String or SmolStr)
+    ($name:ident over $oldtype:ty | doc $doc:expr) => {
+        str_newtype! {@base $name over $oldtype | doc $doc}
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0.into()
+            }
+        }
+    };
+
+    // Case 4: no over clause - default to SmolStr
+    ($name:ident | doc $doc:expr) => {
+        str_newtype! {$name over smol_str::SmolStr | doc $doc}
     };
 }

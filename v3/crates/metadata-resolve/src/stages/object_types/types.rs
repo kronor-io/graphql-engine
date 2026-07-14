@@ -15,10 +15,11 @@ use serde_with::serde_as;
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::types::subgraph::Qualified;
 
-use lang_graphql::ast::common as ast;
+use graphql_types as ast;
 use open_dds::data_connector::{
     DataConnectorColumnName, DataConnectorName, DataConnectorObjectType, DataConnectorOperatorName,
 };
@@ -431,7 +432,7 @@ pub enum TypeMapping {
     /// Mapping from an object to their fields, which contain the types of fields.
     Object {
         ndc_object_type_name: DataConnectorObjectType,
-        field_mappings: BTreeMap<FieldName, FieldMapping>,
+        field_mappings: Arc<BTreeMap<FieldName, FieldMapping>>,
     },
 }
 

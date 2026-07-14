@@ -75,6 +75,8 @@ use plan_types::{ProcessResponseAs, RemoteJoinObjectFieldMapping};
 use crate::error;
 use crate::ndc::execute_ndc_query;
 use engine_types::{HttpContext, ProjectId};
+use hasura_authn_core::Session;
+use metadata_resolve::LifecyclePluginConfigs;
 
 use collect::ExecutableJoinNode;
 use plan_types::{JoinLocations, RemoteJoinVariableSet};
@@ -88,6 +90,9 @@ use async_recursion::async_recursion;
 #[async_recursion]
 pub async fn execute_join_locations(
     http_context: &HttpContext,
+    plugins: &LifecyclePluginConfigs,
+    session: &Session,
+    request_headers: &http::HeaderMap,
     execution_span_attribute: &'static str,
     lhs_response: &mut Vec<ndc_models::RowSet>,
     lhs_response_type: &ProcessResponseAs,
@@ -126,6 +131,7 @@ pub async fn execute_join_locations(
         if variable_sets.is_empty() {
             continue;
         }
+
         // patch the target/RHS IR with variable values
         let foreach_variables: Vec<BTreeMap<plan_types::VariableName, json::Value>> = variable_sets
             .iter()
@@ -159,6 +165,9 @@ pub async fn execute_join_locations(
                 || {
                     Box::pin(execute_ndc_query(
                         http_context,
+                        plugins,
+                        session,
+                        request_headers,
                         &ndc_query,
                         &join_node.target_data_connector,
                         execution_span_attribute,
@@ -175,6 +184,9 @@ pub async fn execute_join_locations(
         if !sub_tree.locations.is_empty() {
             execute_join_locations(
                 http_context,
+                plugins,
+                session,
+                request_headers,
                 execution_span_attribute,
                 &mut target_response,
                 &join_node.process_response_as,
@@ -197,6 +209,7 @@ pub async fn execute_join_locations(
                     &join_node,
                     &remote_alias,
                     lhs_response,
+                    lhs_response_type,
                     &rhs_response,
                 )
             },

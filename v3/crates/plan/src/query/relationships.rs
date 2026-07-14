@@ -1,6 +1,5 @@
 use crate::metadata_accessor::OutputObjectTypeView;
 use crate::types::{PlanError, RelationshipError};
-use hasura_authn_core::Session;
 use indexmap::IndexMap;
 use metadata_resolve::{
     Metadata, Qualified, QualifiedTypeReference, RelationshipCommandMapping,
@@ -31,11 +30,9 @@ pub fn process_model_relationship_definition(
         relationship_name,
         relationship_type,
         source_type,
-        source_data_connector: _,
         source_type_mappings,
         target_model_name,
         target_source,
-        target_type: _,
         mappings,
     } = relationship_info;
 
@@ -188,6 +185,7 @@ pub fn process_command_relationship_definition(
         target_collection: CollectionName::from(function_name.as_str()),
         arguments,
     };
+
     Ok(relationship)
 }
 
@@ -199,7 +197,6 @@ pub struct CommandRemoteRelationshipParts {
 }
 
 pub fn calculate_remote_relationship_fields_for_command_target(
-    session: &Session,
     metadata: &Metadata,
     object_type: &OutputObjectTypeView,
     relationship_name: &RelationshipName,
@@ -221,7 +218,7 @@ pub fn calculate_remote_relationship_fields_for_command_target(
     } in relationship_command_mappings
     {
         let source_field_type = object_type
-            .get_field(&source_field.field_name, &session.role)
+            .get_field(&source_field.field_name)
             .map_err(|_| RelationshipError::MissingSourceField {
                 relationship_name: relationship_name.clone(),
                 source_field: source_field.field_name.clone(),
@@ -302,7 +299,6 @@ pub struct ModelRemoteRelationshipParts {
 }
 
 pub fn calculate_remote_relationship_fields_for_model_target(
-    session: &Session,
     metadata: &Metadata,
     object_type: &OutputObjectTypeView,
     relationship_name: &RelationshipName,
@@ -325,7 +321,7 @@ pub fn calculate_remote_relationship_fields_for_model_target(
     } in relationship_model_mappings
     {
         let source_field_type = object_type
-            .get_field(&source_field.field_name, &session.role)
+            .get_field(&source_field.field_name)
             .map_err(|_| RelationshipError::MissingSourceField {
                 relationship_name: relationship_name.clone(),
                 source_field: source_field.field_name.clone(),

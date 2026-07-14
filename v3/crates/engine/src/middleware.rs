@@ -17,6 +17,7 @@ use pre_parse_plugin::execute::pre_parse_plugins_handler;
 use pre_response_plugin::execute::pre_response_plugins_handler;
 
 use hasura_authn_core::Session;
+use pre_response_plugin::execute::ProcessedPreResponsePluginResponse;
 use tracing_util::{SpanVisibility, TraceableHttpResponse};
 
 use super::types::RequestType;
@@ -94,6 +95,9 @@ pub async fn explain_request_tracing_middleware(
 /// authentication configuration present in the `auth_config` of `EngineState`. The
 /// result of the authentication is `hasura-authn-core::Identity`, which is then
 /// made available to the GraphQL request handler.
+///
+/// If the authentication webhook returns baggage in the response headers, it will
+/// be attached to the OpenTelemetry context and propagated to subsequent spans.
 pub async fn authentication_middleware(
     State(state): State<engine_types::WithMiddlewareErrorConverter<EngineState>>,
     headers_map: HeaderMap,
@@ -103,7 +107,7 @@ pub async fn authentication_middleware(
     let tracer = tracing_util::global_tracer();
 
     let engine_state = &state.state;
-    let resolved_identity = tracer
+    let auth_response = tracer
         .in_span_async(
             "authentication_middleware",
             "Authentication middleware",
@@ -113,14 +117,27 @@ pub async fn authentication_middleware(
                     &headers_map,
                     &engine_state.http_context.client,
                     &engine_state.auth_config,
+                    &engine_state.auth_mode_header,
                 ))
             },
         )
         .await
         .map_err(|err| state.handle_error(err.into_middleware_error()))?;
 
-    request.extensions_mut().insert(resolved_identity);
-    Ok(next.run(request).await)
+    request.extensions_mut().insert(auth_response.identity);
+
+    // If baggage was returned from the auth webhook, attach it to the context
+    // so it propagates to all subsequent spans.
+    // We use merged baggage to ensure existing baggage items (like ddn-project-id)
+    // cannot be overridden by user-provided values from the auth webhook.
+    if auth_response.baggage.is_empty() {
+        Ok(next.run(request).await)
+    } else {
+        use tracing_util::FutureExt;
+        let context =
+            tracing_util::current_context_with_merged_baggage(auth_response.baggage.into_iter());
+        Ok(next.run(request).with_context(context).await)
+    }
 }
 
 pub async fn plugins_middleware(
@@ -166,11 +183,24 @@ pub async fn plugins_middleware(
             .await
             .map_err(|err| state.handle_error(err.into_middleware_error()))?;
 
-            if let Some(response) = response {
-                Ok(response)
-            } else {
-                let recreated_request = Request::from_parts(parts, axum::body::Body::from(bytes));
-                Ok(next.run(recreated_request).await)
+            match response {
+                pre_parse_plugin::execute::ProcessedPreParsePluginResponse::Return(response) => {
+                    Ok(response)
+                }
+                pre_parse_plugin::execute::ProcessedPreParsePluginResponse::Continue(
+                    new_raw_request,
+                ) => {
+                    let recreated_request = if let Some(new_raw_request) = new_raw_request {
+                        let bytes = serde_json::to_vec(&new_raw_request).map_err(|err| {
+                            (reqwest::StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+                                .into_response()
+                        })?;
+                        Request::from_parts(parts, axum::body::Body::from(bytes))
+                    } else {
+                        Request::from_parts(parts, axum::body::Body::from(bytes))
+                    };
+                    Ok(next.run(recreated_request).await)
+                }
             }
         }
     }?;
@@ -184,21 +214,29 @@ pub async fn plugins_middleware(
         })?
         .to_bytes();
 
-    if let Some(pre_response_plugins) = nonempty::NonEmpty::from_slice(
-        &engine_state
-            .resolved_metadata
-            .plugin_configs
-            .pre_response_plugins,
-    ) {
-        pre_response_plugins_handler(
+    // Execute pre-response plugins
+    let pre_response_plugins = &engine_state
+        .resolved_metadata
+        .plugin_configs
+        .pre_response_plugins;
+
+    if !pre_response_plugins.is_empty() {
+        let plugin_response = pre_response_plugins_handler(
             client_address,
-            &pre_response_plugins,
+            pre_response_plugins,
             &engine_state.http_context.client,
             session,
             &raw_request,
             &response_bytes,
             headers_map,
-        )?;
+        )
+        .await?;
+        match plugin_response {
+            ProcessedPreResponsePluginResponse::Continue => {}
+            ProcessedPreResponsePluginResponse::Response(new_raw_response) => {
+                return Ok(new_raw_response);
+            }
+        }
     }
     let recreated_response =
         axum::response::Response::from_parts(parts, axum::body::Body::from(response_bytes));

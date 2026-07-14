@@ -1,5 +1,6 @@
 use crate::catalog::{Model, ObjectType, State};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 mod output;
 mod parameters;
 mod shared;
@@ -36,6 +37,7 @@ fn get_response(
         encoding: BTreeMap::new(),
         examples: None,
         schema: Some(schema),
+        extensions: BTreeMap::new(),
     };
 
     let mut content = BTreeMap::new();
@@ -57,7 +59,7 @@ fn get_route_for_model(
     schemas: &mut BTreeMap<String, oas3::spec::ObjectOrReference<oas3::spec::ObjectSchema>>,
     filter_boolean_expression_types: &BTreeMap<
         String,
-        metadata_resolve::ResolvedObjectBooleanExpressionType,
+        Arc<metadata_resolve::ResolvedObjectBooleanExpressionType>,
     >,
 ) -> oas3::spec::Operation {
     let mut parameters = vec![
@@ -95,6 +97,7 @@ fn get_route_for_model(
         parameters,
         request_body: None,
         responses: Some(responses),
+        security: vec![],
         servers: vec![],
         summary: Some(format!("Fetch {} values", model.data_type.name)),
         tags: vec![],
@@ -119,6 +122,7 @@ pub fn empty_schema() -> oas3::Spec {
         servers: vec![],
         paths: None,
         components: None,
+        security: vec![],
         tags: vec![],
         webhooks: BTreeMap::new(),
         external_docs: None,
@@ -219,6 +223,7 @@ pub fn openapi_schema(state: &State) -> Result<oas3::Spec, SchemaError> {
         servers: vec![],
         paths: Some(paths),
         components: Some(components),
+        security: vec![],
         tags: vec![],
         webhooks: BTreeMap::new(),
         external_docs: None,

@@ -2,14 +2,603 @@
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+- Apply `DataConnectorLink.argumentPresets` (e.g. header forwarding) to
+  relational queries on the `/v1/sql` path. Previously these presets were
+  honoured only for GraphQL/JSON:API requests, so connectors received no
+  forwarded headers when the same model was queried via SQL.
+
+## [v2026.04.23]
+
+### Added
+
+- Added optional `sessionVariableToTraceAttributeMap` field to AuthConfig v4,
+  allowing session variables to be propagated as OpenTelemetry trace attributes
+  to downstream services. Works with all auth modes (JWT, webhook, noAuth). For
+  webhook auth, explicitly returned baggage values take precedence over
+  config-mapped values.
+
+### Changed
+
+### Fixed
+
+- An authorization `Condition` that references a non-existent session variables
+  fails to match rather than throwing an error
+
+## [v2026.03.25]
+
+### Added
+
+- Added `uniqueIdentifiers` to `Model` used for hold uniqueness constraints for
+  grouping operations.
+- Prefer the specified role from client when the optional `x-hasura-role` header
+  is passed. Make the behavior consistent with
+  [JWT auth in GraphQL Engine v2](https://hasura.io/docs/2.0/auth/authentication/jwt/#hasura-jwt-format).
+
+### Changed
+
+### Fixed
+
+## [v2026.03.10]
+
+### Added
+
+### Changed
+
+### Fixed
+
+## [v2026.03.09]
+
+### Added
+
+- The request body size limit in bytes can now be configured via the
+  `REQUEST_BODY_LIMIT` environment variable (default: 10 MB).
+
+### Changed
+
+### Fixed
+
+## [v2026.03.03]
+
+### Added
+
+### Changed
+
+- OTEL baggage items from the auth webhook are added to OTEL baggage. Items
+  already in baggage take precedence to stop user code overwriting
+  `x-ddn-project-id` etc.
+
+### Fixed
+
+## [v2026.02.27]
+
+- No changes
+
+## [v2026.02.26]
+
+- No changes
+
+## [v2026.02.25]
+
+### Changed
+
+- Detect errors in streaming NDC responses and show these to the user
+
+## [v2026.02.18]
+
+- No changes
+
+## [v2026.02.17]
+
+- No changes
+
+## [v2026.02.11]
+
+- No changes
+
+## [v2026.02.05]
+
+- No changes
+
+## [v2026.01.26]
+
+### Added
+
+- Added optional field `useFullSchema` to `PromptQlConfigV2` to allow
+  configuring whether to use the full schema in the agent. Set to true when the
+  schema is small.
+
+## [v2026.01.07]
+
+### Added
+
+- Updated Azure LLM configuration to support client-secret authentication.
+
+Client-secret authentication is an alternative to API key authentication. It
+requires setting a tenant ID, client ID, and client secret in the configuration.
+For example:
+
+```yaml
+kind: PromptQlConfig
+version: v2
+definition:
+  llm:
+    provider: azure
+    endpoint: "https://jessehallett-2555-resource.cognitiveservices.azure.com/openai/deployments/gpt-5.1-chat"
+    clientId:
+      value: 23f55411-d226-4c8b-928d-1376a788dec3
+    clientSecret:
+      value: <redacted>
+    tenantId:
+      value: 24b7b3cd-ce05-4a20-b1c8-472f8ad2edbf
+```
+
+### Changed
+
+### Fixed
+
+## [v2025.12.22]
+
+### Changed
+
+- Webhook responses preserve original HTTP status code
+
+## [v2025.11.26]
+
+- No changes
+
+## [v2025.11.24]
+
+- No changes
+
+## [v2025.11.17]
+
+- No changes
+
+## [v2025.11.10]
+
+### Changed
+
+- `pre/post-ndc-request` plugins enabled for Relational API
+
+## [v2025.11.07]
+
+- No changes
+
+## [v2025.10.28]
+
+- No changes
+
+## [v2025.10.20]
+
+- No changes
+
+## [v2025.10.09]
+
+- No changes
+
+## [v2025.10.03]
+
+- No changes
+
+## [v2025.09.22]
+
+### Added
+
+- Added `contextWindowLimit` to `PromptQlConfigV2` to allow configuring the
+  maximum number of tokens to be used for the context window for threads.
+
+### Fixed
+
+- Headers returned from commands were not being being returned when the command
+  was the source of a remote relationship, now they are returned correctly. As
+  before, no headers are returned from the target of a remote relationship.
+
+## [v2025.09.05]
+
+### Changed
+
+- Update `ndc-models` to use `v0.1.7` when interfacing with `v0.1.x` data
+  connectors.
+
+- Allow `forward_headers` to be configured for `pre-ndc-request` plugins,
+  allowing forwarding request headers to the plugin.
+
+## [v2025.08.27]
+
+- No changes
+
+## [v2025.08.26]
+
+### Added
+
+- Version 2 of `ModelPermissions`, `CommandPermissions` and `TypePermissions`
+  that allows both role-based and rule-based permission definitions.
+
+## [v2025.08.18]
+
+### Fixed
+
+- Fixes to `_and` filters inside nested arrays.
+
+This filter means "return an item when there is a user inside 'users' with first
+name 'Bruce' and last name 'Willis'".
+
+```graphql
+where: { users: { _and: [
+  { first_name: { _eq: "Bruce" },
+  { last_name: { _eq: "Willis" }
+]}}
+```
+
+This filter means "return an item when there is a user inside 'users' with first
+name 'Bruce' and there is a user inside 'users' with last name 'Willis'".
+
+```graphql
+where: { _and: [
+  { users: { first_name: { _eq: "Bruce" } },
+  { users: { last_name: { _eq: "Willis" } }
+]}}
+```
+
+Previously both examples would be treated as the latter, which was incorrect,
+but now each is treated correctly once the OpenDD flag
+`fix_exists_in_nested_arrays` is enabled.
+
+## [v2025.08.14-1]
+
+- No changes
+
+## [v2025.08.14]
+
+### Fixed
+
+- Fixed an issue in remote joins where a command that returns headers on the
+  left hand side of the join wouldn't correctly pass arguments to the right hand
+  side.
+
+- Fix a bug where remote relationships from fields with aliases wouldn't work.
+
+### Added
+
+- Added `NDC_RESPONSE_SIZE_LIMIT` that allows limiting response sizes, set in
+  bytes. Defaults to 30MB.
+
+## [v2025.08.13]
+
+### Added
+
+- Add support for wildcard at leaf subdomain level in allowed CORS origins. Eg.
+  `https://*.example.com` will allow `https://api.example.com`,
+  `https://auth.example.com`, and so on.
+
+## [v2025.07.29]
+
+No changes since last release.
+
+## [v2025.07.28]
+
+### Synchronous Mode Pre-Response Plugins
+
+Added support for synchronous pre-response plugins that can intercept and modify
+GraphQL responses before they are sent to clients.
+
+**Key Features:**
+
+- **Response Modification**: Plugins can transform response content and pass
+  modified responses to subsequent plugins in the chain
+- **Sequential Execution**: Plugins execute in order, allowing response
+  transformations to build upon each other
+- **Flexible Response Handling**: Support for multiple HTTP status codes:
+  - `204 No Content`: Continue with original response
+  - `200 OK`: Continue with modified response (JSON body)
+  - `400 Bad Request`: Return user error to client
+  - `500 Internal Server Error`: Return internal error
+- **On-Plugin-Failure Support**: Configure plugins to fail gracefully without
+  breaking the entire request
+
+**Configuration:** Following is an example of the OpenDD metadata for the
+pre-response plugin in synchronous mode:
+
+```yaml
+kind: LifecyclePluginHook
+version: v1
+definition:
+  pre: response
+  name: test-1
+  url:
+    value: http://localhost:5001/extensions/add_ai_summary
+  config:
+    request:
+      session: {}
+      rawRequest:
+        query: {}
+        variables: {}
+    mode:
+      type: synchronous
+      onPluginFailure: continue
+```
+
+The `mode` field in the `LifecyclePreResponsePluginHook` configuration allows
+specifying the mode of the plugin hook.
+
+- `type` (`string`): The type of the mode. Can be either `synchronous` or
+  `asynchronous` (default).
+- `onPluginFailure` (`string`): The behavior of the engine when the plugin
+  returns 400 or 500. Can be one of `fail` (default) or `continue`. This field
+  is only for `synchronous` pre-response plugins.
+
+## [v2025.07.22]
+
+### Changed
+
+- Check data connector capabilities for nested scalar comparisons in `plan`
+  stage so any errors are returned as user rather than internal errors.
+
+## [v2025.07.21]
+
+### Added
+
+- Allow pre-parse plugins to modify the request before it is sent to the engine.
+  Use HTTP status code `299` to indicate that the request should be modified.
+
+## [v2025.07.14]
+
+### Fixed
+
+- Fixed arguments passed to command relationships
+
+```graphql
+query MyQuery {
+  Analytics {
+    ActorByMovieIdBounds(upper_bound: 7) {
+      name
+    }
+  }
+}
+```
+
+In this query, `ActorByMovieIdBounds` is a relationship from the `Analytics`
+model to a `Command` that takes two arguments.
+
+One argument, `lower_bound`, is provided by the relationship, but the
+`upper_bound` is provided by the user in the query. Previously we were not
+including the user's arguments in the generated plan, but now we are.
+
+## [v2025.07.10]
+
+### Changed
+
+- Added `disallow_literals_as_boolean_expression_arguments` feature flag to
+  disallow literals as arguments to boolean expression operators that expect a
+  boolean expression.
+
+### Fixed
+
+- Fixed JWT authentication errors to return correct HTTP status codes. Expired
+  tokens now return `400 Bad Request` instead of `500 Internal Server Error`.
+
+## [v2025.07.07]
+
+### Pre-NDC Request and Pre-NDC Response Plugins
+
+Add support for `pre-ndc-request` and `pre-ndc-response` plugins. These plugins
+allow HTTP webhooks to modify requests before they're sent to data connectors
+and modify responses before they're processed by the engine.
+
+##### Pre-NDC Request Plugin Behavior
+
+The `pre-ndc-request` plugin is called before a request is sent to a data
+connector.
+
+Example metadata:
+
+```yaml
+kind: LifecyclePluginHook
+version: v1
+definition:
+  pre: ndcRequest
+  name: request_modifier # Plugin name must be unique
+  connectors:
+    - postgres # List of data connectors this plugin applies to. This is scoped to the current subgraph. Connectors can only be referenced by a single plugin of each type.
+  url:
+    value: http://localhost:5001/modify-request # Webhook URL to call
+  config:
+    request:
+      headers:
+        # Map of custom headers to send to the webhook
+        hasura-m-auth:
+          value: "your-strong-m-auth-key"
+      session: {} # Include session information in the webhook request
+      ndcRequest: {} # Include the NDC request in the webhook request
+```
+
+The plugin receives a request body with the following structure:
+
+```json
+{
+  "session": {
+    /* Session information if configured */
+    "role": "user",
+    "variables": {
+      "x-hasura-user-id": "1"
+    }
+  },
+  "ndcRequest": {
+    /* The NDC request if configured */
+  },
+  "dataConnectorName": "qualified.connector.name",
+  "operationType": "query|queryExplain|mutation|mutationExplain",
+  "ndcVersion": "v0.1.x|v0.2.x"
+}
+```
+
+The plugin can respond in the following ways:
+
+1. HTTP 204 (No Content): The original request will be used without
+   modification.
+2. HTTP 200 (OK) with a JSON body containing either:
+   - `{"ndcRequest": {...}}`: A modified request that will replace the original.
+   - `{"ndcResponse": {...}}`: A response that will be used instead of calling
+     the data connector.
+3. HTTP 400 (Bad Request): The plugin encountered a user error, which will be
+   returned to the client.
+4. Any other status code: Treated as an internal error.
+
+##### Pre-NDC Response Plugin Behavior
+
+The `pre-ndc-response` plugin is called after receiving a response from a data
+connector but before processing it.
+
+Example metadata:
+
+```yaml
+kind: LifecyclePluginHook
+version: v1
+definition:
+  pre: ndcResponse
+  name: response_modifier # Plugin name must be unique
+  connectors:
+    - postgres # List of data connectors this plugin applies to. This is scoped to the current subgraph. Connectors can only be referenced by a single plugin of each type.
+  url:
+    value: http://localhost:5001/modify-response # Webhook URL to call
+  config:
+    request:
+      headers:
+        # Map of custom headers to send to the webhook
+        hasura-m-auth:
+          value: "your-strong-m-auth-key"
+      session: {} # Include session information in the webhook request
+      ndcRequest: {} # Include the original NDC request in the webhook request
+      ndcResponse: {} # Include the NDC response in the webhook request
+```
+
+The plugin receives a request body with the following structure:
+
+```json
+{
+  "session": {
+    /* Session information if configured */
+    "role": "user",
+    "variables": {
+      "x-hasura-user-id": "1"
+    }
+  },
+  "ndcRequest": {
+    /* The original NDC request if configured */
+  },
+  "ndcResponse": {
+    /* The NDC response if configured */
+  },
+  "dataConnectorName": "qualified.connector.name",
+  "operationType": "query|queryExplain|mutation|mutationExplain",
+  "ndcVersion": "v0.1.x|v0.2.x"
+}
+```
+
+The plugin can respond in the following ways:
+
+1. HTTP 204 (No Content): The original response will be used without
+   modification.
+2. HTTP 200 (OK) with a JSON body containing the modified response.
+3. HTTP 400 (Bad Request): The plugin encountered a user error, which will be
+   returned to the client.
+4. Any other status code: Treated as an internal error.
+
+#### A note on request headers
+
+Request headers are not forwarded to the `pre-ndc-response` and
+`pre-ndc-request` plugins. If you need values from these headers in the plugins,
+you should add the value in question to the session via an auth webhook.
+
+## [v2025.07.02]
+
+No changes since last release.
+
+## [v2025.06.27]
+
+No changes since last release.
+
+## [v2025.06.26]
+
+No changes since last release.
+
+## [v2025.06.16]
+
+### Added
+
+#### Support for multiple authentication modes (AuthConfig v4)
+
+AuthConfig v4 is a new version of the AuthConfig that allows for multiple
+authentication modes. The default mode is specified in the `mode` field, and
+alternative modes are specified in the `alternativeModes` field.
+
+The following is an example of the OpenDD metadata for the AuthConfig v4:
+
+```yaml
+version: v4
+definition:
+  mode:
+    noAuth:
+      role: admin
+      sessionVariables:
+        x-hasura-user-id: "1"
+  alternativeModes:
+    - identifier: webhook
+      config:
+        webhook:
+          url:
+            value: http://auth_hook:3050/validate-request
+          method: POST
+```
+
+The `X-Hasura-Auth-Mode` header can be used to specify the authentication mode
+when making requests.
+
+In the above example, if no `X-Hasura-Auth-Mode` header is specified, the
+default mode (`noAuth`) will be used. If the header is specified, the
+authentication mode specified in the header will be used if it exists in the
+`alternativeModes` field. If the header is specified but the authentication mode
+does not exist in the `alternativeModes` field, the default mode will be used.
+
+**Note**: The AuthConfig v4 is backwards compatible with the AuthConfig v3.
+
+## [v2025.06.04]
+
+### Fixed
+
+- Fixed a bug when missing variables for enum type arguments to functions and
+  procedures did not obey the `validate_non_nullable_graphql_variables` feature
+  flags.
+
+## [v2025.05.29]
+
+### Added
+
+- When the `send_missing_arguments_to_ndc_as_nulls` flag is enabled, the engine
+  will now send null values for missing arguments to the data connector rather
+  than omitting them. Note that may be a breaking change for some data
+  connectors, particularly `ndc-postgres` before `v2.1.0`.
+
+## [v2025.05.14]
+
+### Fixed
+
+- Properly support missing or null `predicate` in relationship filters, to align
+  with
+  [the docs](https://hasura.io/docs/3.0/reference/metadata-reference/permissions/#modelpermissions-relationshippredicate).
+
+## [v2025.05.13]
+
 ### Fixed
 
 - Fixed a bug where scalar type lookups in remote relationships would fail due
   to looking up in the source rather than target data connector
-
-### Changed
-
-### Added
 
 ## [v2025.04.30]
 
@@ -1602,7 +2191,54 @@ Initial release.
 
 <!-- end -->
 
-[Unreleased]: https://github.com/hasura/v3-engine/compare/v2025.04.30...HEAD
+[Unreleased]: https://github.com/hasura/v3-engine/compare/v2026.04.23...HEAD
+[v2026.04.23]: https://github.com/hasura/v3-engine/releases/tag/v2026.04.23
+[v2026.03.25]: https://github.com/hasura/v3-engine/releases/tag/v2026.03.25
+[v2026.03.10]: https://github.com/hasura/v3-engine/releases/tag/v2026.03.10
+[v2026.03.09]: https://github.com/hasura/v3-engine/releases/tag/v2026.03.09
+[v2026.03.03]: https://github.com/hasura/v3-engine/releases/tag/v2026.03.03
+[v2026.02.27]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.27
+[v2026.02.26]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.26
+[v2026.02.25]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.25
+[v2026.02.18]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.18
+[v2026.02.17]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.17
+[v2026.02.11]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.11
+[v2026.02.05]: https://github.com/hasura/v3-engine/releases/tag/v2026.02.05
+[v2026.01.26]: https://github.com/hasura/v3-engine/releases/tag/v2026.01.26
+[v2026.01.07]: https://github.com/hasura/v3-engine/releases/tag/v2026.01.07
+[v2025.12.22]: https://github.com/hasura/v3-engine/releases/tag/v2025.12.22
+[v2025.11.26]: https://github.com/hasura/v3-engine/releases/tag/v2025.11.26
+[v2025.11.24]: https://github.com/hasura/v3-engine/releases/tag/v2025.11.24
+[v2025.11.17]: https://github.com/hasura/v3-engine/releases/tag/v2025.11.17
+[v2025.11.10]: https://github.com/hasura/v3-engine/releases/tag/v2025.11.10
+[v2025.11.07]: https://github.com/hasura/v3-engine/releases/tag/v2025.11.07
+[v2025.10.28]: https://github.com/hasura/v3-engine/releases/tag/v2025.10.28
+[v2025.10.20]: https://github.com/hasura/v3-engine/releases/tag/v2025.10.20
+[v2025.10.09]: https://github.com/hasura/v3-engine/releases/tag/v2025.10.09
+[v2025.10.03]: https://github.com/hasura/v3-engine/releases/tag/v2025.10.03
+[v2025.09.22]: https://github.com/hasura/v3-engine/releases/tag/v2025.09.22
+[v2025.09.05]: https://github.com/hasura/v3-engine/releases/tag/v2025.09.05
+[v2025.08.27]: https://github.com/hasura/v3-engine/releases/tag/v2025.08.27
+[v2025.08.26]: https://github.com/hasura/v3-engine/releases/tag/v2025.08.26
+[v2025.08.18]: https://github.com/hasura/v3-engine/releases/tag/v2025.08.18
+[v2025.08.14-1]: https://github.com/hasura/v3-engine/releases/tag/v2025.08.14-1
+[v2025.08.14]: https://github.com/hasura/v3-engine/releases/tag/v2025.08.14
+[v2025.08.13]: https://github.com/hasura/v3-engine/releases/tag/v2025.08.13
+[v2025.07.29]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.29
+[v2025.07.28]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.28
+[v2025.07.22]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.22
+[v2025.07.21]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.21
+[v2025.07.14]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.14
+[v2025.07.10]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.10
+[v2025.07.07]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.07
+[v2025.07.02]: https://github.com/hasura/v3-engine/releases/tag/v2025.07.02
+[v2025.06.27]: https://github.com/hasura/v3-engine/releases/tag/v2025.06.27
+[v2025.06.26]: https://github.com/hasura/v3-engine/releases/tag/v2025.06.26
+[v2025.06.16]: https://github.com/hasura/v3-engine/releases/tag/v2025.06.16
+[v2025.06.04]: https://github.com/hasura/v3-engine/releases/tag/v2025.06.04
+[v2025.05.29]: https://github.com/hasura/v3-engine/releases/tag/v2025.05.29
+[v2025.05.14]: https://github.com/hasura/v3-engine/releases/tag/v2025.05.14
+[v2025.05.13]: https://github.com/hasura/v3-engine/releases/tag/v2025.05.13
 [v2025.04.30]: https://github.com/hasura/v3-engine/releases/tag/v2025.04.30
 [v2025.04.28]: https://github.com/hasura/v3-engine/releases/tag/v2025.04.28
 [v2025.04.23]: https://github.com/hasura/v3-engine/releases/tag/v2025.04.23
@@ -1624,7 +2260,6 @@ Initial release.
 [v2025.01.09]: https://github.com/hasura/v3-engine/releases/tag/v2025.01.09
 [v2025.01.06]: https://github.com/hasura/v3-engine/releases/tag/v2025.01.06
 [v2024.12.17]: https://github.com/hasura/v3-engine/releases/tag/v2024.12.17
-[v2024.12.03]: https://github.com/hasura/v3-engine/releases/tag/v2024.12.03
 [v2024.11.25]: https://github.com/hasura/v3-engine/releases/tag/v2024.11.25
 [v2024.11.18]: https://github.com/hasura/v3-engine/releases/tag/v2024.11.18
 [v2024.11.13]: https://github.com/hasura/v3-engine/releases/tag/v2024.11.13

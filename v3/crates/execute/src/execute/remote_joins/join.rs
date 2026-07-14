@@ -6,7 +6,7 @@ use nonempty::NonEmpty;
 use serde_json as json;
 use std::collections::HashMap;
 
-use plan_types::FUNCTION_IR_VALUE_COLUMN_NAME;
+use plan_types::{FUNCTION_IR_VALUE_COLUMN_NAME, ProcessResponseAs};
 
 use super::collect::LocationInfo;
 use super::{collect, error};
@@ -22,6 +22,7 @@ pub(crate) fn join_responses(
     join_node: &RemoteJoin,
     remote_alias: &str,
     lhs_response: &mut [ndc_models::RowSet],
+    lhs_response_type: &ProcessResponseAs,
     rhs_response: &HashMap<RemoteJoinVariableSet, ndc_models::RowSet>,
 ) -> Result<(), error::FieldError> {
     for row_set in lhs_response.iter_mut() {
@@ -35,6 +36,7 @@ pub(crate) fn join_responses(
                     // different
                     Some(row_field_value) => join_command_response(
                         location_path,
+                        lhs_response_type,
                         join_node,
                         remote_alias,
                         row_field_value,
@@ -49,7 +51,7 @@ pub(crate) fn join_responses(
                             rhs_response,
                         )?;
                     }
-                };
+                }
             }
         }
     }
@@ -65,12 +67,39 @@ pub(crate) fn join_responses(
 /// RHS response appropriately.
 fn join_command_response(
     location_path: &[LocationInfo],
+    lhs_response_type: &ProcessResponseAs,
     join_node: &RemoteJoin,
     remote_alias: &str,
     row_field_value: &mut ndc_models::RowFieldValue,
     rhs_response: &HashMap<RemoteJoinVariableSet, ndc_models::RowSet>,
 ) -> Result<(), error::FieldError> {
-    match &mut row_field_value.0 {
+    // we may need to unwrap the response to remove any headers
+    let target_field = match lhs_response_type {
+        plan_types::ProcessResponseAs::CommandResponse {
+            response_config: Some(commands_response_config),
+            ..
+        } => {
+            let response_field = commands_response_config.result_field.as_str();
+            let headers_field = commands_response_config.headers_field.as_str();
+
+            // if the response and headers fields are present, we need to unwrap
+            if row_field_value.0.get(response_field).is_some()
+                && row_field_value.0.get(headers_field).is_some()
+            {
+                row_field_value
+                .0
+                .get_mut(response_field)
+                .ok_or_else(|| error::NDCUnexpectedError::BadNDCResponse {
+                    summary: format!("While processing remote join response, expected a response field '{response_field}' in the response, but it was not found"),
+                })?
+            } else {
+                &mut row_field_value.0
+            }
+        }
+        _ => &mut row_field_value.0,
+    };
+
+    match target_field {
         json::Value::Array(arr) => {
             for command_row in arr.iter_mut() {
                 let new_val = command_row.clone();
@@ -89,8 +118,9 @@ fn join_command_response(
             }
         }
         json::Value::Object(obj) => {
-            let mut command_row = obj
-                .into_iter()
+            // Build a mutable row map from the current object without moving out of it
+            let mut command_row: IndexMap<ndc_models::FieldName, ndc_models::RowFieldValue> = obj
+                .iter()
                 .map(|(k, v)| {
                     (
                         ndc_models::FieldName::from(k.as_str()),
@@ -98,6 +128,8 @@ fn join_command_response(
                     )
                 })
                 .collect();
+
+            // Insert the RHS value into this row
             insert_value_into_row(
                 location_path,
                 join_node,
@@ -105,7 +137,21 @@ fn join_command_response(
                 ndc_models::FieldName::from(remote_alias),
                 rhs_response,
             )?;
-            *row_field_value = ndc_models::RowFieldValue(json::to_value(command_row)?);
+
+            let command_row_json = json::to_value(command_row)?;
+
+            // Write the updated row back into the target field (preserving any outer wrapper like headers)
+            if let json::Value::Object(new_obj) = command_row_json {
+                *obj = new_obj;
+            } else {
+                return Err(error::FieldError::from(
+                    error::FieldInternalError::InternalGeneric {
+                        description: format!(
+                            "unexpected command response: {command_row_json}; Object"
+                        ),
+                    },
+                ));
+            }
         }
         command_json_val => {
             return Err(error::FieldError::from(
@@ -198,43 +244,41 @@ fn visit_location_path_and_insert_value(
             row_set.rows = Some(rows);
             *row_field_val = ndc_models::RowFieldValue(json::to_value(row_set)?);
         }
-        LocationKind::NestedData => {
-            match row_field_val.0 {
-                serde_json::Value::Array(_) => {
-                    if let Ok(mut rows) = serde_json::from_value::<
-                        Vec<IndexMap<ndc_models::FieldName, ndc_models::RowFieldValue>>,
-                    >(row_field_val.0.clone())
-                    {
-                        for inner_row in &mut rows {
-                            insert_value_into_row(
-                                path_tail,
-                                join_node,
-                                inner_row,
-                                remote_alias.clone(),
-                                rhs_response,
-                            )?;
-                        }
-                        *row_field_val = ndc_models::RowFieldValue(json::to_value(rows)?);
-                    }
-                }
-                serde_json::Value::Object(_) => {
-                    if let Ok(mut inner_row) = serde_json::from_value::<
-                        IndexMap<ndc_models::FieldName, ndc_models::RowFieldValue>,
-                    >(row_field_val.0.clone())
-                    {
+        LocationKind::NestedData => match row_field_val.0 {
+            serde_json::Value::Array(_) => {
+                if let Ok(mut rows) = serde_json::from_value::<
+                    Vec<IndexMap<ndc_models::FieldName, ndc_models::RowFieldValue>>,
+                >(row_field_val.0.clone())
+                {
+                    for inner_row in &mut rows {
                         insert_value_into_row(
                             path_tail,
                             join_node,
-                            &mut inner_row,
-                            remote_alias,
+                            inner_row,
+                            remote_alias.clone(),
                             rhs_response,
                         )?;
-                        *row_field_val = ndc_models::RowFieldValue(json::to_value(inner_row)?);
                     }
+                    *row_field_val = ndc_models::RowFieldValue(json::to_value(rows)?);
                 }
-                _ => (),
-            };
-        }
+            }
+            serde_json::Value::Object(_) => {
+                if let Ok(mut inner_row) = serde_json::from_value::<
+                    IndexMap<ndc_models::FieldName, ndc_models::RowFieldValue>,
+                >(row_field_val.0.clone())
+                {
+                    insert_value_into_row(
+                        path_tail,
+                        join_node,
+                        &mut inner_row,
+                        remote_alias,
+                        rhs_response,
+                    )?;
+                    *row_field_val = ndc_models::RowFieldValue(json::to_value(inner_row)?);
+                }
+            }
+            _ => (),
+        },
     }
     Ok(())
 }

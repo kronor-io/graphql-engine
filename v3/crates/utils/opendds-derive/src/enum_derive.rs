@@ -24,13 +24,14 @@ impl EnumTagType {
                 content: "definition".to_string(),
             },
             Tagged::External => EnumTagType::External,
+            Tagged::Internal { tag } => EnumTagType::Internal { tag: tag.clone() },
         }
     }
 
     fn generate_tag(&self) -> Option<String> {
         match self {
             EnumTagType::Internal { tag } | EnumTagType::Adjacent { tag, content: _ } => {
-                Some(tag.to_string())
+                Some(tag.clone())
             }
             EnumTagType::External => None,
         }
@@ -63,7 +64,7 @@ pub fn impl_opendd_enum(impl_style: EnumImplStyle, variants: &[EnumVariant<'_>])
                         serde::de::Unexpected::Other("not an object"),
                         &"object",
                     ),
-                    path: jsonpath::JSONPath::new(),
+                    path: path.clone(),
                 })
             }
         };
@@ -90,7 +91,7 @@ fn impl_read_tag_value_str(
             let __tag_value = __object_map.remove(#tag)
             .ok_or_else(|| open_dds::traits::OpenDdDeserializeError {
                 error: serde::de::Error::missing_field(#tag),
-                path: jsonpath::JSONPath::new(),
+                path: path.clone(),
             })?;
             let __tag_value_str = __tag_value
                 .as_str()
@@ -99,7 +100,7 @@ fn impl_read_tag_value_str(
                         serde::de::Unexpected::Other("not a string"),
                         &"string",
                     ),
-                    path: jsonpath::JSONPath::new_key(#tag),
+                    path: path.clone().append_key(#tag.to_string()),
                 })?;
         }
     }
@@ -126,7 +127,7 @@ fn impl_read_tag_value_str(
                         serde::de::Unexpected::Other("found empty object"),
                         &#expected_variants_error,
                     ),
-                    path: jsonpath::JSONPath::new(),
+                    path: path.clone(),
                 }
             )?;
             if let Some(_) = __object_map_iter.next() {
@@ -135,7 +136,7 @@ fn impl_read_tag_value_str(
                         serde::de::Unexpected::Other("found multiple object properties"),
                         &#expected_variants_error,
                     ),
-                    path: jsonpath::JSONPath::new(),
+                    path: path.clone(),
                 });
             }
             let __tag_value_str = __tag_value_string.as_str();
@@ -166,7 +167,7 @@ fn impl_deserialize_as_untagged<'a>(variants: &'a [EnumVariant<'a>]) -> proc_mac
                     __tag_value_str,
                 __known_variants.join(", ")
             )),
-            path: jsonpath::JSONPath::new_key("kind"),
+            path: path.clone().append_key("kind".to_string()),
         })
     }
 }
@@ -199,7 +200,7 @@ fn impl_deserialize_as_tagged(
             if var.hidden {
                 None
             } else {
-                Some(var.renamed_variant.to_string())
+                Some(var.renamed_variant.clone())
             }
         })
         .collect::<Vec<String>>();
@@ -222,7 +223,7 @@ fn generate_enum_variants(
     let deserialize_from = gen_deserialize_from(tag_type);
     let variants: Vec<proc_macro2::TokenStream> = variants.iter().map(|variant| {
         let variant_name = &variant.name;
-        let variant_name_string = variant.renamed_variant.to_string();
+        let variant_name_string = variant.renamed_variant.clone();
         let variant_name_str = variant_name_string.as_str();
         let parsed_variant = match tag_type {
             EnumTagType::External => quote! {
@@ -259,7 +260,7 @@ fn generate_enum_variants(
 
 fn gen_deserialize_from(tag_type: &EnumTagType) -> proc_macro2::TokenStream {
     match tag_type {
-        EnumTagType::External { .. } => quote! {
+        EnumTagType::External => quote! {
             __tag_value
         },
         EnumTagType::Internal { .. } => quote! {
@@ -268,7 +269,7 @@ fn gen_deserialize_from(tag_type: &EnumTagType) -> proc_macro2::TokenStream {
         EnumTagType::Adjacent { tag: _, content } => quote! {
             __object_map.remove(#content).ok_or_else(|| open_dds::traits::OpenDdDeserializeError {
                 error: serde::de::Error::missing_field(#content),
-                path: jsonpath::JSONPath::new(),
+                path: path.clone(),
             })?
         },
     }
@@ -281,9 +282,9 @@ fn unexpected_variant_error(
     let known_variants = known_variants.join(", ");
 
     let path_exp = if let Some(tag) = tag {
-        quote! { jsonpath::JSONPath::new_key(#tag) }
+        quote! { path.clone().append_key(#tag.to_string()) }
     } else {
-        quote! { jsonpath::JSONPath::new() }
+        quote! { path.clone() }
     };
 
     quote! {
@@ -325,7 +326,7 @@ fn impl_json_schema_tagged(
                         return None;
                     }
 
-                    unique_names.insert(variant.renamed_variant.to_string());
+                    unique_names.insert(variant.renamed_variant.clone());
                     count += 1;
 
                     let name = &variant.renamed_variant;
@@ -398,7 +399,7 @@ fn impl_json_schema_tagged(
                         return None;
                     }
 
-                    unique_names.insert(variant.renamed_variant.to_string());
+                    unique_names.insert(variant.renamed_variant.clone());
                     count += 1;
 
                     let name = &variant.renamed_variant;
@@ -449,7 +450,7 @@ fn impl_json_schema_tagged(
                         return None;
                     }
 
-                    unique_names.insert(variant.renamed_variant.to_string());
+                    unique_names.insert(variant.renamed_variant.clone());
                     count += 1;
 
                     let name = &variant.renamed_variant;

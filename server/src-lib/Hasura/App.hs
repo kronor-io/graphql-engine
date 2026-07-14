@@ -78,6 +78,7 @@ import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.Environment qualified as Env
 import Data.FileEmbed (makeRelativeToProject)
 import Data.HashMap.Strict qualified as HashMap
+import Data.Set qualified as Set
 import Data.Set.NonEmpty qualified as NE
 import Data.Text qualified as T
 import Data.Time.Clock (UTCTime)
@@ -106,6 +107,7 @@ import Hasura.GraphQL.Execute.Action.Subscription
 import Hasura.GraphQL.Execute.Subscription.Poll qualified as ES
 import Hasura.GraphQL.Execute.Subscription.State qualified as ES
 import Hasura.GraphQL.Logging (MonadExecutionLog (..), MonadQueryLog (..))
+import Hasura.GraphQL.Logging.QueryLog (maskQueryLog)
 import Hasura.GraphQL.Transport.HTTP
   ( CacheResult (..),
     MonadExecuteQuery (..),
@@ -126,6 +128,7 @@ import Hasura.RQL.DDL.Schema.Cache.Common
 import Hasura.RQL.DDL.Schema.Cache.Config
 import Hasura.RQL.DDL.Schema.Catalog
 import Hasura.RQL.DDL.SchemaRegistry qualified as SchemaRegistry
+import Hasura.RQL.IR.Root (irEncJSON)
 import Hasura.RQL.Types.Allowlist
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
@@ -493,7 +496,7 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvMetadataVersionRef = metaVersionRef,
           appEnvInstanceId = instanceId,
           appEnvEnableMaintenanceMode = soEnableMaintenanceMode,
-          appEnvLoggingSettings = LoggingSettings soEnabledLogTypes soEnableMetadataQueryLogging soHttpLogQueryOnlyOnError,
+          appEnvLoggingSettings = LoggingSettings soEnabledLogTypes soEnableMetadataQueryLogging soHttpLogQueryOnlyOnError soLogMaskedVariables,
           appEnvEventingMode = soEventingMode,
           appEnvEnableReadOnlyMode = soReadOnlyMode,
           appEnvServerMetrics = serverMetrics,
@@ -741,7 +744,7 @@ instance HttpLog AppM where
 
   buildExtraHttpLogMetadata _ _ = ()
 
-  logHttpError logger loggingSettings userInfoM reqId waiReq req qErr qTime cType headers _ _ =
+  logHttpError logger loggingSettings userInfoM reqId waiReq req qErr qTime cType headers _ _ _ =
     unLoggerTracing logger
       $ mkHttpLog
       $ mkHttpErrorLogContext userInfoM loggingSettings reqId waiReq req qErr qTime cType headers
@@ -813,7 +816,9 @@ instance MonadGQLApiHandler AppM where
       EqrAPQReq _ -> throw400 NotSupported "PersistedQueryNotSupported"
 
 instance MonadQueryLog AppM where
-  logQueryLog logger = unLoggerTracing logger
+  logQueryLog logger ql = do
+    maskedKeys <- asks (_lsLogMaskedVariables . appEnvLoggingSettings)
+    unLoggerTracing logger (maskQueryLog maskedKeys ql)
 
 instance MonadExecutionLog AppM where
   logExecutionLog logger = unLoggerTracing logger
@@ -1338,7 +1343,7 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
               waitForProcessingAction
                 logger
                 "event_triggers"
-                (length <$> readTVarIO (leEvents lockedEventsCtx))
+                (sum . fmap Set.size <$> readTVarIO (leEvents lockedEventsCtx))
                 (EventTriggerShutdownAction (shutdownEventTriggerEvents allSources logger lockedEventsCtx))
                 (unrefine appEnvGracefulShutdownTimeout)
 

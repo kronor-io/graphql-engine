@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
+use graphql_types as ast;
 use indexmap::IndexMap;
-use lang_graphql::ast::common as ast;
 use open_dds::data_connector::DataConnectorName;
 use open_dds::identifier::SubgraphName;
 use open_dds::models::EnableAllOrSpecific;
@@ -123,7 +123,7 @@ fn resolve_order_by_expression(
                 issues.push(OrderByExpressionIssue::DuplicateOrderByExpression {
                     order_by_expression: existing_order_by_expression.identifier,
                 });
-            };
+            }
         }
         OrderByExpressionOperand::Object(object_operand) => {
             let (resolved_order_by_expression, new_issues) = resolve_object_order_by_expression(
@@ -156,7 +156,7 @@ fn resolve_order_by_expression(
                 issues.push(OrderByExpressionIssue::DuplicateOrderByExpression {
                     order_by_expression: existing_order_by_expression.identifier,
                 });
-            };
+            }
         }
     }
     Ok(())
@@ -476,7 +476,7 @@ fn resolve_orderable_relationship(
                     order_by_expression: order_by_expression_identifier.clone(),
                     relationship_name: relationship_name.clone(),
                 });
-            };
+            }
 
             let resolved_orderable_relationship = match relationship_order_by_expression {
                 None => Ok(OrderableRelationship {

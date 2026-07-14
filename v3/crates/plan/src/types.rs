@@ -1,6 +1,6 @@
 use crate::error::InternalError;
 use crate::query::{ArgumentPresetExecutionError, RelationshipFieldMappingError};
-use hasura_authn_core::Role;
+use authorization_rules::ConditionCache;
 use metadata_resolve::Qualified;
 use open_dds::data_connector::DataConnectorOperatorName;
 use open_dds::{
@@ -11,6 +11,7 @@ use open_dds::{
     relationships::RelationshipName,
     types::{CustomTypeName, FieldName},
 };
+use plan_types::UniqueNumber;
 use tracing_util::{ErrorVisibility, TraceableError};
 
 #[derive(Debug, thiserror::Error)]
@@ -48,43 +49,36 @@ impl TraceableError for PlanError {
 }
 
 #[derive(Debug, thiserror::Error)]
+// errors thrown during permissions evaluation, but not necessary errors due to permisssions
 pub enum PermissionError {
     #[error("command {command_name:} could not be found")]
     CommandNotFound {
         command_name: Qualified<CommandName>,
     },
-    #[error("role {role:} does not have permission to select from command {command_name:}")]
+    #[error("no permission to select from command {command_name:}")]
     CommandNotAccessible {
         command_name: Qualified<CommandName>,
-        role: Role,
     },
     #[error("model {model_name:} could not be found")]
     ModelNotFound { model_name: Qualified<ModelName> },
     #[error("model {model_name:} has no source")]
     ModelHasNoSource { model_name: Qualified<ModelName> },
 
-    #[error("role {role:} does not have permission to select from model {model_name:}")]
-    ModelNotAccessible {
-        model_name: Qualified<ModelName>,
-        role: Role,
-    },
+    #[error("no permission to select from model {model_name:}")]
+    ModelNotAccessible { model_name: Qualified<ModelName> },
 
     #[error("object type {object_type_name:} could not be found")]
     ObjectTypeNotFound {
         object_type_name: Qualified<CustomTypeName>,
     },
-    #[error("role {role:} does not have permission to select from type {object_type_name:}")]
+    #[error("no permission to select from type {object_type_name:}")]
     ObjectTypeNotAccessible {
         object_type_name: Qualified<CustomTypeName>,
-        role: Role,
     },
-    #[error(
-        "role {role:} does not have permission to select from field {field_name:} in type {object_type_name:}"
-    )]
+    #[error("no permission to select from field {field_name:} in type {object_type_name:}")]
     ObjectFieldNotFound {
         object_type_name: Qualified<CustomTypeName>,
         field_name: FieldName,
-        role: Role,
     },
     #[error("Object boolean expression type {boolean_expression_type_name} could not be found")]
     ObjectBooleanExpressionTypeNotFound {
@@ -116,6 +110,18 @@ pub enum PermissionError {
         relationship_name: RelationshipName,
         boolean_expression_type_name: Qualified<CustomTypeName>,
     },
+    #[error("Error evaluating condition: {0}")]
+    ConditionEvaluationError(#[from] authorization_rules::ConditionError),
+
+    #[error("Nested scalar filtering is not supported by data connector {data_connector_name}")]
+    NestedScalarFilteringNotSupported {
+        data_connector_name: Qualified<DataConnectorName>,
+    },
+
+    #[error("View {view_name} could not be found")]
+    ViewNotFound {
+        view_name: Qualified<open_dds::views::ViewName>,
+    },
 
     #[error("{0}")]
     Other(String),
@@ -124,20 +130,27 @@ pub enum PermissionError {
 impl TraceableError for PermissionError {
     fn visibility(&self) -> ErrorVisibility {
         match self {
-            Self::ObjectTypeNotFound { .. }
-            | Self::ObjectTypeNotAccessible { .. }
+            // a missing session variable is a user/permission error, not an internal error
+            Self::ConditionEvaluationError(
+                authorization_rules::ConditionError::SessionVariableNotFound { .. },
+            )
             | Self::ObjectFieldNotFound { .. }
-            | Self::CommandNotFound { .. }
+            | Self::ObjectTypeNotAccessible { .. }
             | Self::CommandNotAccessible { .. }
+            | Self::ModelNotAccessible { .. }
+            | Self::ViewNotFound { .. }
+            | Self::Other(_) => ErrorVisibility::User,
+            Self::ObjectTypeNotFound { .. }
+            | Self::CommandNotFound { .. }
             | Self::ModelNotFound { .. }
             | Self::ModelHasNoSource { .. }
-            | Self::ModelNotAccessible { .. }
             | Self::RelationshipNotFound { .. }
             | Self::InternalMissingRelationshipCapabilities { .. }
             | Self::FieldNotFoundInBooleanExpressionType { .. }
             | Self::RelationshipNotFoundInBooleanExpressionType { .. }
-            | Self::ObjectBooleanExpressionTypeNotFound { .. } => ErrorVisibility::Internal,
-            Self::Other(_) => ErrorVisibility::User,
+            | Self::ObjectBooleanExpressionTypeNotFound { .. }
+            | Self::NestedScalarFilteringNotSupported { .. }
+            | Self::ConditionEvaluationError(_) => ErrorVisibility::Internal,
         }
     }
 }
@@ -267,12 +280,41 @@ pub enum BooleanExpressionError {
         boolean_expression_type_name: metadata_resolve::BooleanExpressionTypeIdentifier,
         data_connector_name: Qualified<DataConnectorName>,
     },
+    #[error(
+        "Built-in operators require a boolean expression type. Could not find one for object type {object_type_name}"
+    )]
+    BuiltInOperatorsRequireABooleanExpressionType {
+        object_type_name: Qualified<CustomTypeName>,
+    },
 }
 
 impl TraceableError for BooleanExpressionError {
     fn visibility(&self) -> ErrorVisibility {
         match self {
-            Self::ComparisonOperatorNotFound { .. } => ErrorVisibility::User,
+            Self::ComparisonOperatorNotFound { .. }
+            | Self::BuiltInOperatorsRequireABooleanExpressionType { .. } => ErrorVisibility::User,
         }
+    }
+}
+
+// Any state that needs to be threaded through the plan
+// Nothing here should last more than a single request
+pub struct PlanState {
+    pub unique_number: UniqueNumber,
+    pub condition_cache: ConditionCache,
+}
+
+impl PlanState {
+    pub fn new() -> Self {
+        Self {
+            unique_number: UniqueNumber::new(),
+            condition_cache: ConditionCache::new(),
+        }
+    }
+}
+
+impl Default for PlanState {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -11,9 +11,10 @@ use hasura_authn_core::Session;
 use indexmap::IndexMap;
 use lang_graphql as gql;
 pub use metadata_resolve::Metadata;
+use plan::PlanState;
 use plan_types::{
     CommandReturnKind, NDCMutationExecution, NDCQueryExecution, NDCSubscriptionExecution,
-    ProcessResponseAs, QueryExecutionPlan, QueryExecutionTree, UniqueNumber,
+    ProcessResponseAs, QueryExecutionPlan, QueryExecutionTree,
 };
 pub use types::{
     ApolloFederationSelect, MutationPlan, MutationSelect, NodeQueryPlan, QueryPlan, RequestPlan,
@@ -28,7 +29,7 @@ pub fn generate_request_plan<'n, 's, 'ir>(
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
 ) -> Result<RequestPlan<'n, 's, 'ir>, error::Error> {
-    let mut unique_number = UniqueNumber::new();
+    let mut plan_state = PlanState::new();
 
     match ir {
         IR::Query(ir) => {
@@ -36,13 +37,7 @@ pub fn generate_request_plan<'n, 's, 'ir>(
             for (alias, field) in ir {
                 query_plan.insert(
                     alias.clone(),
-                    plan_query(
-                        field,
-                        metadata,
-                        session,
-                        request_headers,
-                        &mut unique_number,
-                    )?,
+                    plan_query(field, metadata, session, request_headers, &mut plan_state)?,
                 );
             }
             Ok(RequestPlan::QueryPlan(query_plan))
@@ -66,7 +61,7 @@ pub fn generate_request_plan<'n, 's, 'ir>(
                             metadata,
                             session,
                             request_headers,
-                            &mut unique_number,
+                            &mut plan_state,
                         )?;
                         mutation_plan
                             .nodes
@@ -74,13 +69,19 @@ pub fn generate_request_plan<'n, 's, 'ir>(
                             .or_default()
                             .insert(alias.clone(), plan);
                     }
-                };
+                }
             }
             Ok(RequestPlan::MutationPlan(mutation_plan))
         }
         IR::Subscription(alias, ir) => Ok(RequestPlan::SubscriptionPlan(
             alias.clone(),
-            plan_subscription(ir, metadata, session, request_headers, &mut unique_number)?,
+            Box::new(plan_subscription(
+                ir,
+                metadata,
+                session,
+                request_headers,
+                &mut plan_state,
+            )?),
         )),
     }
 }
@@ -92,10 +93,10 @@ fn plan_mutation<'n, 's>(
     metadata: &'s Metadata,
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<MutationSelect<'n, 's>, error::Error> {
     let execution_tree =
-        commands::plan_mutation_execution(ir, metadata, session, request_headers, unique_number)?;
+        commands::plan_mutation_execution(ir, metadata, session, request_headers, plan_state)?;
 
     Ok(MutationSelect {
         selection_set,
@@ -123,7 +124,7 @@ fn plan_subscription<'s, 'ir>(
     metadata: &'s Metadata,
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<SubscriptionSelect<'s, 'ir>, error::Error> {
     match root_field {
         SubscriptionRootField::ModelSelectOne {
@@ -137,7 +138,7 @@ fn plan_subscription<'s, 'ir>(
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             let execution_tree = match single_node_execution_plan {
                 plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -148,7 +149,7 @@ fn plan_subscription<'s, 'ir>(
                 }
             }?;
 
-            let query_execution_plan = reject_remote_joins(execution_tree)?;
+            let query_execution_plan = reject_remote_joins(*execution_tree)?;
             Ok(SubscriptionSelect {
                 selection_set,
                 subscription_execution: NDCSubscriptionExecution {
@@ -173,7 +174,7 @@ fn plan_subscription<'s, 'ir>(
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             let execution_tree = match single_node_execution_plan {
                 plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -184,7 +185,7 @@ fn plan_subscription<'s, 'ir>(
                 }
             }?;
 
-            let query_execution_plan = reject_remote_joins(execution_tree)?;
+            let query_execution_plan = reject_remote_joins(*execution_tree)?;
             Ok(SubscriptionSelect {
                 selection_set,
                 subscription_execution: NDCSubscriptionExecution {
@@ -210,7 +211,7 @@ fn plan_subscription<'s, 'ir>(
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             let execution_tree = match single_node_execution_plan {
                 plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -220,7 +221,7 @@ fn plan_subscription<'s, 'ir>(
                     Err(error::Error::PlanExpectedQueryGotMutation)
                 }
             }?;
-            let query_execution_plan = reject_remote_joins(execution_tree)?;
+            let query_execution_plan = reject_remote_joins(*execution_tree)?;
             Ok(SubscriptionSelect {
                 selection_set,
                 subscription_execution: NDCSubscriptionExecution {
@@ -248,7 +249,7 @@ fn plan_query<'n, 's, 'ir>(
     metadata: &'s Metadata,
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<NodeQueryPlan<'n, 's, 'ir>, error::Error> {
     let query_plan = match ir {
         QueryRootField::TypeName { type_name } => NodeQueryPlan::TypeName {
@@ -281,7 +282,7 @@ fn plan_query<'n, 's, 'ir>(
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             let execution_tree = match single_node_execution_plan {
                 plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -295,7 +296,7 @@ fn plan_query<'n, 's, 'ir>(
             NodeQueryPlan::NDCQueryExecution {
                 selection_set,
                 query_execution: NDCQueryExecution {
-                    execution_tree,
+                    execution_tree: *execution_tree,
                     execution_span_attribute: "execute_model_select_one",
                     field_span_attribute: ir.field_name.to_string(),
                     process_response_as: ProcessResponseAs::Object {
@@ -312,7 +313,7 @@ fn plan_query<'n, 's, 'ir>(
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             let execution_tree = match single_node_execution_plan {
                 plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -326,7 +327,7 @@ fn plan_query<'n, 's, 'ir>(
             NodeQueryPlan::NDCQueryExecution {
                 selection_set,
                 query_execution: NDCQueryExecution {
-                    execution_tree,
+                    execution_tree: *execution_tree,
                     execution_span_attribute: "execute_model_select_many",
                     field_span_attribute: ir.field_name.to_string(),
                     process_response_as: ProcessResponseAs::Array {
@@ -342,7 +343,7 @@ fn plan_query<'n, 's, 'ir>(
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             let execution_tree = match single_node_execution_plan {
                 plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -354,7 +355,7 @@ fn plan_query<'n, 's, 'ir>(
             }?;
             NodeQueryPlan::NDCQueryExecution {
                 query_execution: NDCQueryExecution {
-                    execution_tree,
+                    execution_tree: *execution_tree,
                     execution_span_attribute: "execute_model_select_aggregate",
                     field_span_attribute: ir.field_name.to_string(),
                     process_response_as: ProcessResponseAs::Aggregates,
@@ -370,7 +371,7 @@ fn plan_query<'n, 's, 'ir>(
                     metadata,
                     session,
                     request_headers,
-                    unique_number,
+                    plan_state,
                 )?;
                 let execution_tree = match single_node_execution_plan {
                     plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -383,7 +384,7 @@ fn plan_query<'n, 's, 'ir>(
 
                 NodeQueryPlan::RelayNodeSelect(Some((
                     NDCQueryExecution {
-                        execution_tree,
+                        execution_tree: *execution_tree,
                         execution_span_attribute: "execute_node",
                         field_span_attribute: "node".into(),
                         process_response_as: ProcessResponseAs::Object { is_nullable: true }, // node(id: ID!): Node; the node field is nullable,
@@ -394,13 +395,8 @@ fn plan_query<'n, 's, 'ir>(
             None => NodeQueryPlan::RelayNodeSelect(None),
         },
         QueryRootField::FunctionBasedCommand { ir, selection_set } => {
-            let execution_tree = commands::plan_query_execution(
-                ir,
-                metadata,
-                session,
-                request_headers,
-                unique_number,
-            )?;
+            let execution_tree =
+                commands::plan_query_execution(ir, metadata, session, request_headers, plan_state)?;
 
             NodeQueryPlan::NDCQueryExecution {
                 selection_set,
@@ -430,7 +426,7 @@ fn plan_query<'n, 's, 'ir>(
                     metadata,
                     session,
                     request_headers,
-                    unique_number,
+                    plan_state,
                 )?;
                 let execution_tree = match single_node_execution_plan {
                     plan::SingleNodeExecutionPlan::Query(execution_tree) => Ok(execution_tree),
@@ -442,7 +438,7 @@ fn plan_query<'n, 's, 'ir>(
                 }?;
                 ndc_query_executions.push((
                     NDCQueryExecution {
-                        execution_tree,
+                        execution_tree: *execution_tree,
                         execution_span_attribute: "execute_entity",
                         field_span_attribute: "entity".into(),
                         process_response_as: ProcessResponseAs::Object { is_nullable: true },

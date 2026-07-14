@@ -44,33 +44,33 @@ pub fn subscription_root_schema(
         }
 
         // Add select_many fields to the subscription root
-        if let Some(select_many) = &model.graphql_api.select_many {
-            if let Some(subscription) = &select_many.subscription {
-                let (field_name, field) = select_many_field(
-                    gds,
-                    builder,
-                    model,
-                    subscription,
-                    subscription_root_type_name,
-                )?;
-                fields.insert(field_name, field);
-            }
+        if let Some(select_many) = &model.graphql_api.select_many
+            && let Some(subscription) = &select_many.subscription
+        {
+            let (field_name, field) = select_many_field(
+                gds,
+                builder,
+                model,
+                subscription,
+                subscription_root_type_name,
+            )?;
+            fields.insert(field_name, field);
         }
 
         // Add select_aggregate fields to the subscription root
-        if let Some(select_aggregate) = &model.graphql_api.select_aggregate {
-            if let Some(subscription) = &select_aggregate.subscription {
-                let (field_name, field) = select_aggregate_field(
-                    gds,
-                    builder,
-                    model,
-                    &select_aggregate.aggregate_expression_name,
-                    &select_aggregate.filter_input_field_name,
-                    subscription,
-                    subscription_root_type_name,
-                )?;
-                fields.insert(field_name, field);
-            }
+        if let Some(select_aggregate) = &model.graphql_api.select_aggregate
+            && let Some(subscription) = &select_aggregate.subscription
+        {
+            let (field_name, field) = select_aggregate_field(
+                gds,
+                builder,
+                model,
+                &select_aggregate.aggregate_expression_name,
+                &select_aggregate.filter_input_field_name,
+                subscription,
+                subscription_root_type_name,
+            )?;
+            fields.insert(field_name, field);
         }
     }
     Ok(gql_schema::Object::new(
@@ -88,7 +88,7 @@ fn select_one_field(
     gds: &GDS,
     builder: &mut gql_schema::Builder<GDS>,
     model: &metadata_resolve::ModelWithPermissions,
-    unique_identifier: &IndexMap<FieldName, metadata_resolve::UniqueIdentifierField>,
+    unique_identifier: &IndexMap<FieldName, metadata_resolve::QualifiedTypeReference>,
     subscription: &metadata_resolve::SubscriptionGraphQlDefinition,
     parent_type: &ast::TypeName,
 ) -> Result<
@@ -246,8 +246,8 @@ fn select_aggregate_field(
 fn get_select_one_namespace_annotations(
     model: &metadata_resolve::ModelWithPermissions,
     object_type_representation: &metadata_resolve::ObjectTypeWithRelationships,
-    unique_identifier: &IndexMap<FieldName, metadata_resolve::UniqueIdentifierField>,
-) -> HashMap<Role, Option<types::NamespaceAnnotation>> {
+    unique_identifier: &IndexMap<FieldName, metadata_resolve::QualifiedTypeReference>,
+) -> HashMap<Role, Option<Box<types::NamespaceAnnotation>>> {
     let annotations = super::permissions::get_select_one_namespace_annotations(
         model,
         object_type_representation,
@@ -262,7 +262,7 @@ fn get_select_one_namespace_annotations(
 /// applying subscription permission for select root fields.
 fn get_select_permissions_namespace_annotations(
     model: &metadata_resolve::ModelWithPermissions,
-) -> HashMap<Role, Option<types::NamespaceAnnotation>> {
+) -> HashMap<Role, Option<Box<types::NamespaceAnnotation>>> {
     let annotations = super::permissions::get_select_permissions_namespace_annotations(model);
     apply_subscription_permissions_model(annotations)
 }
@@ -270,16 +270,19 @@ fn get_select_permissions_namespace_annotations(
 /// Filters a HashMap of role-to-annotation mappings, retaining only those
 /// where subscriptions are explicitly allowed.
 fn apply_subscription_permissions_model(
-    annotations: HashMap<Role, Option<types::NamespaceAnnotation>>,
-) -> HashMap<Role, Option<types::NamespaceAnnotation>> {
+    annotations: HashMap<Role, Option<Box<types::NamespaceAnnotation>>>,
+) -> HashMap<Role, Option<Box<types::NamespaceAnnotation>>> {
     annotations
         .into_iter()
-        .filter_map(|(role, annotation)| match annotation {
-            Some(types::NamespaceAnnotation::Model {
-                allow_subscriptions,
-                ..
-            }) if allow_subscriptions => Some((role, annotation)),
-            _ => None,
+        .filter_map(|(role, annotation)| match &annotation {
+            Some(boxed_annotation) => match boxed_annotation.as_ref() {
+                types::NamespaceAnnotation::Model {
+                    allow_subscriptions,
+                    ..
+                } if *allow_subscriptions => Some((role, annotation)),
+                _ => None,
+            },
+            None => None,
         })
         .collect()
 }

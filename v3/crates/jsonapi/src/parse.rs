@@ -20,7 +20,7 @@ use crate::catalog::{Model, ObjectType, RelationshipTarget, Type};
 use metadata_resolve::{Qualified, unwrap_custom_type_name};
 use std::collections::BTreeMap;
 
-#[derive(Debug, derive_more::Display, Serialize, Deserialize)]
+#[derive(Debug, derive_more::with_trait::Display, Serialize, Deserialize)]
 pub enum ParseError {
     Filter(filter::FilterError),
     InvalidFieldName(String),
@@ -299,7 +299,7 @@ fn resolve_include_relationships(
             };
             relationship_tree
                 .relationships
-                .insert(relationship.to_string(), relationship_node);
+                .insert(relationship.clone(), relationship_node);
             let sub_selection = ObjectSubSelection::Relationship(RelationshipSelection {
                 target: build_relationship_target(relationship_name.clone()),
                 selection: Some(selection),
@@ -338,15 +338,15 @@ fn include_field(
     field_name: &FieldName,
     object_type_name: &CustomTypeName,
 ) -> bool {
-    if let Some(fields) = &query_string.fields {
-        if let Some(object_fields) = fields.get(object_type_name.0.as_str()) {
-            for object_field in object_fields {
-                if object_field == field_name.as_str() {
-                    return true;
-                }
+    if let Some(fields) = &query_string.fields
+        && let Some(object_fields) = fields.get(object_type_name.0.as_str())
+    {
+        for object_field in object_fields {
+            if object_field == field_name.as_str() {
+                return true;
             }
-            return false;
         }
+        return false;
     }
     // if no sparse fields provided for our model, return everything
     true
@@ -359,14 +359,14 @@ fn create_field_name(field_name: &str) -> Result<FieldName, ParseError> {
 }
 
 // Sorting spec: <https://jsonapi.org/format/#fetching-sorting>
-fn build_order_by_element(elem: &String) -> Result<open_dds::query::OrderByElement, ParseError> {
+fn build_order_by_element(elem: &str) -> Result<open_dds::query::OrderByElement, ParseError> {
     let (field_name, direction) = if elem.starts_with('-') {
         (
             elem.split_at(1).1.to_string(),
             open_dds::models::OrderByDirection::Desc,
         )
     } else {
-        (elem.to_string(), open_dds::models::OrderByDirection::Asc)
+        (elem.to_owned(), open_dds::models::OrderByDirection::Asc)
     };
 
     let operand = open_dds::query::Operand::Field(open_dds::query::ObjectFieldOperand {

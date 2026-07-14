@@ -1,17 +1,8 @@
+use super::types::ArgumentSource;
 use crate::Qualified;
 use crate::stages::boolean_expressions;
 use crate::types::error::ContextualError;
-use open_dds::{
-    arguments::ArgumentName, commands::CommandName, models::ModelName, types::CustomTypeName,
-};
-
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum ArgumentSource {
-    #[error("model '{0}'")]
-    Model(Qualified<ModelName>),
-    #[error("command '{0}'")]
-    Command(Qualified<CommandName>),
-}
+use open_dds::{arguments::ArgumentName, types::CustomTypeName};
 
 #[derive(Debug, thiserror::Error)]
 #[error("argument '{argument_name}' in {source} has an error: {error}")]
@@ -28,6 +19,7 @@ impl ContextualError for NamedArgumentError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::large_enum_variant)]
 pub enum ArgumentError {
     #[error("{0}")]
     BooleanExpressionError(#[from] boolean_expressions::BooleanExpressionError),

@@ -215,7 +215,7 @@ pub fn validate_ndc(
             model_name: model_name.clone(),
             type_name: model.data_type.clone(),
         })?;
-    for (field_name, field_mapping) in field_mappings {
+    for (field_name, field_mapping) in field_mappings.iter() {
         let column_name = &field_mapping.column;
         let column = collection_type
             .fields
@@ -359,7 +359,7 @@ pub fn validate_ndc_command(
         return Err(NDCValidationError::NoSuchType(
             command_source_ndc_result_type_name.to_string(),
         ));
-    };
+    }
 
     // Check if the result_type of function/procedure actually has a scalar type or an object type.
     // If it is an object type, then validate the type mapping.
@@ -393,7 +393,7 @@ pub fn validate_ndc_command(
                             type_name: custom_type.clone(),
                         })?;
                     // Check if the field mappings for the output_type is valid
-                    for (field_name, field_mapping) in field_mappings {
+                    for (field_name, field_mapping) in field_mappings.iter() {
                         let column_name = &field_mapping.column;
                         if !actual_command_source_type
                             .fields
@@ -420,7 +420,7 @@ pub fn validate_ndc_command(
                         command_source_ndc_result_type_name.to_string(),
                     ))?,
                 },
-            };
+            }
         }
     }
     Ok(source_type_open_dd_type_same)

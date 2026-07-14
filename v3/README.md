@@ -132,6 +132,10 @@ you can regenerate them like this:
 just update-golden-files
 ```
 
+The golden files that this command updates include:
+
+- `metadata.jsonschema` which must be updated after metadata API changes
+
 Some other tests use `insta`, and these can be reviewed with
 `cargo insta review`. If the `cargo insta` command cannot be found, install it
 with `cargo install cargo-insta`.
@@ -147,4 +151,10 @@ To run benchmarks for the lexer, parser and validation:
 cargo bench -p lang-graphql "lexer"
 cargo bench -p lang-graphql "parser"
 cargo bench -p lang-graphql "validation/.*"
+```
+
+To run metadata resolution benchmarks:
+
+```bash
+cargo bench --bench metadata_resolve
 ```

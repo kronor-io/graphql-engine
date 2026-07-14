@@ -23,6 +23,7 @@ pub use stages::aggregates::{
     AggregatableFieldInfo, AggregateExpression, AggregateExpressionGraphqlConfig, AggregateOperand,
     AggregationFunctionInfo, DataConnectorAggregationFunctionInfo,
 };
+pub use stages::arguments::ArgumentInfo;
 pub use stages::boolean_expressions::{
     BooleanExpressionComparableRelationship, BooleanExpressionError,
     BooleanExpressionGraphqlConfig, BooleanExpressionGraphqlFieldConfig,
@@ -38,14 +39,16 @@ pub use stages::data_connectors::{
 };
 pub use stages::graphql_config::{GlobalGraphqlConfig, MultipleOrderByInputObjectFields};
 pub use stages::model_permissions::{
-    FilterPermission, ModelPredicate, ModelTargetSource, ModelWithPermissions,
-    PredicateRelationshipInfo, SelectPermission, UnaryComparisonOperator,
+    FilterPermission, ModelAuthorizationRule, ModelPredicate, ModelTargetSource,
+    ModelWithPermissions, PredicateRelationshipInfo, RelationalDeletePermission,
+    RelationalInsertPermission, RelationalOperation, RelationalUpdatePermission, SelectPermission,
+    UnaryComparisonOperator,
 };
-pub use stages::models::{Model, ModelSource, ModelsError};
+pub use stages::models::Model;
+pub use stages::models::{ModelSource, ModelsError};
 pub use stages::models_graphql::{
     ModelGraphqlError, ModelOrderByExpression, SelectAggregateGraphQlDefinition,
     SelectManyGraphQlDefinition, SelectUniqueGraphQlDefinition, SubscriptionGraphQlDefinition,
-    UniqueIdentifierField,
 };
 pub use stages::object_relationships::{
     AggregateRelationship, CommandRelationshipTarget, FieldNestedness, ModelRelationshipTarget,
@@ -55,8 +58,9 @@ pub use stages::object_relationships::{
     field_selection_relationship_execution_category,
 };
 pub use stages::object_types::{
-    AggregateFunctions, ComparisonOperators, ExtractionFunctions, FieldArgumentInfo, FieldMapping,
-    ObjectTypeRepresentation, ResolvedObjectApolloFederationConfig, TypeMapping,
+    AggregateFunctions, ComparisonOperators, ExtractionFunctions, FieldArgumentInfo,
+    FieldDefinition, FieldMapping, ObjectTypeRepresentation, ResolvedObjectApolloFederationConfig,
+    TypeMapping,
 };
 pub use stages::order_by_expressions::{
     ObjectOrderByExpression, OrderByExpressionGraphqlConfig, OrderByExpressionIdentifier,
@@ -64,26 +68,37 @@ pub use stages::order_by_expressions::{
     OrderableRelationship, OrderableRelationshipError, OrderableScalarField,
     validate_orderable_relationship,
 };
-pub use stages::plugins::LifecyclePluginConfigs;
+pub use stages::plugins::{
+    LifecyclePluginConfigs, ResolvedLifecyclePreNdcRequestPluginHook,
+    ResolvedLifecyclePreNdcResponsePluginHook,
+    types::{
+        ResolvedLifecyclePreResponseAsyncPluginHook, ResolvedLifecyclePreResponsePluginHooks,
+        ResolvedLifecyclePreResponseSyncPluginHook,
+    },
+};
 pub use stages::scalar_boolean_expressions::{
     LogicalOperators, LogicalOperatorsGraphqlConfig, ResolvedScalarBooleanExpressionType,
 };
 pub use stages::scalar_type_representations::ScalarTypeRepresentation;
-pub use stages::type_permissions::{FieldPresetInfo, TypeInputPermission};
-pub use stages::{Metadata, resolve};
-pub use stages::{
-    command_permissions::CommandWithPermissions,
-    commands::{Command, CommandSource},
-    data_connectors,
+pub use stages::type_permissions::{
+    FieldAuthorizationRule, FieldPresetInfo, TypeInputAuthorizationRule, TypeInputPermission,
 };
+pub use stages::view_permissions::{ViewAuthorizationRule, ViewPermissions, ViewWithPermissions};
+pub use stages::views::ResolvedView;
+pub use stages::{
+    Metadata,
+    command_permissions::{AllowOrDeny, Command, CommandAuthorizationRule, CommandWithPermissions},
+    commands::CommandSource,
+    data_connectors, resolve,
+};
+pub use types::condition::{BinaryOperation, Condition, ConditionHash, Conditions, UnaryOperation};
 pub use types::configuration;
 pub use types::error::{Error, WithContext};
-pub use types::flags;
+pub use types::flags::{self, RuntimeFlags};
 pub use types::permission::{ValueExpression, ValueExpressionOrPredicate};
 pub use types::subgraph::{
-    ArgumentInfo, ArgumentKind, Qualified, QualifiedBaseType, QualifiedTypeName,
-    QualifiedTypeReference, UnTaggedQualifiedTypeName, deserialize_non_string_key_btreemap,
-    deserialize_qualified_btreemap, serialize_non_string_key_btreemap,
-    serialize_qualified_btreemap,
+    ArgumentKind, Qualified, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference,
+    UnTaggedQualifiedTypeName, deserialize_non_string_key_btreemap, deserialize_qualified_btreemap,
+    serialize_non_string_key_btreemap, serialize_qualified_btreemap,
 };
 pub use types::warning::Warning;

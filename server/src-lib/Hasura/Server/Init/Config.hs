@@ -46,6 +46,8 @@ module Hasura.Server.Init.Config
     isAllowListEnabled,
     DevModeStatus (..),
     isDevModeEnabled,
+    RelayModeStatus (..),
+    isRelayEnabled,
     TelemetryStatus (..),
     isTelemetryEnabled,
     WsReadCookieStatus (..),
@@ -316,6 +318,7 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoWebSocketKeepAlive :: Maybe KeepAliveDelay,
     rsoInferFunctionPermissions :: Maybe Schema.Options.InferFunctionPermissions,
     rsoEnableMaintenanceMode :: Server.Types.MaintenanceMode (),
+    rsoEventingMode :: Server.Types.EventingMode,
     rsoSchemaPollInterval :: Maybe OptionalInterval,
     -- | See Note '$experimentalFeatures' at bottom of module
     rsoExperimentalFeatures :: Maybe (HashSet Server.Types.ExperimentalFeature),
@@ -346,7 +349,9 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoWebSocketFramePayloadSizeLimit :: Maybe (Refined Positive Int),
     rsoWebSocketMessageDataSizeLimit :: Maybe (Refined Positive Int),
     rsoWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
-    rsoWebSocketMessageRateLimitWindow :: Maybe (Refined Positive Int)
+    rsoWebSocketMessageRateLimitWindow :: Maybe (Refined Positive Int),
+    rsoLogMaskedVariables :: Maybe (HashSet Text),
+    rsoRelayMode :: RelayModeStatus
   }
 
 deriving stock instance (Show (Logging.EngineLogType impl)) => Show (ServeOptionsRaw impl)
@@ -435,6 +440,25 @@ instance FromJSON DevModeStatus where
 
 instance ToJSON DevModeStatus where
   toJSON = J.toJSON . isDevModeEnabled
+
+-- | Whether or not to enable the Relay API endpoints (@/v1/relay@, @/v1beta1/relay@).
+data RelayModeStatus = RelayModeEnabled | RelayModeDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData RelayModeStatus
+
+instance Hashable RelayModeStatus
+
+isRelayEnabled :: RelayModeStatus -> Bool
+isRelayEnabled = \case
+  RelayModeEnabled -> True
+  RelayModeDisabled -> False
+
+instance FromJSON RelayModeStatus where
+  parseJSON = fmap (bool RelayModeDisabled RelayModeEnabled) . J.parseJSON
+
+instance ToJSON RelayModeStatus where
+  toJSON = J.toJSON . isRelayEnabled
 
 -- | A representation of whether or not to enable telemetry that is isomorphic to 'Bool'.
 data TelemetryStatus = TelemetryEnabled | TelemetryDisabled
@@ -681,7 +705,9 @@ data ServeOptions impl = ServeOptions
     soWebSocketFramePayloadSizeLimit :: Refined Positive Int,
     soWebSocketMessageDataSizeLimit :: Refined Positive Int,
     soWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
-    soWebSocketMessageRateLimitWindow :: Refined Positive Int
+    soWebSocketMessageRateLimitWindow :: Refined Positive Int,
+    soLogMaskedVariables :: HashSet Text,
+    soRelayMode :: RelayModeStatus
   }
 
 -- | 'ResponseInternalErrorsConfig' represents the encoding of the

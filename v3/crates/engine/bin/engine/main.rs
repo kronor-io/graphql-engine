@@ -7,10 +7,13 @@ use engine_types::ExposeInternalErrors;
 use serde::Serialize;
 use std::net;
 use std::path::PathBuf;
+use tower_http::compression::CompressionLayer;
 use tracing_util::{SpanVisibility, add_event_on_active_span, set_attribute_on_active_span};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+static MB: usize = 1_048_576;
 
 static DEFAULT_OTEL_SERVICE_NAME: &str = "ddn-engine";
 const DEFAULT_PORT: u16 = 3000;
@@ -72,6 +75,19 @@ struct ServerOptions {
     /// Service name output in OpenTelemetry traces
     #[arg(long, env = "OTEL_SERVICE_NAME")]
     otel_service_name: Option<String>,
+
+    /// The name of the header used to specify the auth mode when using alternative Auth Modes.
+    /// Defaults to "X-Hasura-Auth-Mode" if not specified.
+    #[arg(long, env = "AUTH_MODE_HEADER", default_value = "X-Hasura-Auth-Mode")]
+    auth_mode_header: String,
+
+    /// Maximum size of response for NDC responses in bytes
+    #[arg(long, value_name = "NDC_RESPONSE_SIZE_LIMIT in bytes", env = "NDC_RESPONSE_SIZE_LIMIT", default_value_t = 30 * MB)]
+    ndc_response_size_limit: usize,
+
+    /// Maximum size of request body in bytes
+    #[arg(long, value_name = "REQUEST_BODY_LIMIT in bytes", env = "REQUEST_BODY_LIMIT", default_value_t = 10 * MB)]
+    request_body_limit: usize,
 }
 
 #[tokio::main]
@@ -137,10 +153,16 @@ async fn start_engine(server: &ServerOptions) -> Result<(), StartupError> {
     )
     .map_err(StartupError::ReadSchema)?;
 
-    let state = engine::build_state(expose_internal_errors, auth_config, resolved_metadata)
-        .map_err(StartupError::ReadSchema)?;
+    let state = engine::build_state(
+        expose_internal_errors,
+        auth_config,
+        resolved_metadata,
+        server.auth_mode_header.clone(),
+        server.ndc_response_size_limit,
+    )
+    .map_err(StartupError::ReadSchema)?;
 
-    let mut app = get_base_routes(state.clone());
+    let mut app = get_base_routes(state.clone(), server.request_body_limit);
 
     app = app.merge(get_jsonapi_route(state.clone()));
 
@@ -154,6 +176,12 @@ async fn start_engine(server: &ServerOptions) -> Result<(), StartupError> {
     if server.enable_cors {
         app = app.layer(get_cors_layer(&server.cors_allow_origin));
     }
+
+    // Add compression layer to support zstd and gzip response compression
+    // Use fastest compression level (1) based on experiments in crates/cloud/build-artifacts/src/encode.rs
+    // which showed level 1 provides good compression with minimal performance impact
+    // NOTE: Fastest can't be used here, see: https://github.com/tower-rs/tower-http/issues/590
+    app = app.layer(CompressionLayer::new().quality(tower_http::CompressionLevel::Precise(1)));
 
     let address = net::SocketAddr::new(server.host, server.port);
     let log = format!("starting server on {address}");

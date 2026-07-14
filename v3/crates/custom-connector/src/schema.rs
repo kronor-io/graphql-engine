@@ -18,6 +18,7 @@ pub fn get_schema() -> ndc_models::SchemaResponse {
                 }),
             }),
         }),
+        request_arguments: None,
     }
 }
 
@@ -69,6 +70,7 @@ pub fn get_capabilities(state: &AppState) -> ndc_models::CapabilitiesResponse {
                 None
             },
             relational_query: Some(ndc_models::RelationalQueryCapabilities {
+                streaming: Some(ndc_models::LeafCapability {}),
                 project: ndc_models::RelationalProjectionCapabilities {
                     expression: expression_capabilities(),
                 },
@@ -96,6 +98,12 @@ pub fn get_capabilities(state: &AppState) -> ndc_models::CapabilitiesResponse {
                 window: Some(ndc_models::RelationalWindowCapabilities {
                     expression: expression_capabilities(),
                 }),
+                union: Some(ndc_models::LeafCapability {}),
+            }),
+            relational_mutation: Some(ndc_models::RelationalMutationCapabilities {
+                insert: Some(ndc_models::LeafCapability {}),
+                update: Some(ndc_models::LeafCapability {}),
+                delete: Some(ndc_models::LeafCapability {}),
             }),
         },
     }
@@ -104,7 +112,9 @@ pub fn get_capabilities(state: &AppState) -> ndc_models::CapabilitiesResponse {
 fn expression_capabilities() -> ndc_models::RelationalExpressionCapabilities {
     ndc_models::RelationalExpressionCapabilities {
         conditional: ndc_models::RelationalConditionalExpressionCapabilities {
-            case: Some(ndc_models::LeafCapability {}),
+            case: Some(ndc_models::RelationalCaseCapabilities {
+                scrutinee: Some(ndc_models::LeafCapability {}),
+            }),
             nullif: Some(ndc_models::LeafCapability {}),
         },
         comparison: ndc_models::RelationalComparisonExpressionCapabilities {
@@ -120,12 +130,14 @@ fn expression_capabilities() -> ndc_models::RelationalExpressionCapabilities {
             is_false: Some(ndc_models::LeafCapability {}),
             is_null: Some(ndc_models::LeafCapability {}),
             is_true: Some(ndc_models::LeafCapability {}),
+            is_distinct_from: Some(ndc_models::LeafCapability {}),
             less_than_eq: Some(ndc_models::LeafCapability {}),
             less_than: Some(ndc_models::LeafCapability {}),
         },
         scalar: ndc_models::RelationalScalarExpressionCapabilities {
             abs: Some(ndc_models::LeafCapability {}),
             array_element: Some(ndc_models::LeafCapability {}),
+            binary_concat: Some(ndc_models::LeafCapability {}),
             btrim: Some(ndc_models::LeafCapability {}),
             ceil: Some(ndc_models::LeafCapability {}),
             character_length: Some(ndc_models::LeafCapability {}),
@@ -149,6 +161,7 @@ fn expression_capabilities() -> ndc_models::RelationalExpressionCapabilities {
                 microsecond: Some(ndc_models::LeafCapability {}),
                 millisecond: Some(ndc_models::LeafCapability {}),
                 nanosecond: Some(ndc_models::LeafCapability {}),
+                epoch: Some(ndc_models::LeafCapability {}),
             }),
             date_trunc: Some(ndc_models::LeafCapability {}),
             exp: Some(ndc_models::LeafCapability {}),
@@ -191,6 +204,15 @@ fn expression_capabilities() -> ndc_models::RelationalExpressionCapabilities {
             not: Some(ndc_models::LeafCapability {}),
             or: Some(ndc_models::LeafCapability {}),
             plus: Some(ndc_models::LeafCapability {}),
+            json_as_text: None,
+            json_contains: None,
+            json_get: None,
+            json_get_str: None,
+            json_get_int: None,
+            json_get_float: None,
+            json_get_bool: None,
+            json_get_json: None,
+            json_length: None,
         },
         aggregate: ndc_models::RelationalAggregateExpressionCapabilities {
             avg: Some(ndc_models::LeafCapability {}),
@@ -204,9 +226,26 @@ fn expression_capabilities() -> ndc_models::RelationalExpressionCapabilities {
             max: Some(ndc_models::LeafCapability {}),
             median: None,
             min: Some(ndc_models::LeafCapability {}),
-            string_agg: None,
+            string_agg: Some(ndc_models::RelationalOrderedAggregateFunctionCapabilities {
+                distinct: Some(ndc_models::LeafCapability {}),
+                order_by: Some(ndc_models::LeafCapability {}),
+            }),
+            string_agg_with_separator: Some(
+                ndc_models::RelationalOrderedAggregateFunctionCapabilities {
+                    distinct: Some(ndc_models::LeafCapability {}),
+                    order_by: Some(ndc_models::LeafCapability {}),
+                },
+            ),
             sum: Some(ndc_models::LeafCapability {}),
             var: None,
+            stddev: Some(ndc_models::LeafCapability {}),
+            stddev_pop: Some(ndc_models::LeafCapability {}),
+            approx_percentile_cont: Some(ndc_models::LeafCapability {}),
+            approx_distinct: Some(ndc_models::LeafCapability {}),
+            array_agg: Some(ndc_models::RelationalOrderedAggregateFunctionCapabilities {
+                distinct: Some(ndc_models::LeafCapability {}),
+                order_by: Some(ndc_models::LeafCapability {}),
+            }),
         },
         window: ndc_models::RelationalWindowExpressionCapabilities {
             row_number: Some(ndc_models::LeafCapability {}),
@@ -216,5 +255,9 @@ fn expression_capabilities() -> ndc_models::RelationalExpressionCapabilities {
             cume_dist: None,
             percent_rank: None,
         },
+        scalar_types: Some(ndc_models::RelationalScalarTypeCapabilities {
+            interval: Some(ndc_models::LeafCapability {}),
+            from_type: Some(ndc_models::LeafCapability {}),
+        }),
     }
 }
