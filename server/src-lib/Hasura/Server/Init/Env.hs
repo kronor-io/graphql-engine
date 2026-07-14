@@ -269,6 +269,9 @@ instance FromEnv Options.InferFunctionPermissions where
 instance FromEnv (Server.Types.MaintenanceMode ()) where
   fromEnv = fmap (bool Server.Types.MaintenanceModeDisabled (Server.Types.MaintenanceModeEnabled ())) . fromEnv @Bool
 
+instance FromEnv Server.Types.EventingMode where
+  fromEnv = fmap (bool Server.Types.EventingEnabled Server.Types.EventingDisabled) . fromEnv @Bool
+
 instance FromEnv Server.Logging.MetadataQueryLoggingMode where
   fromEnv = fmap (bool Server.Logging.MetadataQueryLoggingDisabled Server.Logging.MetadataQueryLoggingEnabled) . fromEnv @Bool
 
@@ -350,6 +353,9 @@ instance FromEnv [Auth.JWTConfig] where
 
 instance (Logging.EnabledLogTypes impl) => FromEnv (HashSet (Logging.EngineLogType impl)) where
   fromEnv = fmap HashSet.fromList . Logging.parseEnabledLogTypes
+
+instance FromEnv (HashSet Text) where
+  fromEnv = Right . HashSet.fromList . filter (not . Text.null) . map Text.strip . Text.splitOn "," . Text.pack
 
 instance FromEnv Logging.LogLevel where
   fromEnv s = case Text.toLower $ Text.strip $ Text.pack s of

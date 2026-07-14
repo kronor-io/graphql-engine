@@ -7,12 +7,15 @@ license.workspace = true
 [lib]
 bench = false
 
+[[bench]]
+name = "metadata_resolve"
+harness = false
+
 [dependencies]
 error-context = { path = "../utils/error-context" }
-hasura-authn-core = { path = "../auth/hasura-authn-core" }
+graphql-types = { path = "../graphql/graphql-types" }
 jsonpath = { path = "../utils/jsonpath" }
 json-annotation-parse = { path = "../utils/json-annotation-parse/" }
-lang-graphql = { path = "../graphql/lang-graphql" }
 open-dds = { path = "../open-dds" }
 serde-ext = { path = "../utils/serde-ext" }
 
@@ -24,7 +27,7 @@ ndc-models-v01 = { workspace = true }
 nonempty = { workspace = true }
 partition_eithers = { workspace = true }
 ref-cast = { workspace = true }
-reqwest = { workspace = true }
+http = { workspace = true }
 semver = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -37,6 +40,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+criterion = { workspace = true }
 
 [lints]
 workspace = true

@@ -13,7 +13,7 @@ use crate::stages::{
 };
 use crate::types::subgraph::{mk_qualified_type_name, mk_qualified_type_reference};
 use crate::{Qualified, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference};
-use lang_graphql::ast::common as ast;
+use graphql_types as ast;
 use open_dds::data_connector::DataConnectorName;
 use open_dds::identifier::SubgraphName;
 use open_dds::{
@@ -22,6 +22,7 @@ use open_dds::{
     types::CustomTypeName,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Resolves a given scalar boolean expression type
 pub(crate) fn resolve_scalar_boolean_expression_type(
@@ -75,7 +76,7 @@ pub(crate) fn resolve_scalar_boolean_expression_type(
                     name: comparison_operator.name.clone(),
                 },
             );
-        };
+        }
     }
 
     let mut data_connector_operator_mappings = BTreeMap::new();
@@ -207,7 +208,7 @@ pub(crate) fn resolve_scalar_boolean_expression_type(
     );
 
     Ok(ResolvedScalarBooleanExpressionType {
-        comparison_operators,
+        comparison_operators: Arc::new(comparison_operators),
         operand_type: mk_qualified_type_name(&scalar_boolean_expression_operand.r#type, subgraph),
         data_connector_operator_mappings,
         graphql_name,

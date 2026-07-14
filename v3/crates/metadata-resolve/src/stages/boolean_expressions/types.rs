@@ -7,7 +7,7 @@ use crate::{
     },
     types::error::ContextualError,
 };
-use lang_graphql::ast::common as ast;
+use graphql_types as ast;
 use open_dds::models::ModelName;
 use open_dds::{
     data_connector::{DataConnectorName, DataConnectorObjectType, DataConnectorOperatorName},
@@ -17,8 +17,9 @@ use open_dds::{
 use ref_cast::RefCast;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum BooleanExpressionIssue {
@@ -121,7 +122,7 @@ impl ShouldBeAnError for BooleanExpressionIssue {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone, derive_more::Display)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, derive_more::with_trait::Display)]
 pub enum FieldNameSource {
     #[display("comparable field")]
     ComparableField,
@@ -135,7 +136,7 @@ pub enum FieldNameSource {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct BooleanExpressionTypes {
     #[serde_as(as = "Vec<(_, _)>")]
-    pub objects: BTreeMap<Qualified<CustomTypeName>, ResolvedObjectBooleanExpressionType>,
+    pub objects: BTreeMap<Qualified<CustomTypeName>, Arc<ResolvedObjectBooleanExpressionType>>,
     #[serde_as(as = "Vec<(_, _)>")]
     pub scalars: BTreeMap<
         BooleanExpressionTypeIdentifier,
@@ -151,6 +152,20 @@ pub struct BooleanExpressionTypes {
         Qualified<CustomTypeName>,
         aggregate_boolean_expressions::ScalarAggregateBooleanExpression,
     >,
+}
+
+impl BooleanExpressionTypes {
+    pub fn get_type_names(&self) -> BTreeSet<&Qualified<CustomTypeName>> {
+        let mut type_names = BTreeSet::new();
+        type_names.extend(self.objects.keys());
+        type_names.extend(self.scalars.keys().filter_map(|k| match k {
+            BooleanExpressionTypeIdentifier::FromBooleanExpressionType(tn) => Some(tn),
+            BooleanExpressionTypeIdentifier::FromDataConnectorScalarRepresentation(_) => None,
+        }));
+        type_names.extend(self.object_aggregates.keys());
+        type_names.extend(self.scalar_aggregates.keys());
+        type_names
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,7 +274,15 @@ impl Display for DataConnectorType {
 // When converting `ObjectBooleanExpressionType` to `BooleanExpressionType`, we need
 // a way to identify auto-generated scalar boolean expression types
 #[derive(
-    Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Display,
+    Serialize,
+    Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    derive_more::with_trait::Display,
 )]
 pub enum BooleanExpressionTypeIdentifier {
     FromBooleanExpressionType(Qualified<CustomTypeName>),
@@ -270,9 +293,8 @@ pub enum BooleanExpressionTypeIdentifier {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ComparisonExpressionInfo {
     pub boolean_expression_type_name: BooleanExpressionTypeIdentifier,
-    pub operators: BTreeMap<OperatorName, QualifiedTypeReference>,
-    #[serde_as(as = "Vec<(_, _)>")]
-    pub operator_mapping: BTreeMap<Qualified<DataConnectorName>, OperatorMapping>,
+    pub operators: Arc<BTreeMap<OperatorName, QualifiedTypeReference>>,
+    pub operator_mapping: Arc<BTreeMap<Qualified<DataConnectorName>, OperatorMapping>>,
     pub logical_operators: LogicalOperators,
     pub field_kind: ScalarComparisonKind,
 }

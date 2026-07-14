@@ -25,10 +25,11 @@ pub struct Context<M> {
     pub auth_config: Arc<ResolvedAuthConfig>,
     pub metrics: M,
     pub handshake_headers: Arc<HeaderMap>,
+    pub auth_mode_header: String,
 }
 
 /// Represents a WebSocket connection ID.
-#[derive(Clone, Serialize, PartialEq, Eq, Hash, derive_more::Display)]
+#[derive(Clone, Serialize, PartialEq, Eq, Hash, derive_more::with_trait::Display)]
 pub struct WebSocketId(SmolStr);
 
 impl WebSocketId {

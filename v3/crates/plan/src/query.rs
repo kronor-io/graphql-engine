@@ -7,16 +7,17 @@ pub mod model_target;
 mod permissions;
 mod relationships;
 mod types;
-use crate::types::PlanError;
+use crate::types::{PlanError, PlanState};
 pub use arguments::{
     ArgumentPresetExecutionError, MapFieldNamesError, UnresolvedArgument,
     process_argument_presets_for_command, process_argument_presets_for_model,
+    process_connector_link_presets,
 };
 pub use command::{CommandPlan, FromCommand, from_command};
 pub use filter::{build_relationship_comparison_expression, plan_expression};
 use indexmap::IndexMap;
 pub use model::{from_model_aggregate_selection, from_model_group_by, from_model_selection};
-pub use permissions::process_model_predicate;
+pub use permissions::{process_model_predicate, process_permissions};
 pub use relationships::{
     RelationshipFieldMappingError, collect_remote_join_object_type_field_mappings,
     get_relationship_field_mapping_of_field_name, process_command_relationship_definition,
@@ -26,13 +27,13 @@ pub use relationships::{
 use hasura_authn_core::Session;
 use metadata_resolve::Metadata;
 use open_dds::query::{Alias, Query, QueryRequest};
-use plan_types::{QueryExecutionTree, UniqueNumber};
+use plan_types::QueryExecutionTree;
 
 // these types should probably live in `plan-types`
 #[derive(Debug)]
 pub enum SingleNodeExecutionPlan {
-    Query(plan_types::QueryExecutionTree),
-    Mutation(plan_types::MutationExecutionTree),
+    Query(Box<plan_types::QueryExecutionTree>),
+    Mutation(Box<plan_types::MutationExecutionTree>),
 }
 
 #[derive(Debug)]
@@ -52,23 +53,18 @@ where
     'metadata: 'req,
 {
     let QueryRequest::V1(query_request_v1) = query_request;
-    let mut unique_number = UniqueNumber::new();
+    let mut plan_state = PlanState::new();
 
     let mut queries = IndexMap::new();
     let mut mutation = None;
 
     for (alias, query) in &query_request_v1.queries {
-        let single_node = query_to_plan(
-            query,
-            metadata,
-            session,
-            request_headers,
-            &mut unique_number,
-        )?;
+        let single_node =
+            query_to_plan(query, metadata, session, request_headers, &mut plan_state)?;
 
         match single_node {
             SingleNodeExecutionPlan::Query(execution_tree) => {
-                queries.insert(alias.clone(), execution_tree);
+                queries.insert(alias.clone(), *execution_tree);
             }
             SingleNodeExecutionPlan::Mutation(execution_tree) => {
                 if mutation.is_some() {
@@ -82,7 +78,7 @@ where
     }
     if let Some(mutation) = mutation {
         if queries.is_empty() {
-            Ok(ExecutionPlan::Mutation(mutation))
+            Ok(ExecutionPlan::Mutation(*mutation))
         } else {
             Err(PlanError::Internal(
                 "Mixture of queries and mutations is not supported in OpenDD pipeline".into(),
@@ -99,7 +95,7 @@ pub fn query_to_plan<'req, 'metadata>(
     metadata: &'metadata Metadata,
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<SingleNodeExecutionPlan, PlanError>
 where
     'metadata: 'req,
@@ -111,10 +107,10 @@ where
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
 
-            Ok(SingleNodeExecutionPlan::Query(execution_tree))
+            Ok(SingleNodeExecutionPlan::Query(Box::new(execution_tree)))
         }
         open_dds::query::Query::ModelAggregate(model_aggregate) => {
             let execution_tree = model::from_model_aggregate_selection(
@@ -124,10 +120,10 @@ where
                 session,
                 None,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
 
-            Ok(SingleNodeExecutionPlan::Query(execution_tree))
+            Ok(SingleNodeExecutionPlan::Query(Box::new(execution_tree)))
         }
         open_dds::query::Query::ModelGroups(model_groups) => {
             let execution_tree = model::from_model_group_by(
@@ -137,10 +133,10 @@ where
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
 
-            Ok(SingleNodeExecutionPlan::Query(execution_tree))
+            Ok(SingleNodeExecutionPlan::Query(Box::new(execution_tree)))
         }
         open_dds::query::Query::Command(command_selection) => {
             let command::FromCommand {
@@ -151,7 +147,7 @@ where
                 metadata,
                 session,
                 request_headers,
-                unique_number,
+                plan_state,
             )?;
             match command_plan {
                 command::CommandPlan::Function(execution_tree) => {

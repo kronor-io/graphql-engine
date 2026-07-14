@@ -271,8 +271,16 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {
@@ -1907,6 +1915,7 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                                         },
                                     ),
                                     supports_relational_queries: None,
+                                    supports_relational_mutations: None,
                                 },
                             },
                             collection: CollectionName(
@@ -3039,6 +3048,31 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                             ),
                         },
                     ),
+                    unique_identifiers: [
+                        {
+                            FieldName(
+                                Identifier(
+                                    "invoiceId",
+                                ),
+                            ): QualifiedTypeReference {
+                                underlying_type: Named(
+                                    Custom(
+                                        Qualified {
+                                            subgraph: SubgraphName(
+                                                "default",
+                                            ),
+                                            name: CustomTypeName(
+                                                Identifier(
+                                                    "Int4",
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                ),
+                                nullable: false,
+                            },
+                        },
+                    ],
                     raw: ModelRaw {
                         filter_expression_type: None,
                         graphql: Some(
@@ -3187,7 +3221,11 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                         },
                     },
                 },
-                select_permissions: {},
+                arguments: {},
+                permissions: ModelPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                },
                 filter_expression_type: None,
                 graphql_api: ModelGraphQlApi {
                     arguments_input_config: None,
@@ -3201,34 +3239,22 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                                     Identifier(
                                         "invoiceId",
                                     ),
-                                ): UniqueIdentifierField {
-                                    field_type: QualifiedTypeReference {
-                                        underlying_type: Named(
-                                            Custom(
-                                                Qualified {
-                                                    subgraph: SubgraphName(
-                                                        "default",
+                                ): QualifiedTypeReference {
+                                    underlying_type: Named(
+                                        Custom(
+                                            Qualified {
+                                                subgraph: SubgraphName(
+                                                    "default",
+                                                ),
+                                                name: CustomTypeName(
+                                                    Identifier(
+                                                        "Int4",
                                                     ),
-                                                    name: CustomTypeName(
-                                                        Identifier(
-                                                            "Int4",
-                                                        ),
-                                                    ),
-                                                },
-                                            ),
+                                                ),
+                                            },
                                         ),
-                                        nullable: false,
-                                    },
-                                    ndc_column: Some(
-                                        NdcColumnForComparison {
-                                            column: DataConnectorColumnName(
-                                                "InvoiceId",
-                                            ),
-                                            equal_operator: DataConnectorOperatorName(
-                                                "_eq",
-                                            ),
-                                        },
                                     ),
+                                    nullable: false,
                                 },
                             },
                             description: None,
@@ -3270,6 +3296,7 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                         ),
                     ),
                 },
+                description: None,
             },
         },
         commands: {},
@@ -3818,6 +3845,7 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
                 description: None,
             },
         },
+        views: {},
         graphql_config: GlobalGraphqlConfig {
             query_root_type_name: TypeName(
                 Name(
@@ -3852,10 +3880,18 @@ input_file: crates/metadata-resolve/tests/passing/aggregate_expressions/missing_
         },
         plugin_configs: LifecyclePluginConfigs {
             pre_parse_plugins: [],
-            pre_response_plugins: [],
+            pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks {
+                sync_hooks: [],
+                async_hooks: [],
+            },
             pre_route_plugins: [],
+            pre_ndc_request_plugins: {},
+            pre_ndc_response_plugins: {},
         },
         roles: {},
+        conditions: Conditions {
+            conditions: {},
+        },
         runtime_flags: RuntimeFlags(
             {},
         ),

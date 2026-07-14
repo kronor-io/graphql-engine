@@ -50,11 +50,15 @@ pub enum Flag {
     ValidateArgumentMappingTypes,
     DisallowInvalidHeadersInAuthConfig,
     RequireJwtAudienceValidationIfAudClaimPresent,
+    AllowSwitchingRoleInJWTAuth,
     DisallowProcedureCommandRelationships,
     DisallowDuplicateModelPermissionsRoles,
     ValidateScalarBooleanExpressionOperators,
     ValidateNonNullGraphqlVariables,
     DisallowComparableRelationshipTargetWithNoBooleanExpressionType,
+    SendMissingArgumentsToNdcAsNulls,
+    DisallowLiteralsAsBooleanExpressionArguments,
+    FixExistsInNestedArrays,
 }
 
 impl Flag {
@@ -140,6 +144,7 @@ impl Flag {
             Flag::RequireJwtAudienceValidationIfAudClaimPresent => {
                 "require_jwt_audience_validation_if_aud_claim_present"
             }
+            Flag::AllowSwitchingRoleInJWTAuth => "allow_switching_role_in_jwt_auth",
             Flag::DisallowProcedureCommandRelationships => {
                 "disallow_procedure_command_relationships"
             }
@@ -153,6 +158,11 @@ impl Flag {
             Flag::DisallowComparableRelationshipTargetWithNoBooleanExpressionType => {
                 "disallow_comparable_relationship_target_with_no_boolean_expression_type"
             }
+            Flag::SendMissingArgumentsToNdcAsNulls => "send_missing_arguments_to_ndc_as_nulls",
+            Flag::DisallowLiteralsAsBooleanExpressionArguments => {
+                "disallow_literals_as_boolean_expression_arguments"
+            }
+            Flag::FixExistsInNestedArrays => "fix_exists_in_nested_arrays",
         }
     }
 }

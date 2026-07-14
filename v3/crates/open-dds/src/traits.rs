@@ -41,10 +41,9 @@ pub fn deserialize_key<T: OpenDd>(
     path: jsonpath::JSONPath,
     key: String,
 ) -> Result<T, OpenDdDeserializeError> {
-    OpenDd::deserialize(json, path.append_key(key.clone())).map_err(|e| OpenDdDeserializeError {
-        error: e.error,
-        path: e.path.prepend_key(key),
-    })
+    // The forward path already contains the full path from root.
+    // No need for backward prepend on error - errors carry absolute paths.
+    OpenDd::deserialize(json, path.append_key(key))
 }
 
 pub fn deserialize_index<T: OpenDd>(
@@ -52,10 +51,7 @@ pub fn deserialize_index<T: OpenDd>(
     path: jsonpath::JSONPath,
     index: usize,
 ) -> Result<T, OpenDdDeserializeError> {
-    OpenDd::deserialize(json, path.append_index(index)).map_err(|e| OpenDdDeserializeError {
-        error: e.error,
-        path: e.path.prepend_index(index),
-    })
+    OpenDd::deserialize(json, path.append_index(index))
 }
 
 impl_OpenDd_default_for!(String);
@@ -151,7 +147,7 @@ impl<T: OpenDd> OpenDd for Option<T> {
                 .extensions
                 .insert("nullable".to_owned(), serde_json::json!(true));
             schema = Schema::Object(schema_obj);
-        };
+        }
         schema
     }
 
@@ -167,7 +163,7 @@ fn add_null_type(instance_type: &mut SingleOrVec<InstanceType>) {
         }
         SingleOrVec::Vec(ty) if !ty.contains(&InstanceType::Null) => ty.push(InstanceType::Null),
         _ => {}
-    };
+    }
 }
 
 seq_impl!(Vec<T>, false);
@@ -292,6 +288,44 @@ mod tests {
             expected,
             traits::OpenDd::deserialize(json, jsonpath::JSONPath::new()).unwrap()
         );
+    }
+
+    #[test]
+    fn test_deserialize_with_attribute() {
+        use serde::de::Error;
+
+        fn custom_deserializer(
+            value: serde_json::Value,
+            _path: jsonpath::JSONPath,
+        ) -> Result<String, crate::traits::OpenDdDeserializeError> {
+            match value {
+                serde_json::Value::String(s) => Ok(format!("custom_{s}")),
+                _ => Err(crate::traits::OpenDdDeserializeError {
+                    error: serde_json::Error::custom("expected string"),
+                    path: jsonpath::JSONPath::new(),
+                }),
+            }
+        }
+
+        #[derive(Debug, PartialEq, OpenDd)]
+        struct TestStruct {
+            normal_field: String,
+            #[opendd(deserialize_with = "custom_deserializer")]
+            custom_field: String,
+        }
+
+        let json = serde_json::json!({
+            "normalField": "normal_value",
+            "customField": "test_value"
+        });
+
+        let expected = TestStruct {
+            normal_field: "normal_value".to_string(),
+            custom_field: "custom_test_value".to_string(),
+        };
+
+        let result = traits::OpenDd::deserialize(json, jsonpath::JSONPath::new()).unwrap();
+        assert_eq!(expected, result);
     }
 
     #[test]
@@ -1047,6 +1081,176 @@ mod tests {
                         "additionalProperties": false
                     }
                 }
+            }
+        );
+
+        assert_eq!(
+            serde_json::to_string_pretty(&exp).unwrap(),
+            serde_json::to_string_pretty(&root_schema).unwrap()
+        );
+    }
+
+    // Tests for internally tagged enums
+
+    #[derive(Debug, PartialEq, OpenDd)]
+    #[opendd(internally_tagged(tag = "custom_tag"))]
+    #[allow(clippy::enum_variant_names)]
+    /// An internally tagged enum
+    enum InternallyTaggedEnum {
+        #[opendd(json_schema(title = "VariantOne"))]
+        /// The first variant
+        VariantOne(VariantOneStruct),
+        #[opendd(rename = "variant_2", json_schema(title = "VariantTwo"))]
+        /// The second variant
+        VariantTwo(VariantTwoStruct),
+        #[opendd(hidden = true)]
+        VariantThree(VariantThreeStruct),
+    }
+
+    #[test]
+    fn test_internally_tagged_enum() {
+        let json = serde_json::json!({
+            "custom_tag": "variant_2",
+            "prop1": true,
+            "prop2": "testing"
+        });
+        let expected = InternallyTaggedEnum::VariantTwo(VariantTwoStruct {
+            prop_1: true,
+            prop_2: "testing".to_owned(),
+        });
+        assert_eq!(
+            expected,
+            traits::OpenDd::deserialize(json, jsonpath::JSONPath::new()).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_internally_tagged_enum_deserializes_hidden_variants() {
+        let json = serde_json::json!({
+            "custom_tag": "variantThree",
+            "propX": "testing",
+            "propY": "abcd",
+        });
+        let expected = InternallyTaggedEnum::VariantThree(VariantThreeStruct {
+            prop_x: "testing".to_owned(),
+            prop_y: "abcd".to_owned(),
+        });
+        assert_eq!(
+            expected,
+            traits::OpenDd::deserialize(json, jsonpath::JSONPath::new()).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_internally_tagged_enum_empty_object_error() {
+        let json = serde_json::json!({});
+        let err =
+            <InternallyTaggedEnum as traits::OpenDd>::deserialize(json, jsonpath::JSONPath::new())
+                .unwrap_err();
+        assert_eq!(
+            "missing field `custom_tag`".to_string(),
+            err.error.to_string()
+        );
+        assert_eq!("$", err.path.to_string());
+    }
+
+    #[test]
+    fn test_internally_tagged_enum_unexpected_variant() {
+        let json = serde_json::json!({
+            "custom_tag": "variantUnknown",
+            "propA": "test",
+            "propB": 123,
+        });
+        let err =
+            <InternallyTaggedEnum as traits::OpenDd>::deserialize(json, jsonpath::JSONPath::new())
+                .unwrap_err();
+        assert_eq!(
+            "unknown variant `variantUnknown`, expected `variantOne, variant_2`".to_string(),
+            err.error.to_string()
+        );
+        assert_eq!("$.custom_tag", err.path.to_string());
+    }
+
+    #[test]
+    fn test_internally_tagged_nested_error() {
+        let json = serde_json::json!({
+            "custom_tag": "variant_2",
+            "prop1": "wrong type",
+            "prop2": "testing"
+        });
+        let err =
+            <InternallyTaggedEnum as traits::OpenDd>::deserialize(json, jsonpath::JSONPath::new())
+                .unwrap_err();
+        assert_eq!(
+            "invalid type: string \"wrong type\", expected a boolean".to_string(),
+            err.error.to_string()
+        );
+        assert_eq!("$.prop1", err.path.to_string());
+    }
+
+    #[test]
+    fn test_internally_tagged_enum_json_schema() {
+        let mut generator = schemars::r#gen::SchemaGenerator::default();
+        let root_schema = traits::gen_root_schema_for::<InternallyTaggedEnum>(&mut generator);
+        let exp = serde_json::json!(
+            {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "https://hasura.io/jsonschemas/metadata/InternallyTaggedEnum",
+                "title": "InternallyTaggedEnum",
+                "description": "An internally tagged enum",
+                "oneOf": [
+                    {
+                        "$id": "https://hasura.io/jsonschemas/metadata/VariantOneStruct",
+                        "title": "VariantOneStruct",
+                        "type": "object",
+                        "required": [
+                            "custom_tag",
+                            "propA",
+                            "propB"
+                        ],
+                        "properties": {
+                            "custom_tag": {
+                                "type": "string",
+                                "enum": [
+                                    "variantOne"
+                                ]
+                            },
+                            "propA": {
+                                "type": "string"
+                            },
+                            "propB": {
+                                "type": "integer",
+                                "format": "int32"
+                            }
+                        },
+                        "additionalProperties": false
+                    },
+                    {
+                        "$id": "https://hasura.io/jsonschemas/metadata/VariantTwoStruct",
+                        "title": "VariantTwoStruct",
+                        "type": "object",
+                        "required": [
+                            "custom_tag",
+                            "prop1",
+                            "prop2"
+                        ],
+                        "properties": {
+                            "custom_tag": {
+                                "type": "string",
+                                "enum": [
+                                    "variant_2"
+                                ]
+                            },
+                            "prop1": {
+                                "type": "boolean"
+                            },
+                            "prop2": {
+                                "type": "string"
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                ]
             }
         );
 

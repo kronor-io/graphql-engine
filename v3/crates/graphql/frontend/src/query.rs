@@ -12,6 +12,7 @@ use lang_graphql as gql;
 use lang_graphql::ast::common as ast;
 use lang_graphql::{http::RawRequest, schema::Schema};
 use std::sync::Arc;
+use tracing_util::set_status_on_current_span;
 use tracing_util::{AttributeVisibility, SpanVisibility, set_attribute_on_active_span};
 
 pub async fn execute_query(
@@ -20,7 +21,7 @@ pub async fn execute_query(
     schema: &Schema<GDS>,
     metadata: &Arc<metadata_resolve::Metadata>,
     session: &Session,
-    request_headers: &reqwest::header::HeaderMap,
+    request_headers: &http::HeaderMap,
     request: RawRequest,
     project_id: Option<&ProjectId>,
 ) -> (Option<ast::OperationType>, GraphQLResponse) {
@@ -53,7 +54,7 @@ pub async fn execute_query_internal(
     schema: &gql::schema::Schema<GDS>,
     metadata: &Arc<metadata_resolve::Metadata>,
     session: &Session,
-    request_headers: &reqwest::header::HeaderMap,
+    request_headers: &http::HeaderMap,
     raw_request: gql::http::RawRequest,
     project_id: Option<&ProjectId>,
 ) -> Result<(ast::OperationType, GraphQLResponse), crate::RequestError> {
@@ -108,14 +109,24 @@ pub async fn execute_query_internal(
                                     graphql_ir::RequestPlan::MutationPlan(mutation_plan) => {
                                         execute_mutation_plan(
                                             http_context,
+                                            &metadata.plugin_configs,
+                                            session,
+                                            request_headers,
                                             mutation_plan,
                                             project_id,
                                         )
                                         .await
                                     }
                                     graphql_ir::RequestPlan::QueryPlan(query_plan) => {
-                                        execute_query_plan(http_context, query_plan, project_id)
-                                            .await
+                                        execute_query_plan(
+                                            http_context,
+                                            &metadata.plugin_configs,
+                                            session,
+                                            request_headers,
+                                            query_plan,
+                                            project_id,
+                                        )
+                                        .await
                                     }
                                     graphql_ir::RequestPlan::SubscriptionPlan(
                                         alias,
@@ -149,6 +160,11 @@ pub async fn execute_query_internal(
                         })
                         .await;
 
+                    // Set the response status in this (parent) span. Otherwise folks might not
+                    // find the error-ing traces they are looking for. Do we want to insist all
+                    // parent spans of error-ing spans are also error? Then handle in the tracing
+                    // code.
+                    set_status_on_current_span(&response);
                     Ok((normalized_request.ty, response))
                 })
             },

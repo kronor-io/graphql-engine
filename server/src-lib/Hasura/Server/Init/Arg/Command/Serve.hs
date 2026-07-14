@@ -54,6 +54,7 @@ module Hasura.Server.Init.Arg.Command.Serve
     webSocketKeepAliveOption,
     inferFunctionPermsOption,
     enableMaintenanceModeOption,
+    disableEventingOption,
     schemaPollIntervalOption,
     experimentalFeaturesOption,
     eventsFetchBatchSizeOption,
@@ -82,6 +83,8 @@ module Hasura.Server.Init.Arg.Command.Serve
     webSocketMessageDataSizeLimitOption,
     webSocketMessageRateLimitOption,
     webSocketMessageRateLimitWindowOption,
+    logMaskedVariablesOption,
+    enableRelayOption,
 
     -- * Pretty Printer
     serveCmdFooter,
@@ -162,6 +165,7 @@ serveCommandParser =
     <*> parseWebSocketKeepAlive
     <*> parseInferFunctionPerms
     <*> parseEnableMaintenanceMode
+    <*> parseDisableEventing
     <*> parseSchemaPollInterval
     <*> parseExperimentalFeatures
     <*> parseEventsFetchBatchSize
@@ -191,6 +195,8 @@ serveCommandParser =
     <*> parseWebSocketMessageDataSizeLimit
     <*> parseWebSocketMessageRateLimit
     <*> parseWebSocketMessageRateLimitWindow
+    <*> parseLogMaskedVariables
+    <*> parseEnableRelay
 
 --------------------------------------------------------------------------------
 -- Serve Options
@@ -909,6 +915,22 @@ graphqlDevModeOption =
       Config._helpMessage = "Set dev mode for GraphQL requests; include 'internal' key in the errors extensions (if required) of the response"
     }
 
+parseEnableRelay :: Opt.Parser Config.RelayModeStatus
+parseEnableRelay =
+  bool Config.RelayModeDisabled Config.RelayModeEnabled
+    <$> Opt.switch
+      ( Opt.long "enable-relay"
+          <> Opt.help (Config._helpMessage enableRelayOption)
+      )
+
+enableRelayOption :: Config.Option Config.RelayModeStatus
+enableRelayOption =
+  Config.Option
+    { Config._default = Config.RelayModeEnabled,
+      Config._envVar = "HASURA_GRAPHQL_ENABLE_RELAY",
+      Config._helpMessage = "Enable the Relay API endpoint (/v1/relay and /v1beta1/relay). When disabled, requests to the relay endpoint return an error (default: true)"
+    }
+
 parseGraphqlAdminInternalErrors :: Opt.Parser (Maybe Config.AdminInternalErrorsStatus)
 parseGraphqlAdminInternalErrors =
   Opt.optional
@@ -1065,6 +1087,27 @@ enableMaintenanceModeOption =
     { Config._default = Types.MaintenanceModeDisabled,
       Config._envVar = "HASURA_GRAPHQL_ENABLE_MAINTENANCE_MODE",
       Config._helpMessage = "Flag to enable maintenance mode in the graphql-engine"
+    }
+
+parseDisableEventing :: Opt.Parser Types.EventingMode
+parseDisableEventing =
+  fmap (bool Types.EventingEnabled Types.EventingDisabled)
+    $ Opt.switch
+      ( Opt.long "disable-eventing"
+          <> Opt.help (Config._helpMessage disableEventingOption)
+      )
+
+disableEventingOption :: Config.Option Types.EventingMode
+disableEventingOption =
+  Config.Option
+    { Config._default = Types.EventingEnabled,
+      Config._envVar = "HASURA_GRAPHQL_DISABLE_EVENTING",
+      Config._helpMessage =
+        "Disable the eventing subsystem entirely: event triggers, "
+          <> "cron triggers, scheduled events, and async actions. "
+          <> "Useful for migration jobs and other transient instances "
+          <> "where these background pollers compete with the workload "
+          <> "for database resources."
     }
 
 parseSchemaPollInterval :: Opt.Parser (Maybe Config.OptionalInterval)
@@ -1566,6 +1609,26 @@ webSocketMessageRateLimitWindowOption =
       Config._helpMessage = "Time window in seconds for WebSocket message rate limiting (default: 1)"
     }
 
+parseLogMaskedVariables :: Opt.Parser (Maybe (HashSet Text))
+parseLogMaskedVariables =
+  Opt.optional
+    $ Opt.option
+      (Opt.eitherReader Env.fromEnv)
+      ( Opt.long "log-masked-variables"
+          <> Opt.help (Config._helpMessage logMaskedVariablesOption)
+      )
+
+logMaskedVariablesOption :: Config.Option (HashSet Text)
+logMaskedVariablesOption =
+  Config.Option
+    { Config._default = HashSet.empty,
+      Config._envVar = "HASURA_GRAPHQL_LOG_MASKED_VARIABLES",
+      Config._helpMessage =
+        "Comma separated list of variable names to mask in query logs "
+          <> "(default: none). When set, the values of these variables will be "
+          <> "replaced with \"[MASKED]\" in query-log output."
+    }
+
 --------------------------------------------------------------------------------
 -- Pretty Printer
 
@@ -1656,6 +1719,7 @@ serveCmdFooter =
         Config.optionPP webSocketKeepAliveOption,
         Config.optionPP inferFunctionPermsOption,
         Config.optionPP enableMaintenanceModeOption,
+        Config.optionPP disableEventingOption,
         Config.optionPP schemaPollIntervalOption,
         Config.optionPP experimentalFeaturesOption,
         Config.optionPP eventsFetchBatchSizeOption,
@@ -1680,6 +1744,8 @@ serveCmdFooter =
         Config.optionPP webSocketFramePayloadSizeLimitOption,
         Config.optionPP webSocketMessageDataSizeLimitOption,
         Config.optionPP webSocketMessageRateLimitOption,
-        Config.optionPP webSocketMessageRateLimitWindowOption
+        Config.optionPP webSocketMessageRateLimitWindowOption,
+        Config.optionPP logMaskedVariablesOption,
+        Config.optionPP enableRelayOption
       ]
     eventEnvs = [Config.optionPP graphqlEventsHttpPoolSizeOption, Config.optionPP graphqlEventsFetchIntervalOption]

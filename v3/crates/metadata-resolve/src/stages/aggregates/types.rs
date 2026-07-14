@@ -9,7 +9,7 @@ use open_dds::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use lang_graphql::ast::common::{self as ast};
+use graphql_types::{self as ast};
 
 use crate::{Qualified, QualifiedTypeName, QualifiedTypeReference};
 
@@ -304,7 +304,7 @@ impl ContextualError for AggregateExpressionError {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone, derive_more::Display)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, derive_more::with_trait::Display)]
 pub enum CountAggregateType {
     #[display("count")]
     Count,

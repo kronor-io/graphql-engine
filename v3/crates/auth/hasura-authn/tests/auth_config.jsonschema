@@ -65,6 +65,26 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "title": "AuthConfigV4",
+      "type": "object",
+      "required": [
+        "definition",
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "enum": [
+            "v4"
+          ]
+        },
+        "definition": {
+          "$ref": "#/definitions/AuthConfigV4"
+        }
+      },
+      "additionalProperties": false
     }
   ],
   "definitions": {
@@ -147,7 +167,7 @@
       "description": "The configuration of the authentication webhook.",
       "examples": [
         {
-          "url": "http://auth_hook:3050/validate-request",
+          "url": "http://auth_hook:3060/validate-request",
           "method": "Post"
         }
       ],
@@ -365,36 +385,11 @@
         }
       ]
     },
-    "AuthHookConfigV3Body": {
-      "$id": "https://hasura.io/jsonschemas/metadata/AuthHookConfigV3Body",
-      "title": "AuthHookConfigV3Body",
-      "description": "The configuration for the body to be sent to the POST auth hook.",
-      "examples": [
-        {
-          "headers": {
-            "forward": [
-              "Authorization"
-            ],
-            "additional": {}
-          }
-        }
-      ],
-      "type": "object",
-      "properties": {
-        "headers": {
-          "description": "The configuration for the headers to be sent as part of the body to the POST auth hook.",
-          "default": null,
-          "anyOf": [
-            {
-              "$ref": "#/definitions/AuthHookConfigV3Headers"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
+    "OpenDdSessionVariable": {
+      "$id": "https://hasura.io/jsonschemas/metadata/OpenDdSessionVariable",
+      "title": "OpenDdSessionVariable",
+      "description": "Used to represent the name of a session variable, like \"x-hasura-role\".",
+      "type": "string"
     },
     "JWTClaimsMappingPathEntry_for_Role": {
       "$id": "https://hasura.io/jsonschemas/metadata/JWTClaimsMappingPathEntry_for_Role",
@@ -964,7 +959,7 @@
         {
           "method": "GET",
           "url": {
-            "value": "http://auth_hook:3050/validate-request"
+            "value": "http://auth_hook:3060/validate-request"
           },
           "customHeadersConfig": {
             "headers": {
@@ -985,7 +980,7 @@
           "examples": [
             {
               "url": {
-                "value": "http://auth_hook:3050/validate-request"
+                "value": "http://auth_hook:3060/validate-request"
               },
               "customHeadersConfig": {
                 "headers": {
@@ -1040,7 +1035,7 @@
           "examples": [
             {
               "url": {
-                "value": "http://auth_hook:3050/validate-request"
+                "value": "http://auth_hook:3060/validate-request"
               },
               "customHeadersConfig": {
                 "headers": {
@@ -1241,6 +1236,115 @@
               "type": "null"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AuthHookConfigV3Body": {
+      "$id": "https://hasura.io/jsonschemas/metadata/AuthHookConfigV3Body",
+      "title": "AuthHookConfigV3Body",
+      "description": "The configuration for the body to be sent to the POST auth hook.",
+      "examples": [
+        {
+          "headers": {
+            "forward": [
+              "Authorization"
+            ],
+            "additional": {}
+          }
+        }
+      ],
+      "type": "object",
+      "properties": {
+        "headers": {
+          "description": "The configuration for the headers to be sent as part of the body to the POST auth hook.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuthHookConfigV3Headers"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AuthConfigV4": {
+      "$id": "https://hasura.io/jsonschemas/metadata/AuthConfigV4",
+      "title": "AuthConfigV4",
+      "description": "Definition of the authentication configuration v4, used by the API server.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/AuthModeConfigV3"
+        },
+        "alternativeModes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/AlternativeMode"
+          }
+        },
+        "sessionVariableToTraceAttributeMap": {
+          "description": "Optional mapping of session variables to trace attributes. When configured, the specified session variable values will be extracted after authentication and propagated as trace context to downstream services. Works with all auth modes (JWT, webhook, noAuth). For webhook auth, explicitly returned baggage values take precedence over values from this mapping for the same key.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/SessionVariableToTraceAttributeMapping"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AlternativeMode": {
+      "$id": "https://hasura.io/jsonschemas/metadata/AlternativeMode",
+      "title": "AlternativeMode",
+      "description": "Alternative Authentication Modes",
+      "type": "object",
+      "required": [
+        "config",
+        "identifier"
+      ],
+      "properties": {
+        "identifier": {
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/definitions/AuthModeConfigV3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SessionVariableToTraceAttributeMapping": {
+      "$id": "https://hasura.io/jsonschemas/metadata/SessionVariableToTraceAttributeMapping",
+      "title": "SessionVariableToTraceAttributeMapping",
+      "description": "Mapping of a session variable to a trace attribute. The session variable value from the authenticated identity will be propagated as a trace attribute to downstream services.",
+      "type": "object",
+      "required": [
+        "sessionVariable",
+        "traceAttribute"
+      ],
+      "properties": {
+        "sessionVariable": {
+          "description": "The session variable name (e.g. \"x-hasura-tenant-id\").",
+          "allOf": [
+            {
+              "$ref": "#/definitions/OpenDdSessionVariable"
+            }
+          ]
+        },
+        "traceAttribute": {
+          "description": "The trace attribute key to use when propagating this value (e.g. \"tenant-id\").",
+          "type": "string"
         }
       },
       "additionalProperties": false

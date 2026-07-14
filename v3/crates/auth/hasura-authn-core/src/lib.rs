@@ -7,7 +7,7 @@ use axum::{
 };
 use axum_core::body::Body;
 use schemars::JsonSchema;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -26,7 +26,15 @@ pub use open_dds::{
     session_variables::{SESSION_VARIABLE_ROLE, SessionVariableName, SessionVariableReference},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, derive_more::Display)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::with_trait::Display,
+)]
 /// Value of a session variable, used to capture session variable input from parsed sources (jwt, webhook, etc)
 /// and unparsed sources (http headers)
 pub enum SessionVariableValue {
@@ -93,17 +101,41 @@ impl From<JsonSessionVariableValue> for SessionVariableValue {
 #[schemars(rename = "SessionVariableValue")] // Renamed to keep json schema compatibility
 pub struct JsonSessionVariableValue(pub serde_json::Value);
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionVariables(BTreeMap<SessionVariableName, SessionVariableValue>);
 
 impl SessionVariables {
     pub fn get(&self, session_variable: &SessionVariableName) -> Option<&SessionVariableValue> {
         self.0.get(session_variable)
     }
+
+    pub fn iter(&self) -> btree_map::Iter<'_, SessionVariableName, SessionVariableValue> {
+        self.0.iter()
+    }
 }
 
+impl IntoIterator for SessionVariables {
+    type Item = (SessionVariableName, SessionVariableValue);
+    type IntoIter = btree_map::IntoIter<SessionVariableName, SessionVariableValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a SessionVariables {
+    type Item = (
+        &'a open_dds::session_variables::SessionVariableName,
+        &'a SessionVariableValue,
+    );
+    type IntoIter =
+        btree_map::Iter<'a, open_dds::session_variables::SessionVariableName, SessionVariableValue>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 // The privilege with which a request is executed
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub role: Role,
     pub variables: SessionVariables,
@@ -131,6 +163,12 @@ impl RoleAuthorization {
         };
         let mut session_variables = allowed_client_session_variables;
         session_variables.extend(self.session_variables.clone());
+
+        session_variables.insert(
+            SESSION_VARIABLE_ROLE,
+            SessionVariableValue::Parsed(serde_json::json!(self.role.to_string())),
+        );
+
         Session {
             role: self.role.clone(),
             variables: SessionVariables(session_variables),
@@ -166,7 +204,7 @@ impl Identity {
     pub fn get_role_authorization(
         &self,
         role: Option<&Role>,
-    ) -> Result<Cow<RoleAuthorization>, SessionError> {
+    ) -> Result<Cow<'_, RoleAuthorization>, SessionError> {
         match self {
             Identity::RoleEmulationEnabled(admin_role) => Ok(Cow::Owned(RoleAuthorization {
                 role: role.cloned().unwrap_or(admin_role.clone()),
@@ -191,6 +229,35 @@ impl Identity {
                 }
             }
         }
+    }
+}
+
+/// Response from authentication containing the identity and optional baggage
+/// to be propagated in the OpenTelemetry context.
+///
+/// Baggage items returned from auth webhooks will be attached to the current
+/// context and automatically added as attributes to all subsequent spans
+/// via the `BaggageSpanProcessor`.
+#[derive(Clone, Debug)]
+pub struct AuthenticateResponse {
+    pub identity: Identity,
+    /// Baggage key-value pairs to be added to the OpenTelemetry context.
+    /// These will be propagated to downstream services and added as span attributes.
+    pub baggage: Vec<tracing_util::KeyValue>,
+}
+
+impl AuthenticateResponse {
+    /// Create a new AuthenticateResponse with the given identity and no baggage.
+    pub fn new(identity: Identity) -> Self {
+        Self {
+            identity,
+            baggage: Vec::new(),
+        }
+    }
+
+    /// Create a new AuthenticateResponse with the given identity and baggage.
+    pub fn with_baggage(identity: Identity, baggage: Vec<tracing_util::KeyValue>) -> Self {
+        Self { identity, baggage }
     }
 }
 
@@ -310,6 +377,11 @@ mod tests {
         let mut expected_session_variables = client_session_variables.clone();
 
         expected_session_variables.insert(
+            SessionVariableName::from_str("x-hasura-role").unwrap(),
+            SessionVariableValue::Parsed("test-role".into()),
+        );
+
+        expected_session_variables.insert(
             SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
@@ -364,6 +436,12 @@ mod tests {
             SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
+
+        expected_session_variables.insert(
+            SessionVariableName::from_str("x-hasura-role").unwrap(),
+            SessionVariableValue::Parsed("test-role".into()),
+        );
+
         pa::assert_eq!(
             Session {
                 role: Role::new("test-role"),
@@ -406,6 +484,11 @@ mod tests {
         expected_session_variables.insert(
             SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
+        );
+
+        expected_session_variables.insert(
+            SessionVariableName::from_str("x-hasura-role").unwrap(),
+            SessionVariableValue::Parsed("test-role".into()),
         );
 
         pa::assert_eq!(

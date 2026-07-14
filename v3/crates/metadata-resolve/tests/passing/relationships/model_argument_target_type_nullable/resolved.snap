@@ -99,35 +99,73 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                     graphql_input_type_name: None,
                     description: None,
                 },
-                type_output_permissions: {
-                    Role(
-                        "user",
-                    ): TypeOutputPermission {
-                        allowed_fields: {
-                            FieldName(
-                                Identifier(
-                                    "AlbumId",
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [
+                        AllowFields {
+                            fields: [
+                                FieldName(
+                                    Identifier(
+                                        "AlbumId",
+                                    ),
                                 ),
-                            ),
-                            FieldName(
-                                Identifier(
-                                    "ArtistTenantId",
+                                FieldName(
+                                    Identifier(
+                                        "ArtistTenantId",
+                                    ),
                                 ),
-                            ),
-                            FieldName(
-                                Identifier(
-                                    "ArtistId",
+                                FieldName(
+                                    Identifier(
+                                        "ArtistId",
+                                    ),
                                 ),
-                            ),
-                            FieldName(
-                                Identifier(
-                                    "Title",
+                                FieldName(
+                                    Identifier(
+                                        "Title",
+                                    ),
+                                ),
+                            ],
+                            condition: Some(
+                                ConditionHash(
+                                    5261800314210927403,
                                 ),
                             ),
                         },
+                    ],
+                    by_role: {
+                        Role(
+                            "user",
+                        ): TypeOutputPermission {
+                            allowed_fields: {
+                                FieldName(
+                                    Identifier(
+                                        "AlbumId",
+                                    ),
+                                ),
+                                FieldName(
+                                    Identifier(
+                                        "ArtistTenantId",
+                                    ),
+                                ),
+                                FieldName(
+                                    Identifier(
+                                        "ArtistId",
+                                    ),
+                                ),
+                                FieldName(
+                                    Identifier(
+                                        "Title",
+                                    ),
+                                ),
+                            },
+                        },
                     },
+                    uses_rules_based_auth: false,
                 },
-                type_input_permissions: {},
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {
                     RelationshipName(
                         Identifier(
@@ -595,25 +633,53 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                     graphql_input_type_name: None,
                     description: None,
                 },
-                type_output_permissions: {
-                    Role(
-                        "user",
-                    ): TypeOutputPermission {
-                        allowed_fields: {
-                            FieldName(
-                                Identifier(
-                                    "ArtistId",
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [
+                        AllowFields {
+                            fields: [
+                                FieldName(
+                                    Identifier(
+                                        "ArtistId",
+                                    ),
                                 ),
-                            ),
-                            FieldName(
-                                Identifier(
-                                    "Name",
+                                FieldName(
+                                    Identifier(
+                                        "Name",
+                                    ),
+                                ),
+                            ],
+                            condition: Some(
+                                ConditionHash(
+                                    5261800314210927403,
                                 ),
                             ),
                         },
+                    ],
+                    by_role: {
+                        Role(
+                            "user",
+                        ): TypeOutputPermission {
+                            allowed_fields: {
+                                FieldName(
+                                    Identifier(
+                                        "ArtistId",
+                                    ),
+                                ),
+                                FieldName(
+                                    Identifier(
+                                        "Name",
+                                    ),
+                                ),
+                            },
+                        },
                     },
+                    uses_rules_based_auth: false,
                 },
-                type_input_permissions: {},
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {
@@ -977,6 +1043,7 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                                         },
                                     ),
                                     supports_relational_queries: None,
+                                    supports_relational_mutations: None,
                                 },
                             },
                             collection: CollectionName(
@@ -1275,6 +1342,22 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                     global_id_source: None,
                     apollo_federation_key_source: None,
                     aggregate_expression: None,
+                    unique_identifiers: [
+                        {
+                            FieldName(
+                                Identifier(
+                                    "AlbumId",
+                                ),
+                            ): QualifiedTypeReference {
+                                underlying_type: Named(
+                                    Inbuilt(
+                                        Int,
+                                    ),
+                                ),
+                                nullable: false,
+                            },
+                        },
+                    ],
                     raw: ModelRaw {
                         filter_expression_type: None,
                         graphql: Some(
@@ -1318,13 +1401,42 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                         ),
                     },
                 },
-                select_permissions: {
-                    Role(
-                        "user",
-                    ): SelectPermission {
-                        filter: AllowAll,
-                        argument_presets: {},
-                        allow_subscriptions: false,
+                arguments: {},
+                permissions: ModelPermissions {
+                    authorization_rules: [
+                        Access {
+                            condition: Some(
+                                ConditionHash(
+                                    5261800314210927403,
+                                ),
+                            ),
+                            allow_or_deny: Allow,
+                        },
+                        Subscription {
+                            condition: Some(
+                                ConditionHash(
+                                    5261800314210927403,
+                                ),
+                            ),
+                            allow_or_deny: Deny,
+                        },
+                    ],
+                    by_role: {
+                        Role(
+                            "user",
+                        ): ModelPermission {
+                            select: Some(
+                                SelectPermission {
+                                    filter: AllowAll,
+                                    allow_subscriptions: false,
+                                },
+                            ),
+                            input: Some(
+                                ModelInputPermission {
+                                    argument_presets: {},
+                                },
+                            ),
+                        },
                     },
                 },
                 filter_expression_type: None,
@@ -1340,25 +1452,13 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                                     Identifier(
                                         "AlbumId",
                                     ),
-                                ): UniqueIdentifierField {
-                                    field_type: QualifiedTypeReference {
-                                        underlying_type: Named(
-                                            Inbuilt(
-                                                Int,
-                                            ),
+                                ): QualifiedTypeReference {
+                                    underlying_type: Named(
+                                        Inbuilt(
+                                            Int,
                                         ),
-                                        nullable: false,
-                                    },
-                                    ndc_column: Some(
-                                        NdcColumnForComparison {
-                                            column: DataConnectorColumnName(
-                                                "AlbumId",
-                                            ),
-                                            equal_operator: DataConnectorOperatorName(
-                                                "_eq",
-                                            ),
-                                        },
                                     ),
+                                    nullable: false,
                                 },
                             },
                             description: None,
@@ -1394,6 +1494,7 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                     ),
                     filter_input_type_name: None,
                 },
+                description: None,
             },
             Qualified {
                 subgraph: SubgraphName(
@@ -1608,6 +1709,7 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                                         },
                                     ),
                                     supports_relational_queries: None,
+                                    supports_relational_mutations: None,
                                 },
                             },
                             collection: CollectionName(
@@ -1792,6 +1894,22 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                     global_id_source: None,
                     apollo_federation_key_source: None,
                     aggregate_expression: None,
+                    unique_identifiers: [
+                        {
+                            FieldName(
+                                Identifier(
+                                    "ArtistId",
+                                ),
+                            ): QualifiedTypeReference {
+                                underlying_type: Named(
+                                    Inbuilt(
+                                        Int,
+                                    ),
+                                ),
+                                nullable: false,
+                            },
+                        },
+                    ],
                     raw: ModelRaw {
                         filter_expression_type: None,
                         graphql: Some(
@@ -1835,13 +1953,60 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                         ),
                     },
                 },
-                select_permissions: {
-                    Role(
-                        "user",
-                    ): SelectPermission {
-                        filter: AllowAll,
-                        argument_presets: {},
-                        allow_subscriptions: false,
+                arguments: {
+                    ArgumentName(
+                        Identifier(
+                            "tenantId",
+                        ),
+                    ): ArgumentInfo {
+                        argument_type: QualifiedTypeReference {
+                            underlying_type: Named(
+                                Inbuilt(
+                                    Int,
+                                ),
+                            ),
+                            nullable: true,
+                        },
+                        description: None,
+                        argument_kind: Other,
+                        type_representation: None,
+                    },
+                },
+                permissions: ModelPermissions {
+                    authorization_rules: [
+                        Access {
+                            condition: Some(
+                                ConditionHash(
+                                    5261800314210927403,
+                                ),
+                            ),
+                            allow_or_deny: Allow,
+                        },
+                        Subscription {
+                            condition: Some(
+                                ConditionHash(
+                                    5261800314210927403,
+                                ),
+                            ),
+                            allow_or_deny: Deny,
+                        },
+                    ],
+                    by_role: {
+                        Role(
+                            "user",
+                        ): ModelPermission {
+                            select: Some(
+                                SelectPermission {
+                                    filter: AllowAll,
+                                    allow_subscriptions: false,
+                                },
+                            ),
+                            input: Some(
+                                ModelInputPermission {
+                                    argument_presets: {},
+                                },
+                            ),
+                        },
                     },
                 },
                 filter_expression_type: None,
@@ -1857,25 +2022,13 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                                     Identifier(
                                         "ArtistId",
                                     ),
-                                ): UniqueIdentifierField {
-                                    field_type: QualifiedTypeReference {
-                                        underlying_type: Named(
-                                            Inbuilt(
-                                                Int,
-                                            ),
+                                ): QualifiedTypeReference {
+                                    underlying_type: Named(
+                                        Inbuilt(
+                                            Int,
                                         ),
-                                        nullable: false,
-                                    },
-                                    ndc_column: Some(
-                                        NdcColumnForComparison {
-                                            column: DataConnectorColumnName(
-                                                "ArtistId",
-                                            ),
-                                            equal_operator: DataConnectorOperatorName(
-                                                "_eq",
-                                            ),
-                                        },
                                     ),
+                                    nullable: false,
                                 },
                             },
                             description: None,
@@ -1911,6 +2064,7 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
                     ),
                     filter_input_type_name: None,
                 },
+                description: None,
             },
         },
         commands: {},
@@ -1925,6 +2079,7 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
             scalars: {},
         },
         aggregate_expressions: {},
+        views: {},
         graphql_config: GlobalGraphqlConfig {
             query_root_type_name: TypeName(
                 Name(
@@ -1959,13 +2114,39 @@ input_file: crates/metadata-resolve/tests/passing/relationships/model_argument_t
         },
         plugin_configs: LifecyclePluginConfigs {
             pre_parse_plugins: [],
-            pre_response_plugins: [],
+            pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks {
+                sync_hooks: [],
+                async_hooks: [],
+            },
             pre_route_plugins: [],
+            pre_ndc_request_plugins: {},
+            pre_ndc_response_plugins: {},
         },
         roles: {
             Role(
                 "user",
             ),
+        },
+        conditions: Conditions {
+            conditions: {
+                ConditionHash(
+                    5261800314210927403,
+                ): BinaryOperation {
+                    op: Equals,
+                    left: SessionVariable(
+                        SessionVariableReference {
+                            name: SessionVariableName(
+                                "x-hasura-role",
+                            ),
+                            passed_as_json: false,
+                            disallow_unknown_fields: false,
+                        },
+                    ),
+                    right: Literal(
+                        String("user"),
+                    ),
+                },
+            },
         },
         runtime_flags: RuntimeFlags(
             {},

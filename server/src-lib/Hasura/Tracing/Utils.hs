@@ -10,6 +10,7 @@ module Hasura.Tracing.Utils
 where
 
 import Control.Lens
+import Data.CaseInsensitive qualified as CI
 import Data.String
 import Data.Text.Extended (toTxt)
 import Hasura.Prelude
@@ -21,9 +22,9 @@ import Hasura.Tracing.Propagator.B3 (b3TraceContextPropagator)
 import Hasura.Tracing.Propagator.W3CTraceContext (w3cTraceContextPropagator)
 import Hasura.Tracing.TraceId (SpanKind (SKClient))
 import Network.HTTP.Client.Transformable qualified as HTTP
-import OpenTelemetry.Trace.Core qualified as OpenTelemetry
 import OpenTelemetry.Context.ThreadLocal qualified as OpenTelemetry
 import OpenTelemetry.Propagator qualified as Propagator
+import OpenTelemetry.Trace.Core qualified as OpenTelemetry
 
 -- | Wrap the execution of an HTTP request in a span in the current
 -- trace. Despite its name, this function does not start a new trace, and the
@@ -48,10 +49,14 @@ traceHTTPRequest _propagator req f = do
     case maybeTraceContext of
       Nothing -> f req
       Just traceContext -> do
-        let propagator = OpenTelemetry.getTracerProviderPropagators $ OpenTelemetry.getTracerTracerProvider $ tcTracer traceContext
-        let reqBytes = HTTP.getReqSize req
-        context <- liftIO OpenTelemetry.getContext
-        headers <- Propagator.inject propagator context []
+        -- Propagate the live OpenTelemetry context (real trace/span ids), not
+        -- the hasura TraceContext (kronor fixes its ids). hs-opentelemetry
+        -- 1.0.0.0's inject writes into a TextMap, so project that back to headers.
+        let otelPropagator = OpenTelemetry.getTracerProviderPropagators $ OpenTelemetry.getTracerTracerProvider $ tcTracer traceContext
+            reqBytes = HTTP.getReqSize req
+        otelContext <- liftIO OpenTelemetry.getContext
+        injected <- liftIO $ Propagator.inject otelPropagator otelContext Propagator.emptyTextMap
+        let headers = [(CI.mk (txtToBs k), txtToBs v) | (k, v) <- Propagator.textMapToList injected]
         attachMetadata [
             ("http.request.body.size", fromString (show reqBytes))
           , ("http.request.method", method)

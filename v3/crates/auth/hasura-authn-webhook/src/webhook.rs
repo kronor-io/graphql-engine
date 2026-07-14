@@ -3,15 +3,18 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use auth_base::{Identity, Role, RoleAuthorization, SessionVariableName, SessionVariableValue};
+use auth_base::{
+    AuthenticateResponse, Identity, Role, RoleAuthorization, SessionVariableName,
+    SessionVariableValue,
+};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use reqwest::{Url, header::ToStrError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError};
 
+use all_or_list::AllOrList;
 use hasura_authn_core as auth_base;
 use open_dds::{EnvironmentValue, session_variables};
 use schemars::JsonSchema;
-use serde_json::Value;
 use tracing_util::{ErrorVisibility, SpanVisibility, TraceableError};
 
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +27,7 @@ pub enum Error {
         error: ToStrError,
     },
     #[error("The Authentication hook has denied to execute the request.")]
-    AuthenticationFailed,
+    AuthenticationFailed { status: reqwest::StatusCode },
     #[error("Internal Error - {0}")]
     Internal(#[from] InternalError),
 }
@@ -65,16 +68,18 @@ impl Error {
     pub fn to_status_code(&self) -> StatusCode {
         match self {
             Error::ErrorInConvertingHeaderValueToString { .. } => StatusCode::BAD_REQUEST,
-            Error::AuthenticationFailed => StatusCode::FORBIDDEN,
+            Error::AuthenticationFailed { status } => {
+                // Convert reqwest::StatusCode to axum::http::StatusCode
+                StatusCode::from_str(status.as_str()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            }
             Error::Internal(_e) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     pub fn into_middleware_error(self) -> engine_types::MiddlewareError {
         let is_internal = match &self {
-            Error::ErrorInConvertingHeaderValueToString { .. } | Error::AuthenticationFailed => {
-                false
-            }
+            Error::ErrorInConvertingHeaderValueToString { .. }
+            | Error::AuthenticationFailed { .. } => false,
             Error::Internal(_e) => true,
         };
         engine_types::MiddlewareError {
@@ -127,7 +132,7 @@ impl AuthHookConfig {
         serde_json::from_str(
             r#"
             {
-                "url": "http://auth_hook:3050/validate-request",
+                "url": "http://auth_hook:3060/validate-request",
                 "method": "Post"
             }
         "#,
@@ -172,7 +177,7 @@ impl AuthHookConfigV3 {
             {
                 "method": "GET",
                 "url": {
-                    "value": "http://auth_hook:3050/validate-request"
+                    "value": "http://auth_hook:3060/validate-request"
                 },
                 "customHeadersConfig": {
                     "headers": {
@@ -215,7 +220,7 @@ impl AuthHookConfigV3GET {
             r#"
             {
                 "url": {
-                    "value": "http://auth_hook:3050/validate-request"
+                    "value": "http://auth_hook:3060/validate-request"
                 },
                 "customHeadersConfig": {
                     "headers": {
@@ -281,7 +286,7 @@ impl AuthHookConfigV3POST {
             r#"
             {
                 "url": {
-                    "value": "http://auth_hook:3050/validate-request"
+                    "value": "http://auth_hook:3060/validate-request"
                 },
                 "customHeadersConfig": {
                     "headers": {
@@ -372,78 +377,6 @@ impl AuthHookConfigV3Headers {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
-#[serde(untagged)]
-#[schemars(title = "AllOrList")]
-#[schemars(example = "AllOrList::<String>::example")]
-/// A list of items or a wildcard.
-pub enum AllOrList<T> {
-    All(All),
-    List(Vec<T>),
-}
-
-impl<T: PartialEq> serde_ext::HasDefaultForSerde for AllOrList<T> {
-    fn ser_default() -> Self {
-        AllOrList::All(All(()))
-    }
-}
-
-impl<T> AllOrList<T>
-where
-    for<'de> T: Deserialize<'de>,
-{
-    fn example() -> Self {
-        serde_json::from_str(r#""*""#).unwrap()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Wildcard: match all items
-pub struct All(());
-
-impl Serialize for All {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str("*")
-    }
-}
-
-impl<'de> Deserialize<'de> for All {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = Value::deserialize(deserializer)?;
-        match value {
-            Value::String(s) if s == "*" => Ok(All(())),
-            _ => Err(SerdeDeError::custom("Invalid value for All, expected '*'")),
-        }
-    }
-}
-
-impl schemars::JsonSchema for All {
-    fn schema_name() -> String {
-        "All".to_string()
-    }
-
-    fn json_schema(_gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                title: Some(Self::schema_name()),
-                description: Some("Wildcard: match all items".to_owned()),
-                ..Default::default()
-            })),
-            instance_type: Some(schemars::schema::SingleOrVec::Single(Box::new(
-                schemars::schema::InstanceType::String,
-            ))),
-            enum_values: Some(vec![serde_json::Value::String("*".to_string())]),
-            ..Default::default()
-        })
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "AuthHookConfigV3Body")]
@@ -477,7 +410,7 @@ async fn make_auth_hook_request(
     auth_hook_url: &Url,
     request: AuthHookRequest,
     allow_role_emulation_for: Option<&Role>,
-) -> Result<auth_base::Identity, Error> {
+) -> Result<AuthenticateResponse, Error> {
     let tracer = tracing_util::global_tracer();
     let http_request_builder = match request {
         AuthHookRequest::Get { headers } => {
@@ -523,8 +456,11 @@ async fn make_auth_hook_request(
         .await?;
 
     match response.status() {
-        reqwest::StatusCode::UNAUTHORIZED => Err(Error::AuthenticationFailed),
         reqwest::StatusCode::OK => {
+            // Extract baggage from response headers before consuming the response body
+            let response_headers = response.headers().clone();
+            let baggage = tracing_util::extract_baggage_from_headers(&response_headers);
+
             let auth_hook_response: HashMap<String, serde_json::Value> =
                 response.json().await.map_err(InternalError::ReqwestError)?;
             let mut session_variables = HashMap::new();
@@ -554,7 +490,7 @@ async fn make_auth_hook_request(
             let mut allowed_roles = HashMap::new();
             allowed_roles.insert(role.clone(), role_authorization);
 
-            Ok(match allow_role_emulation_for {
+            let identity = match allow_role_emulation_for {
                 Some(emulation_role) => {
                     if role == *emulation_role {
                         Identity::RoleEmulationEnabled(role)
@@ -569,9 +505,13 @@ async fn make_auth_hook_request(
                     default_role: role,
                     allowed_roles,
                 },
-            })
+            };
+
+            Ok(AuthenticateResponse::with_baggage(identity, baggage))
         }
-        status_code => Err(InternalError::AuthHookUnexpectedStatus(status_code))?,
+        status_code => Err(Error::AuthenticationFailed {
+            status: status_code,
+        }),
     }
 }
 
@@ -584,7 +524,7 @@ pub async fn authenticate_request(
     auth_hook_config: &AuthHookConfig,
     client_headers: &HeaderMap,
     allow_role_emulation_for: Option<&Role>,
-) -> Result<auth_base::Identity, Error> {
+) -> Result<AuthenticateResponse, Error> {
     let tracer = tracing_util::global_tracer();
     tracer
         .in_span_async(
@@ -616,7 +556,7 @@ pub async fn authenticate_request_v2(
     auth_hook_config: &AuthHookConfigV3,
     client_headers: &HeaderMap,
     allow_role_emulation_for: Option<&Role>,
-) -> Result<auth_base::Identity, Error> {
+) -> Result<AuthenticateResponse, Error> {
     let tracer = tracing_util::global_tracer();
     tracer
         .in_span_async(
@@ -837,9 +777,10 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use all_or_list::All;
     use auth_base::Role;
     use mockito;
-    use rand::{Rng, rng};
+    use rand::{RngExt, rng};
     use reqwest::header::CONTENT_TYPE;
     use serde_json::json;
 
@@ -904,7 +845,7 @@ mod tests {
             },
         );
         assert_eq!(
-            auth_response,
+            auth_response.identity,
             Identity::Specific {
                 default_role: Role::new("test-role"),
                 allowed_roles: expected_allowed_roles
@@ -977,12 +918,113 @@ mod tests {
             },
         );
         assert_eq!(
-            auth_response,
+            auth_response.identity,
             Identity::Specific {
                 default_role: Role::new("test-role"),
                 allowed_roles: expected_allowed_roles
             }
         );
+    }
+
+    #[tokio::test]
+    // This test verifies that baggage from the webhook response headers is extracted
+    async fn test_webhook_response_baggage_is_extracted() {
+        // Request a new server from the pool
+        let mut server = mockito::Server::new_async().await;
+
+        let url = server.url();
+
+        // Create a mock that returns a baggage header
+        let mock = server
+            .mock("POST", "/validate-request")
+            .match_body(r#"{"headers":{"foo":"baz"}}"#)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_header("baggage", "user-id=123,org-id=456")
+            .with_body(
+                r#"{
+                      "x-hasura-role": "test-role",
+                      "x-hasura-test-role-id": "1"
+                   }"#,
+            )
+            .create();
+
+        let http_client = reqwest::Client::new();
+
+        let webhook_url = url + "/validate-request";
+
+        let auth_hook_config_str =
+            format!("{{ \"url\": \"{webhook_url}\", \"method\": \"Post\"  }}");
+
+        let auth_hook_config: AuthHookConfig = serde_json::from_str(&auth_hook_config_str).unwrap();
+
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("foo", "baz".parse().unwrap());
+
+        let request = get_auth_hook_request_v1(&auth_hook_config.method, &client_headers);
+
+        let auth_response =
+            make_auth_hook_request(&http_client, &auth_hook_config.url, request, None)
+                .await
+                .unwrap();
+
+        mock.assert(); // Make sure the webhook has been called.
+
+        // Verify baggage was extracted from the response
+        assert_eq!(auth_response.baggage.len(), 2);
+
+        let baggage_map: HashMap<String, String> = auth_response
+            .baggage
+            .iter()
+            .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+            .collect();
+        assert_eq!(baggage_map.get("user-id").unwrap(), "123");
+        assert_eq!(baggage_map.get("org-id").unwrap(), "456");
+    }
+
+    #[tokio::test]
+    // This test verifies that no baggage is returned when the webhook doesn't include a baggage header
+    async fn test_webhook_response_without_baggage() {
+        let mut server = mockito::Server::new_async().await;
+
+        let url = server.url();
+
+        let mock = server
+            .mock("POST", "/validate-request")
+            .match_body(r#"{"headers":{"foo":"baz"}}"#)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                      "x-hasura-role": "test-role",
+                      "x-hasura-test-role-id": "1"
+                   }"#,
+            )
+            .create();
+
+        let http_client = reqwest::Client::new();
+
+        let webhook_url = url + "/validate-request";
+
+        let auth_hook_config_str =
+            format!("{{ \"url\": \"{webhook_url}\", \"method\": \"Post\"  }}");
+
+        let auth_hook_config: AuthHookConfig = serde_json::from_str(&auth_hook_config_str).unwrap();
+
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("foo", "baz".parse().unwrap());
+
+        let request = get_auth_hook_request_v1(&auth_hook_config.method, &client_headers);
+
+        let auth_response =
+            make_auth_hook_request(&http_client, &auth_hook_config.url, request, None)
+                .await
+                .unwrap();
+
+        mock.assert();
+
+        // Verify no baggage was extracted
+        assert!(auth_response.baggage.is_empty());
     }
 
     #[tokio::test]
@@ -1055,7 +1097,7 @@ mod tests {
             },
         );
         assert_eq!(
-            auth_response,
+            auth_response.identity,
             Identity::Specific {
                 default_role: Role::new("test-role"),
                 allowed_roles: expected_allowed_roles
@@ -1111,7 +1153,10 @@ mod tests {
         mock.assert(); // Make sure the webhook has been called.
 
         let test_role = Role::new("test-admin-role");
-        assert_eq!(auth_response, Identity::RoleEmulationEnabled(test_role));
+        assert_eq!(
+            auth_response.identity,
+            Identity::RoleEmulationEnabled(test_role)
+        );
     }
 
     #[tokio::test]
@@ -1183,7 +1228,7 @@ mod tests {
             },
         );
         assert_eq!(
-            auth_response,
+            auth_response.identity,
             Identity::Specific {
                 default_role: test_role,
                 allowed_roles: expected_allowed_roles
@@ -1227,15 +1272,17 @@ mod tests {
 
         mock.assert(); // Make sure the webhook has been called.
 
+        let error = auth_response.unwrap_err();
         assert_eq!(
-            auth_response.unwrap_err().to_string(),
+            error.to_string(),
             "The Authentication hook has denied to execute the request."
         );
+        // Verify that the original 401 status code is preserved
+        assert_eq!(error.to_status_code(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    /// Test HTTP status codes returned by the webhook,
-    /// other than 200 and 401 are not recognized.
+    /// Test HTTP status codes returned by the webhook are preserved.
     async fn test_webhook_returning_arbitrary_status() {
         // Request a new server from the pool
         let mut server = mockito::Server::new_async().await;
@@ -1244,13 +1291,12 @@ mod tests {
 
         let mut rng = rng();
 
-        // Generate a random HTTP status code
-        let mut http_status_code: usize = rng.random_range(100..600);
-
-        // Make sure that it's not either 200/401.
-        while http_status_code == 200 || http_status_code == 401 {
-            http_status_code = rng.random_range(100..600);
-        }
+        // Use a list of common valid HTTP status codes (excluding 200 and 401)
+        let valid_status_codes = vec![
+            400, 403, 404, 405, 408, 409, 410, 429, 500, 501, 502, 503, 504,
+        ];
+        let random_index = rng.random_range(0..valid_status_codes.len());
+        let http_status_code = valid_status_codes[random_index];
 
         // Create a mock
         let mock = server
@@ -1279,15 +1325,54 @@ mod tests {
 
         mock.assert(); // Make sure the webhook has been called.
 
+        let error = auth_response.unwrap_err();
         assert_eq!(
-            auth_response
-                .unwrap_err()
-                .to_string()
-                .split('.')
-                .collect::<Vec<&str>>()[1]
-                .trim(),
-            "Only 200 and 401 response status are recognized"
+            error.to_string(),
+            "The Authentication hook has denied to execute the request."
         );
+        // Verify that the original status code is preserved
+        assert_eq!(
+            error.to_status_code(),
+            axum::http::StatusCode::from_str(&http_status_code.to_string()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    /// Test that 403 Forbidden status code is preserved (not converted to 500).
+    async fn test_webhook_returns_403_forbidden() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        // Create a mock that returns 403 Forbidden
+        let mock = server
+            .mock("POST", "/validate-request")
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .create();
+
+        let http_client = reqwest::Client::new();
+        let webhook_url = url + "/validate-request";
+        let auth_hook_config_str =
+            format!("{{ \"url\": \"{webhook_url}\", \"method\": \"Post\"  }}");
+        let auth_hook_config: AuthHookConfig = serde_json::from_str(&auth_hook_config_str).unwrap();
+
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("foo", "baz".parse().unwrap());
+        client_headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let request = get_auth_hook_request_v1(&auth_hook_config.method, &client_headers);
+        let auth_response =
+            make_auth_hook_request(&http_client, &auth_hook_config.url, request, None).await;
+
+        mock.assert();
+
+        let error = auth_response.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The Authentication hook has denied to execute the request."
+        );
+        // Verify that 403 is preserved (not converted to 500)
+        assert_eq!(error.to_status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
     #[test]

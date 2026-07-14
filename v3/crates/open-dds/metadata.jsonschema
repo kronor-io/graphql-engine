@@ -345,6 +345,53 @@
       "type": "string",
       "pattern": "^[_a-zA-Z][_a-zA-Z0-9]*$"
     },
+    "Allow": {
+      "$id": "https://hasura.io/jsonschemas/metadata/Allow",
+      "title": "Allow",
+      "description": "Allow access if the condition evaluates to `true`",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AllowRelationalOperations": {
+      "$id": "https://hasura.io/jsonschemas/metadata/AllowRelationalOperations",
+      "title": "AllowRelationalOperations",
+      "description": "Allow these relational operations if the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "operations"
+      ],
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RelationalOperation"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "ApolloFederationObjectKey": {
       "$id": "https://hasura.io/jsonschemas/metadata/ApolloFederationObjectKey",
       "title": "ApolloFederationObjectKey",
@@ -780,6 +827,49 @@
       },
       "additionalProperties": false
     },
+    "CommandAuthorizationRule": {
+      "$id": "https://hasura.io/jsonschemas/metadata/CommandAuthorizationRule",
+      "title": "CommandAuthorizationRule",
+      "description": "A rule that determines which commands and argument presets are available to a user",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "allow"
+          ],
+          "properties": {
+            "allow": {
+              "$ref": "#/definitions/Allow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "deny"
+          ],
+          "properties": {
+            "deny": {
+              "$ref": "#/definitions/Deny"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "presetArgument"
+          ],
+          "properties": {
+            "presetArgument": {
+              "$ref": "#/definitions/PresetArgument"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "CommandGraphQlDefinition": {
       "$id": "https://hasura.io/jsonschemas/metadata/CommandGraphQlDefinition",
       "title": "CommandGraphQlDefinition",
@@ -880,6 +970,47 @@
       },
       "additionalProperties": false
     },
+    "CommandPermissionOperand": {
+      "$id": "https://hasura.io/jsonschemas/metadata/CommandPermissionOperand",
+      "title": "CommandPermissionOperand",
+      "description": "Configuration for role-based command permissions",
+      "oneOf": [
+        {
+          "title": "RoleBased",
+          "description": "Definition of role-based permissions on an OpenDD command",
+          "type": "object",
+          "required": [
+            "roleBased"
+          ],
+          "properties": {
+            "roleBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CommandPermission"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "RulesBased",
+          "description": "Definition of a rules-based permissions on an OpenDD command",
+          "type": "object",
+          "required": [
+            "rulesBased"
+          ],
+          "properties": {
+            "rulesBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CommandAuthorizationRule"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "CommandPermissionsV1": {
       "$id": "https://hasura.io/jsonschemas/metadata/CommandPermissionsV1",
       "title": "CommandPermissionsV1",
@@ -904,6 +1035,35 @@
           "items": {
             "$ref": "#/definitions/CommandPermission"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommandPermissionsV2": {
+      "$id": "https://hasura.io/jsonschemas/metadata/CommandPermissionsV2",
+      "title": "CommandPermissionsV2",
+      "description": "Definition of permissions for an OpenDD command.",
+      "type": "object",
+      "required": [
+        "commandName",
+        "permissions"
+      ],
+      "properties": {
+        "commandName": {
+          "description": "The name of the command for which permissions are being defined.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CommandName"
+            }
+          ]
+        },
+        "permissions": {
+          "description": "The permissions for the command.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CommandPermissionOperand"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -1068,6 +1228,25 @@
       },
       "additionalProperties": false
     },
+    "Comparison": {
+      "$id": "https://hasura.io/jsonschemas/metadata/Comparison",
+      "title": "Comparison",
+      "description": "A left and right value for comparison",
+      "type": "object",
+      "required": [
+        "left",
+        "right"
+      ],
+      "properties": {
+        "left": {
+          "$ref": "#/definitions/ValueExpression"
+        },
+        "right": {
+          "$ref": "#/definitions/ValueExpression"
+        }
+      },
+      "additionalProperties": false
+    },
     "ComparisonOperator": {
       "$id": "https://hasura.io/jsonschemas/metadata/ComparisonOperator",
       "title": "ComparisonOperator",
@@ -1096,6 +1275,149 @@
         }
       },
       "additionalProperties": false
+    },
+    "Condition": {
+      "$id": "https://hasura.io/jsonschemas/metadata/Condition",
+      "title": "Condition",
+      "description": "A boolean expression used to determine if a rules-based permission should be applied.",
+      "oneOf": [
+        {
+          "description": "Combine multiple Conditions with `&&`",
+          "type": "object",
+          "required": [
+            "and"
+          ],
+          "properties": {
+            "and": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Condition"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Combine multiple Conditions with `||`",
+          "type": "object",
+          "required": [
+            "or"
+          ],
+          "properties": {
+            "or": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Condition"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Negate a Condition",
+          "type": "object",
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/definitions/Condition"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Compare two ValueExpressions for equality",
+          "type": "object",
+          "required": [
+            "equal"
+          ],
+          "properties": {
+            "equal": {
+              "$ref": "#/definitions/Comparison"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Is the left value contained in the right value? The right value must be an array type.",
+          "type": "object",
+          "required": [
+            "contains"
+          ],
+          "properties": {
+            "contains": {
+              "$ref": "#/definitions/Comparison"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Is the left value greater than the right value?",
+          "type": "object",
+          "required": [
+            "greaterThan"
+          ],
+          "properties": {
+            "greaterThan": {
+              "$ref": "#/definitions/Comparison"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Is the left value less than the right value?",
+          "type": "object",
+          "required": [
+            "lessThan"
+          ],
+          "properties": {
+            "lessThan": {
+              "$ref": "#/definitions/Comparison"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Is the left value greater than or equal to the right value?",
+          "type": "object",
+          "required": [
+            "greaterThanOrEqual"
+          ],
+          "properties": {
+            "greaterThanOrEqual": {
+              "$ref": "#/definitions/Comparison"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Is the left value less than or equal to the right value?",
+          "type": "object",
+          "required": [
+            "lessThanOrEqual"
+          ],
+          "properties": {
+            "lessThanOrEqual": {
+              "$ref": "#/definitions/Comparison"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Is the value null?",
+          "type": "object",
+          "required": [
+            "isNull"
+          ],
+          "properties": {
+            "isNull": {
+              "$ref": "#/definitions/ValueExpression"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "CustomTypeName": {
       "$id": "https://hasura.io/jsonschemas/metadata/CustomTypeName",
@@ -1498,6 +1820,43 @@
         }
       ]
     },
+    "Deny": {
+      "$id": "https://hasura.io/jsonschemas/metadata/Deny",
+      "title": "Deny",
+      "description": "Deny access if the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "condition"
+      ],
+      "properties": {
+        "condition": {
+          "$ref": "#/definitions/Condition"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DenyRelationalOperations": {
+      "$id": "https://hasura.io/jsonschemas/metadata/DenyRelationalOperations",
+      "title": "DenyRelationalOperations",
+      "description": "Deny these relational operations if the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "condition",
+        "operations"
+      ],
+      "properties": {
+        "condition": {
+          "$ref": "#/definitions/Condition"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RelationalOperation"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "Deprecated": {
       "$id": "https://hasura.io/jsonschemas/metadata/Deprecated",
       "title": "Deprecated",
@@ -1830,6 +2189,59 @@
       },
       "additionalProperties": false
     },
+    "Fields": {
+      "$id": "https://hasura.io/jsonschemas/metadata/Fields",
+      "title": "Fields",
+      "description": "A list of fields to allow/deny when the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "fields"
+      ],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FieldName"
+          }
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Filter": {
+      "$id": "https://hasura.io/jsonschemas/metadata/Filter",
+      "title": "Filter",
+      "description": "A filter that applies when the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "predicate"
+      ],
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "$ref": "#/definitions/ModelPredicate"
+        }
+      },
+      "additionalProperties": false
+    },
     "FilterInputGraphqlConfig": {
       "$id": "https://hasura.io/jsonschemas/metadata/FilterInputGraphqlConfig",
       "title": "FilterInputGraphqlConfig",
@@ -2038,6 +2450,35 @@
         "String"
       ]
     },
+    "InputTypeFieldPreset": {
+      "$id": "https://hasura.io/jsonschemas/metadata/InputTypeFieldPreset",
+      "title": "InputTypeFieldPreset",
+      "description": "A preset value for a field that applies when the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "fieldName",
+        "value"
+      ],
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fieldName": {
+          "$ref": "#/definitions/FieldName"
+        },
+        "value": {
+          "$ref": "#/definitions/ValueExpression"
+        }
+      },
+      "additionalProperties": false
+    },
     "LeafConfig": {
       "$id": "https://hasura.io/jsonschemas/metadata/LeafConfig",
       "title": "LeafConfig",
@@ -2197,8 +2638,249 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "title": "LifecyclePreNdcRequestPluginHook",
+          "description": "Definition of a lifecycle plugin hook for the pre-ndc-request stage.",
+          "type": "object",
+          "required": [
+            "config",
+            "connectors",
+            "name",
+            "pre",
+            "url"
+          ],
+          "properties": {
+            "pre": {
+              "type": "string",
+              "enum": [
+                "ndcRequest"
+              ]
+            },
+            "name": {
+              "description": "The name of the lifecycle plugin hook.",
+              "type": "string"
+            },
+            "connectors": {
+              "description": "A list of data connectors that this plugin hook should be applied to. There can only be one plugin hook of this type per data connector.",
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/DataConnectorName"
+              }
+            },
+            "url": {
+              "description": "The URL to access the lifecycle plugin hook.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentValue"
+                }
+              ]
+            },
+            "config": {
+              "description": "Configuration for the lifecycle plugin hook.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/LifecyclePreNdcRequestPluginHookConfig"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "LifecyclePreNdcResponsePluginHook",
+          "description": "Definition of a lifecycle plugin hook for the pre-ndc-response stage.",
+          "type": "object",
+          "required": [
+            "config",
+            "connectors",
+            "name",
+            "pre",
+            "url"
+          ],
+          "properties": {
+            "pre": {
+              "type": "string",
+              "enum": [
+                "ndcResponse"
+              ]
+            },
+            "name": {
+              "description": "The name of the lifecycle plugin hook.",
+              "type": "string"
+            },
+            "connectors": {
+              "description": "A list of data connectors that this plugin hook should be applied to. There can only be one plugin hook of this type per data connector.",
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/DataConnectorName"
+              }
+            },
+            "url": {
+              "description": "The URL to access the lifecycle plugin hook.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/EnvironmentValue"
+                }
+              ]
+            },
+            "config": {
+              "description": "Configuration for the lifecycle plugin hook.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/LifecyclePreNdcResponsePluginHookConfig"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
         }
       ]
+    },
+    "LifecyclePreNdcRequestPluginHookConfig": {
+      "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreNdcRequestPluginHookConfig",
+      "title": "LifecyclePreNdcRequestPluginHookConfig",
+      "description": "config for pre-ndc-request hook Configuration for a lifecycle plugin hook.",
+      "type": "object",
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "description": "Configuration for the request to the lifecycle plugin hook.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LifecyclePreNdcRequestPluginHookConfigRequest"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LifecyclePreNdcRequestPluginHookConfigRequest": {
+      "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreNdcRequestPluginHookConfigRequest",
+      "title": "LifecyclePreNdcRequestPluginHookConfigRequest",
+      "description": "Configuration for a lifecycle plugin hook request.",
+      "type": "object",
+      "properties": {
+        "headers": {
+          "description": "Configuration for additional static header values to send to the plugin",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HttpHeaders"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "description": "Configuration for the session (includes roles and session variables).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeafConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ndcRequest": {
+          "description": "Configuration for the request.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeafConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "forwardHeaders": {
+          "description": "Headers to be forwarded from the incoming request.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LifecyclePreNdcResponsePluginHookConfig": {
+      "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreNdcResponsePluginHookConfig",
+      "title": "LifecyclePreNdcResponsePluginHookConfig",
+      "description": "Configuration for a lifecycle plugin hook.",
+      "type": "object",
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "description": "Configuration for the request to the lifecycle plugin hook.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LifecyclePreNdcResponsePluginHookConfigRequest"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LifecyclePreNdcResponsePluginHookConfigRequest": {
+      "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreNdcResponsePluginHookConfigRequest",
+      "title": "LifecyclePreNdcResponsePluginHookConfigRequest",
+      "description": "Configuration for a lifecycle plugin hook request.",
+      "type": "object",
+      "properties": {
+        "headers": {
+          "description": "Configuration for the headers.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HttpHeaders"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "description": "Configuration for the session (includes roles and session variables).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeafConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ndcRequest": {
+          "description": "Configuration for the request.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeafConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ndcResponse": {
+          "description": "Configuration for the response.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeafConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "LifecyclePreParsePluginHookConfig": {
       "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreParsePluginHookConfig",
@@ -2278,6 +2960,18 @@
               "$ref": "#/definitions/LifecyclePreResponsePluginHookConfigRequest"
             }
           ]
+        },
+        "mode": {
+          "description": "Configuration for the mode of the plugin hook (synchronous or asynchronous) If not specified, the default is asynchronous.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LifecyclePreResponsePluginHookMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -2334,6 +3028,56 @@
         }
       },
       "additionalProperties": false
+    },
+    "LifecyclePreResponsePluginHookMode": {
+      "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreResponsePluginHookMode",
+      "title": "LifecyclePreResponsePluginHookMode",
+      "description": "Configuration for the mode of the plugin hook (synchronous or asynchronous)",
+      "oneOf": [
+        {
+          "title": "LifecyclePreResponsePluginHookSynchronousModeConfig",
+          "description": "Synchronous mode. The engine will wait for the plugin hook to respond before continuing.",
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "synchronous"
+              ]
+            },
+            "onPluginFailure": {
+              "description": "Configuration for the on-plugin-failure behavior of the plugin hook (default: fail).",
+              "default": "fail",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/OnPluginFailure"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "LifecyclePreResponsePluginHookAsynchronousModeConfig",
+          "description": "Asynchronous mode. The engine will not wait for the plugin hook to respond before continuing.",
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "asynchronous"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "LifecyclePreRoutePluginHookConfig": {
       "$id": "https://hasura.io/jsonschemas/metadata/LifecyclePreRoutePluginHookConfig",
@@ -2542,6 +3286,85 @@
         }
       },
       "additionalProperties": false
+    },
+    "ModelAuthorizationRule": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ModelAuthorizationRule",
+      "title": "ModelAuthorizationRule",
+      "description": "A rule that determines which model and argument presets are available to a user",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "allow"
+          ],
+          "properties": {
+            "allow": {
+              "$ref": "#/definitions/Allow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "deny"
+          ],
+          "properties": {
+            "deny": {
+              "$ref": "#/definitions/Deny"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "presetArgument"
+          ],
+          "properties": {
+            "presetArgument": {
+              "$ref": "#/definitions/PresetArgument"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "filter"
+          ],
+          "properties": {
+            "filter": {
+              "$ref": "#/definitions/Filter"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "allowRelationalOperations"
+          ],
+          "properties": {
+            "allowRelationalOperations": {
+              "$ref": "#/definitions/AllowRelationalOperations"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "denyRelationalOperations"
+          ],
+          "properties": {
+            "denyRelationalOperations": {
+              "$ref": "#/definitions/DenyRelationalOperations"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "ModelGraphQlDefinition": {
       "$id": "https://hasura.io/jsonschemas/metadata/ModelGraphQlDefinition",
@@ -2803,9 +3626,83 @@
               "type": "null"
             }
           ]
+        },
+        "relationalInsert": {
+          "description": "The permissions for relational insert operations on this model for this role. If this is null, the role is not allowed to perform relational inserts on this model. This is only applicable for data connectors that support relational operations.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelationalInsertPermission"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relationalUpdate": {
+          "description": "The permissions for relational update operations on this model for this role. If this is null, the role is not allowed to perform relational updates on this model. This is only applicable for data connectors that support relational operations.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelationalUpdatePermission"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relationalDelete": {
+          "description": "The permissions for relational delete operations on this model for this role. If this is null, the role is not allowed to perform relational deletes on this model. This is only applicable for data connectors that support relational operations.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelationalDeletePermission"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
+    },
+    "ModelPermissionOperand": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ModelPermissionOperand",
+      "title": "ModelPermissionOperand",
+      "description": "Configuration for role-based model permissions",
+      "oneOf": [
+        {
+          "title": "RoleBased",
+          "description": "Definition of role-based type permissions on an OpenDD model",
+          "type": "object",
+          "required": [
+            "roleBased"
+          ],
+          "properties": {
+            "roleBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ModelPermission"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "RulesBased",
+          "description": "Definition of rules-based type permissions on an OpenDD model",
+          "type": "object",
+          "required": [
+            "rulesBased"
+          ],
+          "properties": {
+            "rulesBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ModelAuthorizationRule"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "ModelPermissionsV1": {
       "$id": "https://hasura.io/jsonschemas/metadata/ModelPermissionsV1",
@@ -2831,6 +3728,35 @@
           "items": {
             "$ref": "#/definitions/ModelPermission"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelPermissionsV2": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ModelPermissionsV2",
+      "title": "ModelPermissionsV2",
+      "description": "Definition of permissions for an OpenDD model.",
+      "type": "object",
+      "required": [
+        "modelName",
+        "permissions"
+      ],
+      "properties": {
+        "modelName": {
+          "description": "The name of the model for which permissions are being defined.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelName"
+            }
+          ]
+        },
+        "permissions": {
+          "description": "Permissions for this model",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelPermissionOperand"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -3198,6 +4124,19 @@
             }
           ]
         },
+        "uniqueIdentifiers": {
+          "description": "Sets of fields that uniquely identify an object in this model. Each inner list is a set of fields that, together, form a unique constraint.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/FieldName"
+            }
+          }
+        },
         "graphql": {
           "description": "Configuration for how this model should appear in the GraphQL schema.",
           "anyOf": [
@@ -3301,6 +4240,19 @@
               "type": "null"
             }
           ]
+        },
+        "uniqueIdentifiers": {
+          "description": "Sets of fields that uniquely identify an object in this model. Each inner list is a set of fields that, together, form a unique constraint.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/FieldName"
+            }
+          }
         },
         "graphql": {
           "description": "Configuration for how this model should appear in the GraphQL schema.",
@@ -3662,6 +4614,27 @@
       },
       "additionalProperties": false
     },
+    "OnPluginFailure": {
+      "$id": "https://hasura.io/jsonschemas/metadata/OnPluginFailure",
+      "title": "OnPluginFailure",
+      "description": "Configuration for the on-plugin-failure behavior of the plugin hook.",
+      "oneOf": [
+        {
+          "description": "Fail the request if the plugin hook fails.",
+          "type": "string",
+          "enum": [
+            "fail"
+          ]
+        },
+        {
+          "description": "Continue with the request if the plugin hook fails.",
+          "type": "string",
+          "enum": [
+            "continue"
+          ]
+        }
+      ]
+    },
     "OpenDdFlags": {
       "$id": "https://hasura.io/jsonschemas/metadata/OpenDdFlags",
       "title": "OpenDdFlags",
@@ -3812,6 +4785,10 @@
           "default": false,
           "type": "boolean"
         },
+        "allow_switching_role_in_jwt_auth": {
+          "default": false,
+          "type": "boolean"
+        },
         "disallow_procedure_command_relationships": {
           "default": false,
           "type": "boolean"
@@ -3829,6 +4806,18 @@
           "type": "boolean"
         },
         "disallow_comparable_relationship_target_with_no_boolean_expression_type": {
+          "default": false,
+          "type": "boolean"
+        },
+        "send_missing_arguments_to_ndc_as_nulls": {
+          "default": false,
+          "type": "boolean"
+        },
+        "disallow_literals_as_boolean_expression_arguments": {
+          "default": false,
+          "type": "boolean"
+        },
+        "fix_exists_in_nested_arrays": {
           "default": false,
           "type": "boolean"
         }
@@ -4832,6 +5821,93 @@
                   }
                 ]
               }
+            },
+            {
+              "kind": "TypePermissions",
+              "version": "v2",
+              "definition": {
+                "typeName": "article",
+                "roleBased": {
+                  "permissions": [
+                    {
+                      "role": "admin",
+                      "output": {
+                        "allowedFields": [
+                          "article_id",
+                          "author_id",
+                          "title"
+                        ]
+                      }
+                    },
+                    {
+                      "role": "user",
+                      "output": {
+                        "allowedFields": [
+                          "article_id",
+                          "author_id"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "kind": "TypePermissions",
+              "version": "v2",
+              "definition": {
+                "typeName": "movie",
+                "permissions": {
+                  "rulesBased": [
+                    {
+                      "allowFields": {
+                        "condition": {
+                          "contains": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": [
+                                "admin",
+                                "user",
+                                "user_not",
+                                "user_and",
+                                "user_or",
+                                "limited_fields_user"
+                              ]
+                            }
+                          }
+                        },
+                        "fields": [
+                          "movie_id",
+                          "rating",
+                          "title",
+                          "release_date"
+                        ]
+                      }
+                    },
+                    {
+                      "denyFields": {
+                        "condition": {
+                          "contains": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": [
+                                "limited_fields_user"
+                              ]
+                            }
+                          }
+                        },
+                        "fields": [
+                          "rating"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
             }
           ],
           "oneOf": [
@@ -4857,6 +5933,32 @@
                 },
                 "definition": {
                   "$ref": "#/definitions/TypePermissionsV1"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "definition",
+                "kind",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "TypePermissions"
+                  ]
+                },
+                "version": {
+                  "type": "string",
+                  "enum": [
+                    "v2"
+                  ]
+                },
+                "definition": {
+                  "$ref": "#/definitions/TypePermissionsV2"
                 }
               },
               "additionalProperties": false
@@ -4930,6 +6032,108 @@
                   }
                 ]
               }
+            },
+            {
+              "kind": "ModelPermissions",
+              "version": "v2",
+              "definition": {
+                "modelName": "actors_by_movie",
+                "permissions": {
+                  "rulesBased": [
+                    {
+                      "allow": {
+                        "condition": {
+                          "contains": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": [
+                                "admin",
+                                "user_with_preset_movie_id"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "presetArgument": {
+                        "condition": {
+                          "equal": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": "user_with_preset_movie_id"
+                            }
+                          }
+                        },
+                        "argumentName": "movie_id",
+                        "value": {
+                          "literal": 1
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "kind": "ModelPermissions",
+              "version": "v2",
+              "definition": {
+                "modelName": "actors",
+                "permissions": {
+                  "rulesBased": [
+                    {
+                      "allow": {
+                        "condition": {
+                          "contains": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": [
+                                "admin",
+                                "object_relationship_user"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "filter": {
+                        "condition": {
+                          "equal": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": "object_relationship_user"
+                            }
+                          }
+                        },
+                        "predicate": {
+                          "relationship": {
+                            "name": "Country",
+                            "predicate": {
+                              "fieldComparison": {
+                                "field": "name",
+                                "operator": "_eq",
+                                "value": {
+                                  "literal": "UK"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
             }
           ],
           "oneOf": [
@@ -4958,6 +6162,32 @@
                 }
               },
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "definition",
+                "kind",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "ModelPermissions"
+                  ]
+                },
+                "version": {
+                  "type": "string",
+                  "enum": [
+                    "v2"
+                  ]
+                },
+                "definition": {
+                  "$ref": "#/definitions/ModelPermissionsV2"
+                }
+              },
+              "additionalProperties": false
             }
           ]
         },
@@ -4981,6 +6211,59 @@
                     "allowExecution": true
                   }
                 ]
+              }
+            },
+            {
+              "kind": "CommandPermissions",
+              "version": "v2",
+              "definition": {
+                "commandName": "get_actors_with_filter",
+                "permissions": {
+                  "rulesBased": [
+                    {
+                      "allow": {
+                        "condition": {
+                          "contains": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": [
+                                "filter_user"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "presetArgument": {
+                        "condition": {
+                          "equal": {
+                            "left": {
+                              "sessionVariable": "x-hasura-role"
+                            },
+                            "right": {
+                              "literal": "filter_user"
+                            }
+                          }
+                        },
+                        "argumentName": "actor_bool_exp",
+                        "value": {
+                          "booleanExpression": {
+                            "fieldComparison": {
+                              "field": "actor_id",
+                              "operator": "_eq",
+                              "value": {
+                                "literal": 4
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
               }
             }
           ],
@@ -5007,6 +6290,32 @@
                 },
                 "definition": {
                   "$ref": "#/definitions/CommandPermissionsV1"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "definition",
+                "kind",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "CommandPermissions"
+                  ]
+                },
+                "version": {
+                  "type": "string",
+                  "enum": [
+                    "v2"
+                  ]
+                },
+                "definition": {
+                  "$ref": "#/definitions/CommandPermissionsV2"
                 }
               },
               "additionalProperties": false
@@ -5069,6 +6378,83 @@
                 },
                 "definition": {
                   "$ref": "#/definitions/LifecyclePluginHookV1"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "$id": "https://hasura.io/jsonschemas/metadata/View",
+          "title": "View",
+          "description": "Definition of a SQL view that can be created in the data layer",
+          "examples": [
+            {
+              "kind": "View",
+              "version": "v1",
+              "definition": {
+                "name": "customer_summary",
+                "sqlExpression": "SELECT customer_id, COUNT(*) as order_count FROM orders GROUP BY customer_id",
+                "description": "Summary of customer orders"
+              }
+            }
+          ],
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "definition",
+                "kind",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "View"
+                  ]
+                },
+                "version": {
+                  "type": "string",
+                  "enum": [
+                    "v1"
+                  ]
+                },
+                "definition": {
+                  "$ref": "#/definitions/ViewV1"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "$id": "https://hasura.io/jsonschemas/metadata/ViewPermissions",
+          "title": "ViewPermissions",
+          "description": "Definition of permissions for an OpenDD view.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "definition",
+                "kind",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "ViewPermissions"
+                  ]
+                },
+                "version": {
+                  "type": "string",
+                  "enum": [
+                    "v1"
+                  ]
+                },
+                "definition": {
+                  "$ref": "#/definitions/ViewPermissionsV1"
                 }
               },
               "additionalProperties": false
@@ -5551,6 +6937,35 @@
       },
       "additionalProperties": false
     },
+    "PresetArgument": {
+      "$id": "https://hasura.io/jsonschemas/metadata/PresetArgument",
+      "title": "PresetArgument",
+      "description": "A preset value for an argument that applies when the condition evaluates to `true`",
+      "type": "object",
+      "required": [
+        "argumentName",
+        "value"
+      ],
+      "properties": {
+        "argumentName": {
+          "$ref": "#/definitions/ArgumentName"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ValueExpressionOrPredicate"
+        }
+      },
+      "additionalProperties": false
+    },
     "ProcedureName": {
       "$id": "https://hasura.io/jsonschemas/metadata/ProcedureName",
       "title": "ProcedureName",
@@ -5691,6 +7106,38 @@
           "$ref": "#/definitions/EnvironmentValue"
         }
       },
+      "additionalProperties": false
+    },
+    "RelationalDeletePermission": {
+      "$id": "https://hasura.io/jsonschemas/metadata/RelationalDeletePermission",
+      "title": "RelationalDeletePermission",
+      "description": "Defines the permissions for relational delete operations on a model for a role. If null, the role is not allowed to perform relational deletes on this model. This is only applicable for data connectors that support relational operations.",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "RelationalInsertPermission": {
+      "$id": "https://hasura.io/jsonschemas/metadata/RelationalInsertPermission",
+      "title": "RelationalInsertPermission",
+      "description": "Defines the permissions for relational insert operations on a model for a role. If null, the role is not allowed to perform relational inserts on this model. This is only applicable for data connectors that support relational operations.",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "RelationalOperation": {
+      "$id": "https://hasura.io/jsonschemas/metadata/RelationalOperation",
+      "title": "RelationalOperation",
+      "description": "An operation on a model",
+      "type": "string",
+      "enum": [
+        "insert",
+        "update",
+        "delete"
+      ]
+    },
+    "RelationalUpdatePermission": {
+      "$id": "https://hasura.io/jsonschemas/metadata/RelationalUpdatePermission",
+      "title": "RelationalUpdatePermission",
+      "description": "Defines the permissions for relational update operations on a model for a role. If null, the role is not allowed to perform relational updates on this model. This is only applicable for data connectors that support relational operations.",
+      "type": "object",
       "additionalProperties": false
     },
     "RelationshipGraphQlDefinition": {
@@ -6346,6 +7793,49 @@
       },
       "additionalProperties": false
     },
+    "TypeAuthorizationRule": {
+      "$id": "https://hasura.io/jsonschemas/metadata/TypeAuthorizationRule",
+      "title": "TypeAuthorizationRule",
+      "description": "A rule that determines which fields of a type are available to a user",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "allowFields"
+          ],
+          "properties": {
+            "allowFields": {
+              "$ref": "#/definitions/Fields"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "denyFields"
+          ],
+          "properties": {
+            "denyFields": {
+              "$ref": "#/definitions/Fields"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "fieldPreset"
+          ],
+          "properties": {
+            "fieldPreset": {
+              "$ref": "#/definitions/InputTypeFieldPreset"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "TypeInputPermission": {
       "$id": "https://hasura.io/jsonschemas/metadata/TypeInputPermission",
       "title": "TypeInputPermission",
@@ -6458,6 +7948,47 @@
       },
       "additionalProperties": false
     },
+    "TypePermissionOperand": {
+      "$id": "https://hasura.io/jsonschemas/metadata/TypePermissionOperand",
+      "title": "TypePermissionOperand",
+      "description": "Configuration for type permissions",
+      "oneOf": [
+        {
+          "title": "RoleBased",
+          "description": "Definition of role-based type permissions on an OpenDD object type",
+          "type": "object",
+          "required": [
+            "roleBased"
+          ],
+          "properties": {
+            "roleBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/TypePermission"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "RulesBased",
+          "description": "Definition of rules-based type permissions on an OpenDD object type",
+          "type": "object",
+          "required": [
+            "rulesBased"
+          ],
+          "properties": {
+            "rulesBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/TypeAuthorizationRule"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "TypePermissionsV1": {
       "$id": "https://hasura.io/jsonschemas/metadata/TypePermissionsV1",
       "title": "TypePermissionsV1",
@@ -6482,6 +8013,35 @@
           "items": {
             "$ref": "#/definitions/TypePermission"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TypePermissionsV2": {
+      "$id": "https://hasura.io/jsonschemas/metadata/TypePermissionsV2",
+      "title": "TypePermissionsV1",
+      "description": "Definition of permissions for an OpenDD type.",
+      "type": "object",
+      "required": [
+        "permissions",
+        "typeName"
+      ],
+      "properties": {
+        "typeName": {
+          "description": "The name of the type for which permissions are being defined. Must be an object type.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CustomTypeName"
+            }
+          ]
+        },
+        "permissions": {
+          "description": "Type permissions definitions",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TypePermissionOperand"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -6615,10 +8175,10 @@
               ]
             },
             "schema": {
-              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.6/ndc-models/tests/json_schema/schema_response.jsonschema"
+              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.7/ndc-models/tests/json_schema/schema_response.jsonschema"
             },
             "capabilities": {
-              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.6/ndc-models/tests/json_schema/capabilities_response.jsonschema"
+              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.7/ndc-models/tests/json_schema/capabilities_response.jsonschema"
             }
           },
           "additionalProperties": false
@@ -6640,15 +8200,180 @@
               ]
             },
             "schema": {
-              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.2.2/ndc-models/tests/json_schema/schema_response.jsonschema"
+              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.2.11/ndc-models/tests/json_schema/schema_response.jsonschema"
             },
             "capabilities": {
-              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.2.2/ndc-models/tests/json_schema/capabilities_response.jsonschema"
+              "$ref": "https://raw.githubusercontent.com/hasura/ndc-spec/v0.2.11/ndc-models/tests/json_schema/capabilities_response.jsonschema"
             }
           },
           "additionalProperties": false
         }
       ]
+    },
+    "ViewAuthorizationRule": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ViewAuthorizationRule",
+      "title": "ViewAuthorizationRule",
+      "description": "A rule that determines whether a view is accessible to a user",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "allow"
+          ],
+          "properties": {
+            "allow": {
+              "$ref": "#/definitions/Allow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "deny"
+          ],
+          "properties": {
+            "deny": {
+              "$ref": "#/definitions/Deny"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ViewName": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ViewName",
+      "title": "ViewName",
+      "description": "The name of a SQL view.",
+      "type": "string",
+      "pattern": "^[_a-zA-Z][_a-zA-Z0-9]*$"
+    },
+    "ViewPermission": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ViewPermission",
+      "title": "ViewPermission",
+      "description": "Defines the permissions for a view for a role.",
+      "type": "object",
+      "required": [
+        "allow",
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "description": "The role for which permissions are being defined.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Role"
+            }
+          ]
+        },
+        "allow": {
+          "description": "Whether access is allowed or denied for this role.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ViewPermissionOperand": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ViewPermissionOperand",
+      "title": "ViewPermissionOperand",
+      "description": "Configuration for view permissions",
+      "oneOf": [
+        {
+          "title": "RoleBased",
+          "description": "Definition of role-based view permissions on an OpenDD view",
+          "type": "object",
+          "required": [
+            "roleBased"
+          ],
+          "properties": {
+            "roleBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ViewPermission"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "RulesBased",
+          "description": "Definition of rules-based view permissions on an OpenDD view",
+          "type": "object",
+          "required": [
+            "rulesBased"
+          ],
+          "properties": {
+            "rulesBased": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ViewAuthorizationRule"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ViewPermissionsV1": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ViewPermissionsV1",
+      "title": "ViewPermissionsV1",
+      "description": "Definition of permissions for an OpenDD view.",
+      "type": "object",
+      "required": [
+        "permissions",
+        "viewName"
+      ],
+      "properties": {
+        "viewName": {
+          "description": "The name of the view for which permissions are being defined.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ViewName"
+            }
+          ]
+        },
+        "permissions": {
+          "description": "View permissions definitions",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ViewPermissionOperand"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ViewV1": {
+      "$id": "https://hasura.io/jsonschemas/metadata/ViewV1",
+      "title": "ViewV1",
+      "description": "Definition of a SQL view that can be created in the data layer",
+      "type": "object",
+      "required": [
+        "name",
+        "sqlExpression"
+      ],
+      "properties": {
+        "name": {
+          "description": "The name of the view",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ViewName"
+            }
+          ]
+        },
+        "sqlExpression": {
+          "description": "SQL query that defines the view",
+          "type": "string"
+        },
+        "description": {
+          "description": "Optional description",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

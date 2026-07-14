@@ -85,6 +85,7 @@ emptyServeOptionsRaw =
       rsoWebSocketKeepAlive = Nothing,
       rsoInferFunctionPermissions = Nothing,
       rsoEnableMaintenanceMode = Types.MaintenanceModeDisabled,
+      rsoEventingMode = Types.EventingEnabled,
       rsoSchemaPollInterval = Nothing,
       rsoExperimentalFeatures = Nothing,
       rsoEventsFetchBatchSize = Nothing,
@@ -107,7 +108,9 @@ emptyServeOptionsRaw =
       rsoTraceQueryStatus = Nothing,
       rsoDisableNativeQueryValidation = NativeQuery.AlwaysValidateNativeQueries,
       rsoPreserve401Errors = UUT.MapEverythingTo200,
-      rsoServerTimeout = Nothing
+      rsoServerTimeout = Nothing,
+      rsoLogMaskedVariables = Nothing,
+      rsoRelayMode = UUT.RelayModeEnabled
     }
 
 mkServeOptionsSpec :: Hspec.Spec
@@ -1483,3 +1486,34 @@ mkServeOptionsSpec =
             result = UUT.runWithEnv env (UUT.mkServeOptions @Hasura rawServeOptions)
 
         fmap UUT.soExtensionsSchema result `Hspec.shouldBe` Right (MonadTx.ExtensionsSchema "other")
+
+    Hspec.describe "soLogMaskedVariables" $ do
+      Hspec.it "Default == empty" $ do
+        let -- Given
+            rawServeOptions = emptyServeOptionsRaw
+            -- When
+            env = []
+            -- Then
+            result = UUT.runWithEnv env (UUT.mkServeOptions @Hasura rawServeOptions)
+
+        fmap UUT.soLogMaskedVariables result `Hspec.shouldBe` Right Set.empty
+
+      Hspec.it "Env > Nothing" $ do
+        let -- Given
+            rawServeOptions = emptyServeOptionsRaw
+            -- When
+            env = [(UUT._envVar UUT.logMaskedVariablesOption, "password,email,ssn")]
+            -- Then
+            result = UUT.runWithEnv env (UUT.mkServeOptions @Hasura rawServeOptions)
+
+        fmap UUT.soLogMaskedVariables result `Hspec.shouldBe` Right (Set.fromList ["password", "email", "ssn"])
+
+      Hspec.it "Arg > Env" $ do
+        let -- Given
+            rawServeOptions = emptyServeOptionsRaw {UUT.rsoLogMaskedVariables = Just (Set.fromList ["secret"])}
+            -- When
+            env = [(UUT._envVar UUT.logMaskedVariablesOption, "password,email")]
+            -- Then
+            result = UUT.runWithEnv env (UUT.mkServeOptions @Hasura rawServeOptions)
+
+        fmap UUT.soLogMaskedVariables result `Hspec.shouldBe` Right (Set.fromList ["secret"])

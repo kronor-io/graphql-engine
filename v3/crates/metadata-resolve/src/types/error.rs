@@ -2,16 +2,18 @@ use crate::helpers::typecheck::TypecheckError;
 use crate::helpers::{
     ndc_validation::NDCValidationError, type_mappings::TypeMappingCollectionError, typecheck,
 };
+use crate::stages::command_permissions;
 use crate::stages::{
     aggregate_boolean_expressions, aggregates::AggregateExpressionError, apollo, arguments,
     boolean_expressions, commands, data_connector_scalar_types, data_connectors, graphql_config,
     model_permissions, models, models_graphql, object_relationships, object_types,
-    order_by_expressions, relationships, relay, scalar_boolean_expressions, scalar_types,
-    type_permissions,
+    order_by_expressions, plugins, relationships, relay, scalar_boolean_expressions, scalar_types,
+    type_permissions, views,
 };
 use crate::types::subgraph::{Qualified, QualifiedTypeReference};
 use error_context::{Context, Step};
-use hasura_authn_core::Role;
+use open_dds::permissions::Role;
+use open_dds::views::ViewName;
 use open_dds::{
     arguments::ArgumentName,
     commands::CommandName,
@@ -213,10 +215,14 @@ pub enum Error {
         data_type: Qualified<CustomTypeName>,
     },
     #[error(
-        "Type error in preset argument {argument_name:} for role {role:} in command {command_name:}: {type_error:}"
+        "Type error in preset argument {argument_name:} {}in command {command_name:}: {type_error:}",
+        match .role {
+            Some(role) => format!("for role {role:} "),
+            None => String::new(),
+        }
     )]
     CommandArgumentPresetTypeError {
-        role: Role,
+        role: Option<Role>,
         command_name: Qualified<CommandName>,
         argument_name: ArgumentName,
         type_error: typecheck::TypecheckError,
@@ -266,6 +272,8 @@ pub enum Error {
     #[error("{0}")]
     ModelPermissionsError(#[from] model_permissions::NamedModelPermissionError),
     #[error("{0}")]
+    CommandPermissionsError(#[from] command_permissions::CommandPermissionError),
+    #[error("{0}")]
     DataConnectorScalarTypesError(
         #[from] data_connector_scalar_types::DataConnectorScalarTypesError,
     ),
@@ -275,6 +283,14 @@ pub enum Error {
     ModelGraphqlError(#[from] models_graphql::ModelGraphqlError),
     #[error("{warning_as_error}")]
     CompatibilityError { warning_as_error: crate::Warning },
+    #[error("{0}")]
+    LifecyclePuginError(#[from] plugins::PluginValidationError),
+
+    #[error("{0}")]
+    ViewError(#[from] views::Error),
+    #[error("unknown view '{view_name}' in view permissions")]
+    UnknownView { view_name: Qualified<ViewName> },
+
     #[error("{errors}")]
     MultipleErrors {
         errors: SeparatedBy<WithContext<Error>>,
@@ -490,13 +506,6 @@ pub enum TypePredicateError {
         source_type_name: Qualified<CustomTypeName>,
         target_model_name: Qualified<ModelName>,
     },
-    #[error(
-        "no relationship predicate is defined for relationship '{relationship_name:}' in type '{type_name:}'"
-    )]
-    NoPredicateDefinedForRelationshipPredicate {
-        type_name: Qualified<CustomTypeName>,
-        relationship_name: Spanned<RelationshipName>,
-    },
     #[error("{error:} in type {type_name:}")]
     TypeMappingCollectionError {
         type_name: Qualified<CustomTypeName>,
@@ -636,16 +645,6 @@ impl ContextualError for TypePredicateError {
                     }
                 ))
             }
-            TypePredicateError::NoPredicateDefinedForRelationshipPredicate { type_name, relationship_name } => {
-                Some(Context::from_step(
-                    error_context::Step {
-                        message: "This relationship is missing a predicate".to_owned(),
-                        path: relationship_name.path.clone(),
-                        subgraph: Some(type_name.subgraph.clone()),
-                    }
-                ))
-            }
-
             TypePredicateError::RelationshipAcrossSubgraphs {  relationship_name, source_data_connector, target_data_connector: _ } => {
                 Some(Context::from_step(
                     error_context::Step {

@@ -1,30 +1,30 @@
-use super::arguments::{get_unresolved_arguments, resolve_arguments};
-use super::{field_selection, process_argument_presets_for_command};
-use crate::metadata_accessor::OutputObjectTypeView;
-use crate::{PermissionError, PlanError};
-use hasura_authn_core::{Role, Session};
-use indexmap::IndexMap;
-use metadata_resolve::{
-    Metadata, Qualified, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference,
+use super::arguments::{
+    add_missing_nullable_arguments, get_unresolved_arguments, resolve_arguments,
 };
-use open_dds::commands::CommandName;
+use super::{field_selection, process_argument_presets_for_command};
+use crate::PlanError;
+use crate::metadata_accessor::OutputObjectTypeView;
+use crate::types::PlanState;
+use hasura_authn_core::{Session, SessionVariables};
+use indexmap::IndexMap;
+use metadata_resolve::{Metadata, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference};
 use open_dds::query::CommandSelection;
 use open_dds::{
     commands::DataConnectorCommand,
     data_connector::{CollectionName, DataConnectorColumnName},
 };
+use plan_types::FUNCTION_IR_VALUE_COLUMN_NAME;
 use plan_types::{
     Argument, Field, JoinLocations, MutationArgument, MutationExecutionPlan, MutationExecutionTree,
     NdcFieldAlias, NdcRelationshipName, NestedArray, NestedField, NestedObject,
     PredicateQueryTrees, QueryExecutionPlan, QueryExecutionTree, QueryNode, Relationship,
 };
-use plan_types::{FUNCTION_IR_VALUE_COLUMN_NAME, UniqueNumber};
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub enum CommandPlan {
-    Function(QueryExecutionTree),
-    Procedure(MutationExecutionTree),
+    Function(Box<QueryExecutionTree>),
+    Procedure(Box<MutationExecutionTree>),
 }
 
 pub struct FromCommand {
@@ -37,7 +37,7 @@ pub fn from_command(
     metadata: &Metadata,
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<FromCommand, PlanError> {
     let command_target = &command_selection.target;
     let qualified_command_name = metadata_resolve::Qualified::new(
@@ -63,10 +63,9 @@ pub fn from_command(
         metadata,
         session,
         request_headers,
-        &qualified_command_name,
         command,
         command_source,
-        unique_number,
+        plan_state,
     )
 }
 
@@ -80,7 +79,7 @@ fn from_command_output_type(
     relationships: &mut BTreeMap<NdcRelationshipName, Relationship>,
     remote_join_executions: &mut JoinLocations,
     remote_predicates: &mut PredicateQueryTrees,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<
     (
         IndexMap<NdcFieldAlias, Field>,
@@ -100,7 +99,7 @@ fn from_command_output_type(
             relationships,
             remote_join_executions,
             remote_predicates,
-            unique_number,
+            plan_state,
         ),
         OutputShape::Object {
             object: output_object_type,
@@ -121,7 +120,7 @@ fn from_command_output_type(
                 relationships,
                 remote_join_executions,
                 remote_predicates,
-                unique_number,
+                plan_state,
             )?;
 
             let extract_response_from = match &command_source.data_connector.response_config {
@@ -144,17 +143,21 @@ pub(crate) fn from_command_selection(
     metadata: &Metadata,
     session: &Session,
     request_headers: &reqwest::header::HeaderMap,
-    qualified_command_name: &Qualified<CommandName>,
     command: &metadata_resolve::CommandWithPermissions,
     command_source: &metadata_resolve::CommandSource,
-    unique_number: &mut UniqueNumber,
+    plan_state: &mut PlanState,
 ) -> Result<FromCommand, PlanError> {
     let mut relationships = BTreeMap::new();
     let mut usage_counts = plan_types::UsagesCounts::default();
     let mut remote_join_executions = JoinLocations::new();
     let mut remote_predicates = PredicateQueryTrees::new();
 
-    let output_shape = return_type_shape(&command.command.output_type, metadata, &session.role)?;
+    let output_shape = return_type_shape(
+        &command.command.output_type,
+        metadata,
+        &session.variables,
+        plan_state,
+    )?;
 
     let (ndc_fields, extract_response_from) = from_command_output_type(
         &output_shape,
@@ -166,21 +169,19 @@ pub(crate) fn from_command_selection(
         &mut relationships,
         &mut remote_join_executions,
         &mut remote_predicates,
-        unique_number,
+        plan_state,
     )?;
 
-    if !command
-        .permissions
-        .get(&session.role)
-        .is_some_and(|permission| permission.allow_execution)
-    {
-        Err(PlanError::Permission(PermissionError::Other(format!(
-            "role {} does not have permission for command {}",
-            session.role, qualified_command_name
-        ))))?;
-    };
+    let command_view = crate::metadata_accessor::get_command(
+        metadata,
+        &command.command.name,
+        &session.variables,
+        plan_state,
+    )?;
 
     // resolve arguments, adding in presets
+    // currently we expect arguments to have already been converted from OpenDD -> NDC field names
+    // by this point
     let unresolved_arguments = get_unresolved_arguments(
         &command_selection.target.arguments,
         &command.command.arguments,
@@ -189,6 +190,7 @@ pub(crate) fn from_command_selection(
         session,
         &command_source.type_mappings,
         &command_source.data_connector,
+        plan_state,
         &mut usage_counts,
     )?;
 
@@ -196,22 +198,32 @@ pub(crate) fn from_command_selection(
     let unresolved_arguments = process_argument_presets_for_command(
         unresolved_arguments,
         command,
-        &metadata.object_types,
+        &command_view,
+        metadata,
         session,
         request_headers,
+        plan_state,
         &mut usage_counts,
+    )?;
+
+    // add in any missing arguments as nulls
+    let unresolved_arguments = add_missing_nullable_arguments(
+        unresolved_arguments,
+        &command.command.arguments,
+        &command_source.argument_mappings,
+        &metadata.runtime_flags,
     )?;
 
     let resolved_arguments = resolve_arguments(
         unresolved_arguments,
         &mut relationships,
         &mut remote_predicates,
-        unique_number,
+        plan_state,
     )?;
 
     let command_plan = match &command_source.source {
         DataConnectorCommand::Function(function_name) => {
-            CommandPlan::Function(QueryExecutionTree {
+            CommandPlan::Function(Box::new(QueryExecutionTree {
                 remote_predicates,
                 remote_join_executions,
                 query_execution_plan: QueryExecutionPlan {
@@ -235,7 +247,7 @@ pub(crate) fn from_command_selection(
                     variables: None,
                     data_connector: command_source.data_connector.clone(),
                 },
-            })
+            }))
         }
         DataConnectorCommand::Procedure(procedure_name) => {
             let mutation_execution_plan = MutationExecutionPlan {
@@ -261,10 +273,10 @@ pub(crate) fn from_command_selection(
                 collection_relationships: relationships.clone(),
                 data_connector: command_source.data_connector.clone(),
             };
-            CommandPlan::Procedure(MutationExecutionTree {
+            CommandPlan::Procedure(Box::new(MutationExecutionTree {
                 mutation_execution_plan,
                 remote_join_executions,
-            })
+            }))
         }
     };
     Ok(FromCommand {
@@ -371,7 +383,8 @@ fn wrap_scalar_select(nested_fields: Option<NestedField>) -> IndexMap<NdcFieldAl
 fn return_type_shape<'metadata>(
     output_type: &'metadata QualifiedTypeReference,
     metadata: &'metadata Metadata,
-    role: &'_ Role,
+    session_variables: &SessionVariables,
+    plan_state: &mut PlanState,
 ) -> Result<OutputShape<'metadata>, PlanError> {
     match &output_type.underlying_type {
         QualifiedBaseType::Named(QualifiedTypeName::Inbuilt(_)) => Ok(OutputShape::ScalarType {
@@ -385,7 +398,8 @@ fn return_type_shape<'metadata>(
                 None => Ok(crate::metadata_accessor::get_output_object_type(
                     metadata,
                     custom_type,
-                    role,
+                    session_variables,
+                    plan_state,
                 )
                 .map(|output_object_type| OutputShape::Object {
                     object: output_object_type.clone(),
@@ -393,7 +407,7 @@ fn return_type_shape<'metadata>(
             }
         }
         QualifiedBaseType::List(type_reference) => {
-            let inner = return_type_shape(type_reference, metadata, role)?;
+            let inner = return_type_shape(type_reference, metadata, session_variables, plan_state)?;
             Ok(OutputShape::Array {
                 inner: Box::new(inner),
             })

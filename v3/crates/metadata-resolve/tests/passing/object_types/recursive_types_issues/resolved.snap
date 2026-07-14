@@ -74,8 +74,16 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {},
@@ -149,8 +157,16 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {},
@@ -224,8 +240,16 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {},
@@ -299,8 +323,16 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {},
@@ -374,8 +406,16 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {},
@@ -449,8 +489,16 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     ),
                     description: None,
                 },
-                type_output_permissions: {},
-                type_input_permissions: {},
+                type_output_permissions: TypeOutputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
+                type_input_permissions: TypeInputPermissions {
+                    authorization_rules: [],
+                    by_role: {},
+                    uses_rules_based_auth: false,
+                },
                 relationship_fields: {},
                 type_mappings: DataConnectorTypeMappingsForObject {
                     mappings: {},
@@ -514,34 +562,7 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                             },
                             description: None,
                             argument_kind: Other,
-                            path: JSONPath(
-                                [
-                                    Key(
-                                        "subgraphs",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "objects",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "definition",
-                                    ),
-                                    Key(
-                                        "arguments",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "name",
-                                    ),
-                                ],
-                            ),
+                            type_representation: None,
                         },
                     },
                     graphql_api: Some(
@@ -556,7 +577,10 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     source: None,
                     description: None,
                 },
-                permissions: {},
+                permissions: CommandPermissions {
+                    by_role: {},
+                    authorization_rules: [],
+                },
             },
             Qualified {
                 subgraph: SubgraphName(
@@ -612,34 +636,7 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                             },
                             description: None,
                             argument_kind: Other,
-                            path: JSONPath(
-                                [
-                                    Key(
-                                        "subgraphs",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "objects",
-                                    ),
-                                    Index(
-                                        3,
-                                    ),
-                                    Key(
-                                        "definition",
-                                    ),
-                                    Key(
-                                        "arguments",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "name",
-                                    ),
-                                ],
-                            ),
+                            type_representation: None,
                         },
                     },
                     graphql_api: Some(
@@ -654,7 +651,10 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     source: None,
                     description: None,
                 },
-                permissions: {},
+                permissions: CommandPermissions {
+                    by_role: {},
+                    authorization_rules: [],
+                },
             },
             Qualified {
                 subgraph: SubgraphName(
@@ -710,34 +710,7 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                             },
                             description: None,
                             argument_kind: Other,
-                            path: JSONPath(
-                                [
-                                    Key(
-                                        "subgraphs",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "objects",
-                                    ),
-                                    Index(
-                                        7,
-                                    ),
-                                    Key(
-                                        "definition",
-                                    ),
-                                    Key(
-                                        "arguments",
-                                    ),
-                                    Index(
-                                        0,
-                                    ),
-                                    Key(
-                                        "name",
-                                    ),
-                                ],
-                            ),
+                            type_representation: None,
                         },
                     },
                     graphql_api: Some(
@@ -752,7 +725,10 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
                     source: None,
                     description: None,
                 },
-                permissions: {},
+                permissions: CommandPermissions {
+                    by_role: {},
+                    authorization_rules: [],
+                },
             },
         },
         boolean_expression_types: BooleanExpressionTypes {
@@ -766,6 +742,7 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
             scalars: {},
         },
         aggregate_expressions: {},
+        views: {},
         graphql_config: GlobalGraphqlConfig {
             query_root_type_name: TypeName(
                 Name(
@@ -800,10 +777,18 @@ input_file: crates/metadata-resolve/tests/passing/object_types/recursive_types_i
         },
         plugin_configs: LifecyclePluginConfigs {
             pre_parse_plugins: [],
-            pre_response_plugins: [],
+            pre_response_plugins: ResolvedLifecyclePreResponsePluginHooks {
+                sync_hooks: [],
+                async_hooks: [],
+            },
             pre_route_plugins: [],
+            pre_ndc_request_plugins: {},
+            pre_ndc_response_plugins: {},
         },
         roles: {},
+        conditions: Conditions {
+            conditions: {},
+        },
         runtime_flags: RuntimeFlags(
             {},
         ),

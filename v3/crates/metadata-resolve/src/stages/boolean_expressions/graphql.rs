@@ -15,7 +15,7 @@ use crate::stages::{
     graphql_config,
     scalar_boolean_expressions::{self, LogicalOperatorsGraphqlConfig},
 };
-use lang_graphql::ast::common::{self as ast};
+use graphql_types::{self as ast};
 use open_dds::types::{CustomTypeName, FieldName, GraphQlTypeName};
 use std::collections::BTreeMap;
 
@@ -90,7 +90,7 @@ pub(crate) fn resolve_object_boolean_graphql(
                                     },
                                 },
                             );
-                        };
+                        }
                     }
                 }
             }
@@ -109,22 +109,19 @@ pub(crate) fn resolve_object_boolean_graphql(
                             _,
                         ) => None,
                     }
-                {
-                    if let Some(graphql_name) = raw_boolean_expression_type
+                    && let Some(graphql_name) = raw_boolean_expression_type
                         .graphql
                         .as_ref()
                         .map(|gql| gql.type_name.clone())
-                    {
-                        let graphql_type_name =
-                            mk_name(graphql_name.as_str()).map(ast::TypeName)?;
+                {
+                    let graphql_type_name = mk_name(graphql_name.as_str()).map(ast::TypeName)?;
 
-                        object_fields.insert(
-                            comparable_field_name.clone(),
-                            ObjectBooleanExpressionGraphqlConfig {
-                                graphql_type_name: graphql_type_name.clone(),
-                            },
-                        );
-                    }
+                    object_fields.insert(
+                        comparable_field_name.clone(),
+                        ObjectBooleanExpressionGraphqlConfig {
+                            graphql_type_name: graphql_type_name.clone(),
+                        },
+                    );
                 }
             }
         }

@@ -19,13 +19,13 @@ use crate::types::error::{Error, TypeError};
 use crate::types::permission::ValueExpressionOrPredicate;
 use crate::types::subgraph::{ArgumentInfo, ArgumentKind, Qualified, QualifiedTypeReference};
 
-use hasura_authn_core::Role;
 use indexmap::IndexMap;
 use ndc_models;
 use open_dds::arguments::ArgumentName;
 use open_dds::data_connector::DataConnectorName;
 use open_dds::identifier::SubgraphName;
 use open_dds::models::ModelName;
+use open_dds::permissions::Role;
 use open_dds::types::DataConnectorArgumentName;
 use open_dds::types::{BaseType, CustomTypeName, TypeName, TypeReference};
 use std::collections::BTreeMap;
@@ -273,7 +273,7 @@ pub fn get_argument_mappings<'a>(
 /// type to validate it against to ensure the fields it refers to
 /// exist etc
 pub(crate) fn resolve_value_expression_for_argument(
-    role: &Role,
+    role: Option<&Role>, // this is only applicable for role-based permissions
     flags: &open_dds::flags::OpenDdFlags,
     argument_name: &open_dds::arguments::ArgumentName,
     value_expression: &open_dds::permissions::ValueExpressionOrPredicate,
@@ -297,7 +297,7 @@ pub(crate) fn resolve_value_expression_for_argument(
         open_dds::permissions::ValueExpressionOrPredicate::SessionVariable(session_variable) => {
             Ok::<(ValueExpressionOrPredicate, Vec<TypecheckIssue>), Error>((
                 ValueExpressionOrPredicate::SessionVariable(
-                    hasura_authn_core::SessionVariableReference {
+                    open_dds::session_variables::SessionVariableReference {
                         name: session_variable.clone(),
                         passed_as_json: flags.contains(open_dds::flags::Flag::JsonSessionVariables),
                         disallow_unknown_fields: flags
@@ -316,6 +316,7 @@ pub(crate) fn resolve_value_expression_for_argument(
                     .iter()
                     .map(|(field_name, object_type)| (field_name, &object_type.object_type))
                     .collect(), // Convert &BTreeMap<field_name, object_type> to BTreeMap<&field_name, &object_type>
+                &boolean_expression_types.get_type_names(),
                 argument_type,
                 json_value,
                 &mut issues,
@@ -342,14 +343,20 @@ pub(crate) fn resolve_value_expression_for_argument(
                             })?;
 
                         // is there a preset for this role and this field?
-                        let has_preset = object_type_representation
-                            .type_input_permissions
-                            .get(role)
-                            .is_some_and(|type_input_permission| {
-                                type_input_permission.field_presets.contains_key(field_name)
-                            });
+                        let has_preset = role.is_some_and(|role| {
+                            object_type_representation
+                                .type_input_permissions
+                                .by_role
+                                .get(role)
+                                .is_some_and(|type_input_permission| {
+                                    type_input_permission.field_presets.contains_key(field_name)
+                                })
+                        });
 
                         // if the field has no preset, then keep the error as it's legitimate
+                        // TODO: consider making this a warning rather than than error when role ==
+                        // None as we don't have a solid way of knowing which presets will apply
+                        // with rules-based auth
                         !has_preset
                     }
                     _ => true,

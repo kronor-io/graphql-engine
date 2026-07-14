@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::error;
 use crate::filter;
+use crate::flags::GraphqlIrFlags;
 use graphql_schema::GDS;
 use graphql_schema::{Annotation, InputAnnotation, ModelInputAnnotation};
 use indexmap::IndexMap;
@@ -22,11 +23,12 @@ use plan_types::UsagesCounts;
 pub fn resolve_model_arguments_input_opendd<'s>(
     arguments: &IndexMap<Name, InputField<'s, GDS>>,
     type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, metadata_resolve::TypeMapping>,
+    flags: &GraphqlIrFlags,
     usage_counts: &mut UsagesCounts,
 ) -> Result<IndexMap<open_dds::query::ArgumentName, open_dds::query::Value>, error::Error> {
     arguments
         .values()
-        .map(|argument| resolve_argument_opendd(argument, type_mappings, usage_counts))
+        .map(|argument| resolve_argument_opendd(argument, type_mappings, flags, usage_counts))
         .collect::<Result<IndexMap<_, _>, _>>()
 }
 
@@ -34,6 +36,7 @@ pub fn resolve_model_arguments_input_opendd<'s>(
 pub fn resolve_argument_opendd<'s>(
     argument: &InputField<'s, GDS>,
     type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, TypeMapping>,
+    flags: &GraphqlIrFlags,
     usage_counts: &mut UsagesCounts,
 ) -> Result<(open_dds::query::ArgumentName, open_dds::query::Value), error::Error> {
     let (argument_name, argument_type, argument_kind) = match argument.info.generic {
@@ -42,13 +45,11 @@ pub fn resolve_argument_opendd<'s>(
                 argument_name,
                 argument_type,
                 argument_kind,
-                ndc_func_proc_argument: _,
             }
             | InputAnnotation::Model(ModelInputAnnotation::ModelArgument {
                 argument_name,
                 argument_type,
                 argument_kind,
-                ndc_table_argument: _,
             }),
         ) => Ok((argument_name, argument_type, argument_kind)),
 
@@ -61,14 +62,16 @@ pub fn resolve_argument_opendd<'s>(
     // predicates are converted into boolean expressions
     let mapped_argument_value = match argument_kind {
         ArgumentKind::Other => {
-            map_argument_value_to_ndc_type(argument_type, &argument.value, type_mappings)
+            map_argument_value_to_ndc_type(argument_type, &argument.value, type_mappings, flags)
                 .map(open_dds::query::Value::Literal)?
         }
 
-        ArgumentKind::NDCExpression => {
-            filter::resolve_filter_expression_open_dd(argument.value.as_object()?, usage_counts)
-                .map(open_dds::query::Value::BooleanExpression)?
-        }
+        ArgumentKind::NDCExpression => filter::resolve_filter_expression_open_dd(
+            argument.value.as_object()?,
+            flags,
+            usage_counts,
+        )
+        .map(open_dds::query::Value::BooleanExpression)?,
     };
     Ok((argument_name.clone(), mapped_argument_value))
 }
@@ -77,6 +80,7 @@ pub fn resolve_argument_opendd<'s>(
 pub fn build_argument_as_value<'s>(
     argument: &InputField<'s, GDS>,
     type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, TypeMapping>,
+    flags: &GraphqlIrFlags,
     usage_counts: &mut UsagesCounts,
 ) -> Result<(ArgumentName, open_dds::query::Value), error::Error> {
     let (argument_type, argument_kind) = match argument.info.generic {
@@ -102,14 +106,16 @@ pub fn build_argument_as_value<'s>(
     // are converted into NDC expressions (via our internal Expression type)
     let mapped_argument_value = match argument_kind {
         ArgumentKind::Other => {
-            map_argument_value_to_ndc_type(argument_type, &argument.value, type_mappings)
+            map_argument_value_to_ndc_type(argument_type, &argument.value, type_mappings, flags)
                 .map(open_dds::query::Value::Literal)?
         }
 
-        ArgumentKind::NDCExpression => {
-            filter::resolve_filter_expression_open_dd(argument.value.as_object()?, usage_counts)
-                .map(open_dds::query::Value::BooleanExpression)?
-        }
+        ArgumentKind::NDCExpression => filter::resolve_filter_expression_open_dd(
+            argument.value.as_object()?,
+            flags,
+            usage_counts,
+        )
+        .map(open_dds::query::Value::BooleanExpression)?,
     };
 
     let argument_name = ArgumentName::new(Identifier::new(argument.name.as_str()).unwrap());
@@ -121,8 +127,9 @@ pub(crate) fn map_argument_value_to_ndc_type(
     value_type: &QualifiedTypeReference,
     value: &Value<GDS>,
     type_mappings: &BTreeMap<Qualified<CustomTypeName>, TypeMapping>,
+    flags: &GraphqlIrFlags,
 ) -> Result<serde_json::Value, error::Error> {
-    if value.is_null() {
+    if value.is_null(&flags.validate_non_null_graphql_variables) {
         return Ok(serde_json::Value::Null);
     }
 
@@ -132,7 +139,12 @@ pub(crate) fn map_argument_value_to_ndc_type(
                 .as_list()?
                 .iter()
                 .map(|element_value| {
-                    map_argument_value_to_ndc_type(element_type, element_value, type_mappings)
+                    map_argument_value_to_ndc_type(
+                        element_type,
+                        element_value,
+                        type_mappings,
+                        flags,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(serde_json::Value::from(mapped_elements))
@@ -188,7 +200,7 @@ pub(crate) fn map_argument_value_to_ndc_type(
                                 let mapped_field_value = map_argument_value_to_ndc_type(
                                     field_type,
                                     &field_value.value,
-                                    type_mappings,
+                                    type_mappings,flags
                                 )?;
                                 Ok((field_mapping.column.to_string(), mapped_field_value))
                             })

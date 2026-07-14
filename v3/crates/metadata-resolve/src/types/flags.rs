@@ -8,6 +8,8 @@ use strum_macros::EnumIter;
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedRuntimeFlag {
     ValidateNonNullGraphqlVariables,
+    SendMissingArgumentsToNdcAsNulls,
+    FixExistsInNestedArrays,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +33,12 @@ impl RuntimeFlags {
         for flag in flags {
             if flag == &open_dds::flags::Flag::ValidateNonNullGraphqlVariables {
                 runtime_flags.insert(ResolvedRuntimeFlag::ValidateNonNullGraphqlVariables);
+            }
+            if flag == &open_dds::flags::Flag::SendMissingArgumentsToNdcAsNulls {
+                runtime_flags.insert(ResolvedRuntimeFlag::SendMissingArgumentsToNdcAsNulls);
+            }
+            if flag == &open_dds::flags::Flag::FixExistsInNestedArrays {
+                runtime_flags.insert(ResolvedRuntimeFlag::FixExistsInNestedArrays);
             }
         }
         runtime_flags
