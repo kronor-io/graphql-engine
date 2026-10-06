@@ -29,10 +29,12 @@ where
 
 import Control.Concurrent.MVar.Lifted
 import Control.Concurrent.STM qualified as STM
+import Control.Exception (evaluate)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.IORef
 import Hasura.App.State
 import Hasura.Base.Error
+import Hasura.GC (requestHeapShrink)
 import Hasura.Logging qualified as L
 import Hasura.Prelude hiding (get, put)
 import Hasura.RQL.DDL.Schema
@@ -42,6 +44,7 @@ import Hasura.RQL.Types.SchemaCache
 import Hasura.Server.Logging
 import Hasura.Server.Metrics
 import Network.Types.Extended
+import System.Mem.StableName (makeStableName)
 import System.Metrics.Gauge (Gauge)
 import System.Metrics.Gauge qualified as Gauge
 
@@ -138,9 +141,19 @@ withSchemaCacheReadUpdate (AppStateRef lock cacheRef metadataVersionGauge) logge
     when (scMetadataResourceVersion (lastBuiltSchemaCache newSC) == MetadataResourceVersion (-1))
       $ throw500 "Programming error: attempting to save Schema Cache with incorrect mrv. Please report this to Hasura."
     liftIO do
+      -- Read-only metadata calls, and schema sync polls that find nothing new,
+      -- hand back the cache they were given; only a rebuild leaves surplus heap
+      -- behind (see 'Hasura.GC.shrinkHeapOnRequest'). The old cache was read
+      -- through a field selector and may still be that unevaluated selector,
+      -- whose stable name differs from the record's, so force it first.
+      oldSC <- evaluate rebuildableSchemaCache
+      rebuilt <- (/=) <$> makeStableName oldSC <*> makeStableName newSC
+
       -- update schemacache in IO reference
       modifyIORef' cacheRef $ \appState ->
         appState {asSchemaCache = newSC}
+
+      when rebuilt requestHeapShrink
 
       -- update metric with new metadata version
       updateMetadataVersionGauge metadataVersionGauge newSC
