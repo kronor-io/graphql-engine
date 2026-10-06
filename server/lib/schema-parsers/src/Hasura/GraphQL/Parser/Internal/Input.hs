@@ -430,7 +430,7 @@ object ::
   InputFieldsParser origin m a ->
   Parser origin 'Input m a
 {-# INLINE object #-}
-object name description parser =
+object name description (InputFieldsParser fieldDefinitions fieldsParser) =
   Parser
     { pType = schemaType,
       pParser =
@@ -445,11 +445,20 @@ object name description parser =
           other -> typeMismatch name "an object" other
     }
   where
+    -- 'InputObjectInfo' keeps its own, sorted copy of the field definitions.
+    -- Take the field names from that copy, and capture only the field parser
+    -- function rather than the whole 'InputFieldsParser': otherwise the
+    -- unsorted 'fieldDefinitions' list stays reachable from every input
+    -- object in the schema for as long as the schema lives. The match is
+    -- strict on purpose: a lazy one gets turned back into a projection inside
+    -- the (inlined) parse closure, which then captures the whole record.
+    -- 'InputFieldsParser's are never knot-tied, only 'Parser's are.
+    inputObjectInfo@(InputObjectInfo sortedFieldDefinitions) = InputObjectInfo fieldDefinitions
     schemaType =
       TNamed NonNullable $
         Definition name description Nothing [] $
-          TIInputObject (InputObjectInfo (ifDefinitions parser))
-    fieldNames = S.fromList (dName <$> ifDefinitions parser)
+          TIInputObject inputObjectInfo
+    fieldNames = S.fromList (dName <$> sortedFieldDefinitions)
     parseFields fields = do
       -- check for extraneous fields here, since the InputFieldsParser just
       -- handles parsing the fields it cares about
@@ -458,7 +467,7 @@ object name description parser =
           withKey (J.Key (K.fromText (unName fieldName))) $
             parseError $
               "field " <> toErrorValue fieldName <> " not found in type: " <> toErrorValue name
-      ifParser parser fields
+      fieldsParser fields
     invalidName key = parseError $ "variable value contains object with key " <> ErrorValue.dquote key <> ", which is not a legal GraphQL name"
 
 list :: forall origin k m a. (MonadParse m, 'Input <: k) => Parser origin k m a -> Parser origin k m [a]
