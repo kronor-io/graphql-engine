@@ -370,7 +370,7 @@ inputValueDefinitionParser schemaDoc (G.InputValueDefinition desc name fieldType
 -- If the value contains a variable with a customized type name then we need to consider it to be
 -- altered to ensure that the original type name is passed to the remote server.
 remoteFieldScalarParser ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   MkTypename ->
   G.ScalarTypeDefinition ->
   P.Parser 'Both n (Altered, G.Value RemoteSchemaVariable)
@@ -398,7 +398,7 @@ remoteFieldScalarParser customizeTypename (G.ScalarTypeDefinition description na
       G.TypeList n l -> G.TypeList n $ mkRemoteGType l
 
 remoteFieldEnumParser ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   MkTypename ->
   G.EnumTypeDefinition ->
   Parser 'Both n (Altered, G.Value RemoteSchemaVariable)
@@ -471,7 +471,7 @@ remoteInputObjectParser schemaDoc defn@(G.InputObjectTypeDefinition desc name _ 
 -- See Note [Variable expansion in remote schema input parsers] for more information.
 shortCircuitIfUnaltered ::
   forall k n.
-  ('Input <: k, MonadParse n) =>
+  ('Input <: k, P.IsParse n) =>
   Parser k n (Maybe (Altered, G.Value RemoteSchemaVariable)) ->
   Parser k n (Maybe (Altered, G.Value RemoteSchemaVariable))
 shortCircuitIfUnaltered parser =
@@ -1013,7 +1013,7 @@ getObjectParser schemaDoc remoteRelationships getObject objName = do
 
 customizeRemoteNamespace ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   RemoteSchemaInfo ->
   G.Name ->
   [P.FieldParser n (IR.RemoteSchemaRootField (IR.RemoteRelationshipField IR.UnpreparedValue) RemoteSchemaVariable)] ->

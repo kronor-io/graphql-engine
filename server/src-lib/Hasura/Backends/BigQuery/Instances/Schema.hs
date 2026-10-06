@@ -374,7 +374,7 @@ bqComparisonExps = P.memoize 'comparisonExps $ \columnType -> do
       ]
 
 bqCountTypeInput ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Maybe (Parser 'Both n (Column 'BigQuery, AnnRedactionExpUnpreparedValue 'BigQuery)) ->
   InputFieldsParser n (IR.CountDistinct -> CountType 'BigQuery (IR.UnpreparedValue 'BigQuery))
 bqCountTypeInput = \case

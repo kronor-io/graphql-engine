@@ -855,7 +855,7 @@ tableDistinctArg tableInfo = do
 -- > limit: NonNegativeInt
 tableLimitArg ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   InputFieldsParser n (Maybe Int)
 tableLimitArg =
   fmap (fmap fromIntegral . join)
@@ -869,7 +869,7 @@ tableLimitArg =
 -- > offset: BigInt
 tableOffsetArg ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   InputFieldsParser n (Maybe Int64)
 tableOffsetArg =
   fmap join

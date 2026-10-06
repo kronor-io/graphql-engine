@@ -392,7 +392,7 @@ msComparisonExps = P.memoize 'comparisonExps \columnType -> do
       UVLiteral . MSSQL.ListExpression . fmap (MSSQL.ValueExpression . cvValue)
 
 msCountTypeInput ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Maybe (Parser 'Both n (Column 'MSSQL, AnnRedactionExpUnpreparedValue 'MSSQL)) ->
   InputFieldsParser n (IR.CountDistinct -> CountType 'MSSQL (UnpreparedValue 'MSSQL))
 msCountTypeInput = \case

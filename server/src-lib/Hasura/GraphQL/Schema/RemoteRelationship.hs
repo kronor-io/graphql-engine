@@ -194,7 +194,7 @@ remoteRelationshipToSourceField ::
   forall m n tgt.
   ( MonadError QErr m,
     P.MonadMemoize m,
-    P.MonadParse n,
+    P.IsParse n,
     BackendSchema tgt,
     BackendTableSelectSchema tgt
   ) =>

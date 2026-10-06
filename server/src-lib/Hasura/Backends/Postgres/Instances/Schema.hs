@@ -522,7 +522,7 @@ possiblyNullable scalarType (G.Nullability isNullable)
   | otherwise = id
 
 pgScalarSelectionArgumentsParser ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   ColumnType ('Postgres pgKind) ->
   InputFieldsParser n (Maybe (ScalarSelectionArguments ('Postgres pgKind)))
 pgScalarSelectionArgumentsParser columnType
@@ -990,7 +990,7 @@ intersectsGeomNbandInput = do
     <*> (fmap IR.mkParameter <$> P.fieldOptional Name._nband Nothing integerParser)
 
 countTypeInput ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Maybe (Parser 'Both n (Column ('Postgres pgKind), AnnRedactionExpUnpreparedValue ('Postgres pgKind))) ->
   InputFieldsParser n (IR.CountDistinct -> CountType ('Postgres pgKind) (IR.UnpreparedValue ('Postgres pgKind)))
 countTypeInput = \case

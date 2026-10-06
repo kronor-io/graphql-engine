@@ -327,7 +327,7 @@ been called at all.
 
 -- This is temporary, and should be removed as soon as possible.
 mkBoolOperator ::
-  (MonadParse n, 'Input P.<: k) =>
+  (P.IsParse n, 'Input P.<: k) =>
   -- | Naming convention for the field
   NamingCase ->
   -- | shall this be collapsed to True when null is given?
@@ -343,7 +343,7 @@ mkBoolOperator tCase Options.DangerouslyCollapseBooleans name desc = fmap join .
 mkBoolOperator tCase Options.Don'tDangerouslyCollapseBooleans name desc = P.fieldOptional (applyFieldNameCaseIdentifier tCase name) desc
 
 equalityOperators ::
-  (MonadParse n, 'Input P.<: k) =>
+  (P.IsParse n, 'Input P.<: k) =>
   NamingCase ->
   -- | shall this be collapsed to True when null is given?
   Options.DangerouslyCollapseBooleans ->
@@ -361,7 +361,7 @@ equalityOperators tCase collapseIfNull valueParser valueListParser =
   ]
 
 comparisonOperators ::
-  (MonadParse n, 'Input P.<: k) =>
+  (P.IsParse n, 'Input P.<: k) =>
   NamingCase ->
   -- | shall this be collapsed to True when null is given?
   Options.DangerouslyCollapseBooleans ->

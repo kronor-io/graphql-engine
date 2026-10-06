@@ -74,7 +74,7 @@ anyParser =
       _ -> P.parseError $ toErrorMessage "representations is expecting a list of objects only"
 
 convertToApolloFedParserFunc ::
-  (MonadParse n, Backend b) =>
+  (IsParse n, Backend b) =>
   SourceInfo b ->
   TableInfo b ->
   SelPermInfo b ->
@@ -87,7 +87,7 @@ convertToApolloFedParserFunc sInfo tInfo selectPermissions stringifyNumbers tCas
   fmap (modifyApolloFedParserFunc sInfo tInfo selectPermissions stringifyNumbers tCase pKeys)
 
 modifyApolloFedParserFunc ::
-  (MonadParse n, Backend b) =>
+  (IsParse n, Backend b) =>
   SourceInfo b ->
   TableInfo b ->
   SelPermInfo b ->

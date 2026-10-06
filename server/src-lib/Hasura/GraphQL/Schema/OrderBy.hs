@@ -50,7 +50,7 @@ import Type.Reflection
 {-# INLINE orderByOperator #-}
 orderByOperator ::
   forall b n.
-  (BackendSchema b, MonadParse n) =>
+  (BackendSchema b, P.IsParse n) =>
   NamingCase ->
   SourceInfo b ->
   Parser 'Both n (Maybe (BasicOrderType b, NullsOrderType b))
@@ -360,21 +360,21 @@ orderByAggregation sourceInfo tableInfo = P.memoizeOn 'orderByAggregation (_siNa
 
 orderByOperatorsHasuraCase ::
   forall b n.
-  (BackendSchema b, MonadParse n) =>
+  (BackendSchema b, P.IsParse n) =>
   SourceInfo b ->
   Parser 'Both n (Maybe (BasicOrderType b, NullsOrderType b))
 orderByOperatorsHasuraCase = orderByOperator' @b HasuraCase
 
 orderByOperatorsGraphqlCase ::
   forall b n.
-  (BackendSchema b, MonadParse n) =>
+  (BackendSchema b, P.IsParse n) =>
   SourceInfo b ->
   Parser 'Both n (Maybe (BasicOrderType b, NullsOrderType b))
 orderByOperatorsGraphqlCase = orderByOperator' @b GraphqlCase
 
 orderByOperator' ::
   forall b n.
-  (BackendSchema b, MonadParse n) =>
+  (BackendSchema b, P.IsParse n) =>
   NamingCase ->
   SourceInfo b ->
   Parser 'Both n (Maybe (BasicOrderType b, NullsOrderType b))
