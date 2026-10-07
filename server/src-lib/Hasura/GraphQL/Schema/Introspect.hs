@@ -7,7 +7,7 @@ module Hasura.GraphQL.Schema.Introspect
   )
 where
 
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.List.NonEmpty qualified as NE
@@ -732,4 +732,4 @@ nameAsEncJSON :: (P.HasName a) => a -> EncJSON
 nameAsEncJSON = encJFromJValue . G.unName . P.getName
 
 encJNull :: EncJSON
-encJNull = encJFromJValue Aeson.Null
+encJNull = encJFromJValue J.Null
