@@ -19,7 +19,7 @@ import Data.List.Extended (duplicates)
 import Data.Text.Extended
 import Data.Text.NonEmpty qualified as NT
 import Database.PG.Query.Pool qualified as PG
-import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleNameSafe)
+import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleNameSafe, roleNameToTxt)
 import Hasura.Base.Error
 import Hasura.Base.ErrorMessage
 import Hasura.Base.ToErrorValue
@@ -199,13 +199,12 @@ buildGQLContext
                     )
           pure (fst <$> contexts, snd <$> contexts)
         else do
-          -- See Note [Building the admin parsers lazily]
-          adminContext <- buildAdminRoleContextLazily (buildHasuraRoleContext adminRoleName)
+          -- One role at a time, see Note [Building role parsers lazily]
           hctxs <-
             fmap HashMap.fromList
-              $ forConcurrentlyEIO 10 (Set.toList $ Set.delete adminRoleName allRoles)
-              $ \role -> (role,) <$> buildHasuraRoleContext role
-          pure (HashMap.insert adminRoleName adminContext hctxs, HashMap.empty)
+              $ for (Set.toList allRoles)
+              $ \role -> (role,) <$> buildRoleContextLazily role (buildHasuraRoleContext role)
+          pure (hctxs, HashMap.empty)
 
     adminIntrospection <-
       case HashMap.lookup adminRoleName hasuraContexts of
@@ -264,55 +263,60 @@ buildGQLContext
           let schemaSdl = generateSDL schemaIntrospection
            in (GQLSchemaInformation (SchemaSDL schemaSdl) (calculateSchemaSDLHash schemaSdl r))
 
-{- Note [Building the admin parsers lazily]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The admin role sees every table with every column and every mutation, so its
-parsers are the largest part of the schema cache, while deployments usually
-send GraphQL requests with a non-admin role. What the schema cache always needs
-from the admin role is its introspection (to validate query collections and
-REST endpoints, for OpenAPI and the schema registry) and the inconsistencies
-found while building it.
+{- Note [Building role parsers lazily]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The roles' parsers are most of the schema cache, and while a new schema cache
+is built the old one stays live to serve requests, so building every role's
+parsers up front holds two full sets of parsers at the peak of a rebuild. What
+the schema cache needs right away is much smaller: the inconsistencies found
+while building each role, its root field names, which optional parsers exist,
+and the admin role's introspection (to validate query collections and REST
+endpoints, and for OpenAPI and the schema registry).
 
-So we build the admin role context once, on its own and before the other roles,
-keep its introspection, inconsistencies, root field names and which optional
-parsers exist, and let its parsers become garbage. In its place we store a
-context whose parsers rebuild the real one on the first admin GraphQL request
-and keep it from then on. Building before the other roles means the eager admin
-parsers never overlap with the new role parsers, and the old schema cache no
-longer holds admin parsers either, unless an admin request forced them.
+So we build each role's context on its own, one role at a time, keep only
+those, and let its parsers become garbage before the next role is built. In
+their place we store a context whose parsers rebuild the real one on the
+role's first GraphQL request and keep it from then on. During a rebuild the new
+schema cache holds at most one role's parsers, and after the swap the heap holds
+the parsers of the roles that have been used since.
+
+The other roles' introspection is only read by the schema registry; it is a
+thunk that rebuilds the role's context.
 
 Nothing may hold on to the eager context, which is why the stand-in is built
 by matching on the optional parsers rather than by mapping over them, and
 evaluated in IO before it is returned.
 
 This only applies when the Relay API is disabled: with Relay enabled, every
-role's Hasura and Relay contexts are built together, and the admin role keeps
-its parsers.
+role's Hasura and Relay contexts are built together and keep their parsers.
 -}
 
--- | See Note [Building the admin parsers lazily]
-buildAdminRoleContextLazily ::
+-- | See Note [Building role parsers lazily]
+buildRoleContextLazily ::
   (MonadIO m, MonadError QErr m) =>
+  RoleName ->
   ExceptT QErr IO RoleContextValue ->
   m RoleContextValue
-buildAdminRoleContextLazily build = do
-  (RoleContext eagerFrontend eagerBackend, errors, G.SchemaIntrospection introspection) <-
+buildRoleContextLazily role build = do
+  (RoleContext eagerFrontend eagerBackend, errors, G.SchemaIntrospection eagerIntrospection) <-
     liftEither =<< liftIO (runExceptT build)
   rebuilt <- liftIO $ unsafeInterleaveIO $ runExceptT build
-  let withRebuilt :: (RoleContext GQLContext -> Maybe GQLContext) -> (GQLContext -> Either QErr a) -> Either QErr a
+  let missing :: Text -> Either QErr a
+      missing what = throw500 $ "the rebuilt context of role " <> roleNameToTxt role <> " has no " <> what
+      withRebuilt :: (RoleContext GQLContext -> Maybe GQLContext) -> (GQLContext -> Either QErr a) -> Either QErr a
       withRebuilt select k = do
         (context, _, _) <- rebuilt
-        maybe (throw500 "the rebuilt admin role context is missing a parser") k (select context)
+        maybe (missing "parser") k (select context)
       standIn select eager =
         GQLContext
           { gqlQueryParser = \s -> withRebuilt select \c -> gqlQueryParser c s,
             gqlQueryRootFieldNames = force (gqlQueryRootFieldNames eager),
             gqlMutationParser = case gqlMutationParser eager of
               Nothing -> Nothing
-              Just _ -> Just \s -> withRebuilt select \c -> maybe (throw500 "the rebuilt admin role context has no mutation parser") ($ s) (gqlMutationParser c),
+              Just _ -> Just \s -> withRebuilt select \c -> maybe (missing "mutation parser") ($ s) (gqlMutationParser c),
             gqlSubscriptionParser = case gqlSubscriptionParser eager of
               Nothing -> Nothing
-              Just _ -> Just \s -> withRebuilt select \c -> maybe (throw500 "the rebuilt admin role context has no subscription parser") ($ s) (gqlSubscriptionParser c)
+              Just _ -> Just \s -> withRebuilt select \c -> maybe (missing "subscription parser") ($ s) (gqlSubscriptionParser c)
           }
   -- Evaluate everything we keep here, in IO: a pure binding could be inlined
   -- into the result as a thunk that still points at the eager parsers.
@@ -320,9 +324,12 @@ buildAdminRoleContextLazily build = do
     frontend <- evaluate $ standIn (Just . _rctxDefault) eagerFrontend
     backend <- traverse (evaluate . standIn _rctxBackend) eagerBackend
     roleContext <- evaluate $ RoleContext frontend backend
-    introspection' <- evaluate $ force introspection
+    introspection <-
+      if role == adminRoleName
+        then evaluate $ force eagerIntrospection
+        else pure $ either (const mempty) (\(_, _, G.SchemaIntrospection i) -> i) rebuilt
     errors' <- evaluate errors
-    pure (roleContext, errors', G.SchemaIntrospection introspection')
+    pure (roleContext, errors', G.SchemaIntrospection introspection)
 
 buildSchemaOptions ::
   (SQLGenCtx, Options.InferFunctionPermissions) ->
