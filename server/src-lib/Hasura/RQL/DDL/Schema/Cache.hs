@@ -393,15 +393,15 @@ So the sources and remote schemas are still re-introspected and the catalog is
 still rebuilt, but the GraphQL schema is only built when one of its inputs
 changed. Besides the dynamic config, 'schemaInputsFingerprint' summarises them:
 
-* the metadata, as the JSON it is stored as. Comparing 'Metadata' values with
+- the metadata, as the JSON it is stored as. Comparing 'Metadata' values with
   '==' is not enough: after `replace_metadata` some parts (e.g. remote schema
   permission documents) keep the order they were written in, and after a
   reload they have the order Hasura prints them in, so the same metadata
   compares unequal depending on how it was last loaded;
-* the source and remote schema introspection results (the same bytes stored
+- the source and remote schema introspection results (the same bytes stored
   introspection persists);
-* the enum table values, which are not part of the introspection;
-* which objects are inconsistent, by name: an unreachable source or a failed
+- the enum table values, which are not part of the introspection;
+- which objects are inconsistent, by name: an unreachable source or a failed
   validation drops objects from the schema. The reasons are left out, for the
   same ordering reason as above, and because they do not change the schema.
 
