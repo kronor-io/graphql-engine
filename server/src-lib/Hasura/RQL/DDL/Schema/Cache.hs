@@ -701,7 +701,7 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       let (fetchedInconsistentObjects, fetchedDependencies, fetchedStoredIntrospections) = partitionCollectedInfo fetchedInfo
           fingerprint = schemaInputsFingerprint buildReason metadata fetched fetchedInconsistentObjects
       (inconsistentObjects, storedIntrospections, out2, out3) <-
-        Inc.cache buildCatalogAndSchema
+        Inc.cacheShallow buildCatalogAndSchema
           -<
             ((dynamicConfig, fingerprint), Unkeyed (metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies))
       returnA -< (fetchedInconsistentObjects <> inconsistentObjects, fetchedStoredIntrospections <> storedIntrospections, out2, out3)

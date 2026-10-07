@@ -30,6 +30,11 @@ class (ArrowKleisli m arr) => ArrowCache m arr | arr -> m where
   -- provides access to values through a side-channel, they will __not__ participate in caching.
   cache :: ((Given Accesses) => Eq a) => arr a b -> arr a b
 
+  -- | Like 'cache', but on a cache miss the arrow is run from scratch rather than incrementally,
+  -- so only the last input and result are retained, not the caches built up inside the arrow.
+  -- Use it around a large arrow whose inner caches are rarely hit when its input changes.
+  cacheShallow :: ((Given Accesses) => Eq a) => arr a b -> arr a b
+
   -- | Creates a new 'Dependency', which allows fine-grained caching of composite values; see the
   -- documentation for 'Dependency' for more details.
   newDependency :: arr a (Dependency a)
@@ -41,6 +46,8 @@ class (ArrowKleisli m arr) => ArrowCache m arr | arr -> m where
 instance (ArrowChoice arr, ArrowCache m arr) => ArrowCache m (ErrorA e arr) where
   cache (ErrorA f) = ErrorA (cache f)
   {-# INLINE cache #-}
+  cacheShallow (ErrorA f) = ErrorA (cacheShallow f)
+  {-# INLINE cacheShallow #-}
   newDependency = liftA newDependency
   {-# INLINE newDependency #-}
   dependOn = liftA dependOn
@@ -49,6 +56,8 @@ instance (ArrowChoice arr, ArrowCache m arr) => ArrowCache m (ErrorA e arr) wher
 instance (Monoid w, ArrowCache m arr) => ArrowCache m (WriterA w arr) where
   cache (WriterA f) = WriterA (cache f)
   {-# INLINE cache #-}
+  cacheShallow (WriterA f) = WriterA (cacheShallow f)
+  {-# INLINE cacheShallow #-}
   newDependency = liftA newDependency
   {-# INLINE newDependency #-}
   dependOn = liftA dependOn
@@ -73,6 +82,24 @@ instance (MonadIO m) => ArrowCache m (Rule m) where
         if
           | unchanged accesses a a' -> (k $! (s <> accesses)) b (cached accesses a b (Rule r))
           | otherwise -> r s a' \s' (b', accesses') r' -> k s' b' (cached accesses' a' b' r')
+
+  cacheShallow ::
+    forall a b.
+    ((Given Accesses) => Eq a) =>
+    Rule m a b ->
+    Rule m a b
+  cacheShallow r0 = Rule \s a k -> run s a k
+    where
+      -- Always run the original rule, and drop the continuation it returns.
+      run :: Accesses -> a -> (Accesses -> b -> Rule m a b -> m r) -> m r
+      run s a k = case r0 of
+        Rule r -> r mempty a \s' b _ -> (k $! (s <> s')) b (cached s' a b)
+
+      cached :: Accesses -> a -> b -> Rule m a b
+      cached accesses a b = Rule \s a' k ->
+        if
+          | unchanged accesses a a' -> (k $! (s <> accesses)) b (cached accesses a b)
+          | otherwise -> run s a' k
 
   newDependency = Rule \s a k -> do
     key <- DependencyRoot <$> newUniqueS
