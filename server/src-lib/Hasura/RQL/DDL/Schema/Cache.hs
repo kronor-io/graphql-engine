@@ -26,6 +26,7 @@ where
 import Control.Arrow.Extended
 import Control.Arrow.Interpret
 import Control.Lens hiding ((.=))
+import Control.Exception (evaluate)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Retry qualified as Retry
 import Crypto.Hash qualified as Crypto
@@ -123,6 +124,7 @@ import Hasura.Table.Metadata (TableMetadata (..))
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
 import Network.Types.Extended
+import System.IO.Unsafe (unsafeInterleaveIO)
 
 {- Note [Roles Inheritance]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -380,6 +382,26 @@ partitionCollectedInfo =
           _3 %~ ([storedIntrospection] <>)
    in foldr go ([], [], []) . toList
 
+{- Note [Keeping the admin introspection out of the schema cache]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The admin role's introspection (several MiB for a large schema) is needed while
+building, to validate query collections and REST endpoints against the admin
+schema, and afterwards only to serve the OpenAPI specification. So the
+validation runs inside 'buildCatalogAndSchema', on the introspection that was
+just built, and its result is fully evaluated there; the schema cache instead
+gets an introspection that is built again, from the same inputs, the first time
+it is used.
+-}
+
+-- | Evaluates the list and each message, so that nothing is left pointing at
+-- the admin introspection.
+evaluateInconsistencies :: [InconsistentMetadata] -> IO [InconsistentMetadata]
+evaluateInconsistencies inconsistencies = do
+  for_ inconsistencies \case
+    InconsistentObject message _ _ -> void $ evaluate message
+    other -> void $ evaluate other
+  evaluate inconsistencies
+
 {- Note [Reusing the catalog and schema when their inputs are unchanged]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 `replace_metadata` and `reload_metadata` invalidate every source (and
@@ -412,6 +434,12 @@ If these are unchanged, the previous catalog and schema are returned as they
 are, and the freshly fetched source configurations are dropped. Otherwise
 everything is built as before, with the fetched inputs taking the place of
 fetching them during the build.
+
+The cache is 'Inc.cacheShallow': when the fingerprint changes, the catalog and
+schema are built from scratch rather than incrementally. Keeping the
+incremental caches inside 'buildCatalogAndSchema' between builds (a rule
+continuation per table, permission and so on) cost about 8 MiB for Kronor's
+metadata, while a changed build took as long with them as without.
 
 The fingerprint does not cover everything a build can depend on, so the
 catalog and schema are always rebuilt when the build:
@@ -592,9 +620,6 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       endpointObject :: EndpointMetadata q -> MetadataObject
       endpointObject md = MetadataObject (endpointObjId md) (toJSON $ InsOrdHashMap.lookup (_ceName md) _metaRestEndpoints)
 
-      listedQueryObjects :: (CollectionName, ListedQuery) -> MetadataObject
-      listedQueryObjects (cName, lq) = MetadataObject (MOQueryCollectionsQuery cName lq) (toJSON lq)
-
       --  Cases of urls that generate invalid segments:
 
       hasInvalidSegments :: EndpointMetadata query -> Bool
@@ -615,7 +640,6 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       ambiguousRestEndpoints = map (ambiguousF . S.elems . snd) $ ambiguousPathsGrouped endpoints
 
       inlinedAllowlist = inlineAllowlist _metaQueryCollections _metaAllowlist
-      globalAllowLists = HS.toList . iaGlobal $ inlinedAllowlist
 
       -- Endpoints don't generate any dependencies
       (endpointInconsistencies, _, _) = partitionCollectedInfo endpointCollectedInfo
@@ -625,8 +649,6 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
 
       -- OpenTelemerty doesn't generate any dependencies
       (openTelemetryInconsistencies, _, _) = partitionCollectedInfo openTelemetryCollectedInfo
-
-      inconsistentQueryCollections = getInconsistentQueryCollections adminIntrospection _metaQueryCollections listedQueryObjects endpoints globalAllowLists
 
   let schemaCache =
         SchemaCache
@@ -656,8 +678,7 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
                 <> ambiguousRestEndpoints
                 <> endpointInconsistencies
                 <> cronTriggersInconsistencies
-                <> openTelemetryInconsistencies
-                <> inconsistentQueryCollections,
+                <> openTelemetryInconsistencies,
             scApiLimits = _metaApiLimits,
             scMetricsConfig = _metaMetricsConfig,
             -- Please note that we are setting the metadata resource version to the last known metadata resource version
@@ -703,17 +724,15 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       (inconsistentObjects, storedIntrospections, out2, out3) <-
         Inc.cacheShallow buildCatalogAndSchema
           -<
-            ((dynamicConfig, fingerprint), Unkeyed (metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies))
+            ((dynamicConfig, fingerprint), Unkeyed (metadata, metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies))
       returnA -< (fetchedInconsistentObjects <> inconsistentObjects, fetchedStoredIntrospections <> storedIntrospections, out2, out3)
 
-    buildCatalogAndSchema = proc ((dynamicConfig, _), Unkeyed (metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies)) -> do
+    buildCatalogAndSchema = proc ((dynamicConfig, _), Unkeyed (metadata, metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies)) -> do
       bindA -< unLogger logger $ UnstructuredLog LevelInfo (SB.fromText "building the catalog and GraphQL schema: their inputs changed")
       (outputs, collectedInfo) <- runWriterA buildAndCollectInfo -< (dynamicConfig, metadataDep, invalidationKeysDep, storedIntrospection, fetched)
       let (inconsistentObjects, unresolvedDependencies, storedIntrospections) = partitionCollectedInfo collectedInfo
       out2@(resolvedOutputs, _dependencyInconsistentObjects, _resolvedDependencies) <- resolveDependencies -< (outputs, fetchedDependencies <> unresolvedDependencies)
-      out3 <-
-        bindA
-          -< do
+      let buildContexts =
             buildGQLContext
               (_cdcSchemaSampledFeatureFlags dynamicConfig)
               (_cdcFunctionPermsCtx dynamicConfig)
@@ -728,7 +747,33 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
               (_boCustomTypes resolvedOutputs)
               mSchemaRegistryContext
               logger
-      returnA -< (inconsistentObjects, storedIntrospections, out2, out3)
+      ((adminIntrospection, gqlContext, gqlContextUnauth, inconsistentRemoteSchemas), relay, schemaRegistryAction) <-
+        bindA -< liftEither =<< liftIO (runExceptT buildContexts)
+      -- See Note [Keeping the admin introspection out of the schema cache]
+      (queryCollectionInconsistencies, lazyAdminIntrospection) <-
+        bindA
+          -< liftIO do
+            inconsistencies <- evaluateInconsistencies $ queryCollectionInconsistencies adminIntrospection metadata
+            lazy <- unsafeInterleaveIO $ either (const (G.SchemaIntrospection mempty)) (view (_1 . _1)) <$> runExceptT buildContexts
+            pure (inconsistencies, lazy)
+      returnA
+        -<
+          ( inconsistentObjects <> queryCollectionInconsistencies,
+            storedIntrospections,
+            out2,
+            ((lazyAdminIntrospection, gqlContext, gqlContextUnauth, inconsistentRemoteSchemas), relay, schemaRegistryAction)
+          )
+
+    -- | Query collections and REST endpoints that don't validate against the
+    -- admin schema. See Note [Keeping the admin introspection out of the schema cache].
+    queryCollectionInconsistencies :: G.SchemaIntrospection -> Metadata -> [InconsistentMetadata]
+    queryCollectionInconsistencies adminIntrospection Metadata {..} =
+      getInconsistentQueryCollections adminIntrospection _metaQueryCollections listedQueryObjects endpoints globalAllowLists
+      where
+        resolvedEndpoints = fst $ runIdentity $ runWriterT $ buildRESTEndpoints _metaQueryCollections (InsOrdHashMap.elems _metaRestEndpoints)
+        endpoints = buildEndpointsTrie (HashMap.elems resolvedEndpoints)
+        listedQueryObjects (cName, lq) = MetadataObject (MOQueryCollectionsQuery cName lq) (toJSON lq)
+        globalAllowLists = HS.toList . iaGlobal $ inlineAllowlist _metaQueryCollections _metaAllowlist
 
     -- | Fetches everything a build needs from outside the metadata. See Note
     -- [Reusing the catalog and schema when their inputs are unchanged].

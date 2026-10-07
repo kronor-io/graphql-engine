@@ -242,7 +242,7 @@ buildGQLContext
 
     pure
       ( ( adminIntrospection,
-          view _1 <$> hasuraContexts,
+          HashMap.map (view _1) hasuraContexts,
           unauthenticated,
           Set.unions $ unauthenticatedRemotesErrors : (view _2 <$> HashMap.elems hasuraContexts)
         ),
