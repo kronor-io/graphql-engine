@@ -380,49 +380,67 @@ partitionCollectedInfo =
           _3 %~ ([storedIntrospection] <>)
    in foldr go ([], [], []) . toList
 
-{- Note [Reusing the GraphQL schema when its inputs are unchanged]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Reusing the catalog and schema when their inputs are unchanged]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 `replace_metadata` and `reload_metadata` invalidate every source (and
 `reload_metadata` every remote schema), so the `Inc.cache` around
-`buildOutputsAndSchema` misses and the whole schema is rebuilt, even when
-nothing it is built from has changed. Building the GraphQL schema is by far the
-most expensive step, and it runs next to the previous schema, which stays live
+`buildOutputsAndSchema` misses and the whole catalog and GraphQL schema are
+rebuilt, even when nothing they are built from has changed. That rebuild is
+expensive, and it runs next to the previous schema cache, which stays live
 until the new one is swapped in.
 
-So the sources and remote schemas are still re-introspected and the catalog is
-still rebuilt, but the GraphQL schema is only built when one of its inputs
-changed. Besides the dynamic config, 'schemaInputsFingerprint' summarises them:
+So the build is split in two. 'fetchExternalInputs' runs on every build and
+fetches everything that comes from outside the metadata, with the same
+invalidation-based caching as before: each source's configuration and
+introspection, the values of its enum tables, and each remote schema's
+introspection. The rest, the catalog and the GraphQL schema, is built by
+'buildCatalogAndSchema' from the metadata and those fetched inputs, and is
+cached on the dynamic config and 'schemaInputsFingerprint', which summarises:
 
 - the metadata, as the JSON it is stored as. Comparing 'Metadata' values with
   '==' is not enough: after `replace_metadata` some parts (e.g. remote schema
   permission documents) keep the order they were written in, and after a
   reload they have the order Hasura prints them in, so the same metadata
   compares unequal depending on how it was last loaded;
-- the source and remote schema introspection results (the same bytes stored
-  introspection persists);
-- the enum table values, which are not part of the introspection;
-- which objects are inconsistent, by name: an unreachable source or a failed
-  validation drops objects from the schema. The reasons are left out, for the
-  same ordering reason as above, and because they do not change the schema.
+- each source's introspection and enum table values;
+- each remote schema's introspection, or the error fetching it;
+- which objects were found inconsistent while fetching, by name (e.g. an
+  unreachable source). The reasons are left out: they do not change what is
+  built.
 
-If all of these are unchanged, the previous catalog and schema are returned as
-they are, and the freshly built catalog is dropped.
+If these are unchanged, the previous catalog and schema are returned as they
+are, and the freshly fetched source configurations are dropped. Otherwise
+everything is built as before, with the fetched inputs taking the place of
+fetching them during the build.
 
-Data connector backends fetch capabilities from their agents, which the
-fingerprint does not cover, so this is only done without data connectors.
+The fingerprint does not cover everything a build can depend on, so the
+catalog and schema are always rebuilt when the build:
+
+- uses data connectors, whose agent capabilities are not fetched up front;
+- has enum tables whose columns come from a logical model, whose values
+  'buildTableCache' fetches itself;
+- asks to recreate the event triggers of a source that has event triggers,
+  which happens while the catalog is built.
 -}
 
--- | Compares equal to anything: a value that is passed through an 'Inc.cache'
--- without being part of its key. See Note [Reusing the GraphQL schema when its
--- inputs are unchanged].
-newtype Unkeyed a = Unkeyed a
+-- | What 'fetchExternalInputs' fetched for one source.
+data FetchedSource b = FetchedSource
+  { _fsConfig :: SourceConfig b,
+    _fsIntrospection :: DBObjectsIntrospection b,
+    _fsEnumValues :: HashMap (TableName b) (Either QErr EnumValues)
+  }
 
-instance Eq (Unkeyed a) where
-  _ == _ = True
+-- | Everything a build needs from outside the metadata. See Note [Reusing the
+-- catalog and schema when their inputs are unchanged].
+data FetchedInputs = FetchedInputs
+  { _fiSources :: HashMap SourceName (AB.AnyBackend FetchedSource),
+    _fiRemoteSchemas :: HashMap RemoteSchemaName (Either QErr (IntrospectionResult, LBS.ByteString, RemoteSchemaInfo)),
+    _fiBackendCache :: BackendCache
+  }
 
--- | What the GraphQL schema is built from besides the dynamic config.
--- 'Uncacheable' never compares equal, so the schema is always rebuilt.
--- See Note [Reusing the GraphQL schema when its inputs are unchanged].
+-- | What the catalog and schema are built from besides the dynamic config.
+-- 'Uncacheable' never compares equal, so they are always rebuilt. See Note
+-- [Reusing the catalog and schema when their inputs are unchanged].
 data SchemaInputsFingerprint
   = SchemaInputsFingerprint (Crypto.Digest Crypto.SHA256)
   | Uncacheable
@@ -431,37 +449,51 @@ instance Eq SchemaInputsFingerprint where
   SchemaInputsFingerprint a == SchemaInputsFingerprint b = a == b
   _ == _ = False
 
--- | See Note [Reusing the GraphQL schema when its inputs are unchanged]
-schemaInputsFingerprint ::
-  Metadata -> [InconsistentMetadata] -> [StoredIntrospectionItem] -> BuildOutputs -> [InconsistentMetadata] -> SchemaInputsFingerprint
-schemaInputsFingerprint metadata inconsistentObjects introspections outputs dependencyInconsistentObjects
-  | not (null (BackendMap.elems (_boBackendCache outputs))) = Uncacheable
+-- | See Note [Reusing the catalog and schema when their inputs are unchanged]
+schemaInputsFingerprint :: BuildReason -> Metadata -> FetchedInputs -> [InconsistentMetadata] -> SchemaInputsFingerprint
+schemaInputsFingerprint buildReason metadata fetched inconsistentObjects
+  | not (null (BackendMap.elems (_fiBackendCache fetched))) = Uncacheable
+  | any enumTablesFromLogicalModels sources = Uncacheable
+  | any (recreatesEventTriggers buildReason) sources = Uncacheable
   | otherwise =
       SchemaInputsFingerprint
         $ Crypto.hashFinalize
         $ Crypto.hashUpdates (Crypto.hashInit @Crypto.SHA256)
         $ [ LBS.toStrict (encode metadata),
-            LBS.toStrict (encode (sort (moiName <$> concatMap imObjectIds (inconsistentObjects <> dependencyInconsistentObjects))))
+            LBS.toStrict (encode (sort (moiName <$> concatMap imObjectIds inconsistentObjects)))
           ]
-        <> concatMap introspectionBytes (sortOn introspectionKey introspections)
-        <> [LBS.toStrict (encode (enumValues <$> sortOn fst (HashMap.toList (_boSources outputs))))]
+        <> concatMap sourceBytes (sortOn fst (HashMap.toList (_fiSources fetched)))
+        <> concatMap remoteSchemaBytes (sortOn fst (HashMap.toList (_fiRemoteSchemas fetched)))
   where
-    introspectionKey = \case
-      SourceIntrospectionItem name _ -> (False, toTxt name)
-      RemoteSchemaIntrospectionItem name _ -> (True, toTxt name)
-    introspectionBytes = \case
-      SourceIntrospectionItem name introspection -> ["source", txtToBs (toTxt name), encJToBS introspection]
-      RemoteSchemaIntrospectionItem name introspection -> ["remote", txtToBs (toTxt name), encJToBS introspection]
-    enumValues (sourceName, sourceInfo) =
-      ( sourceName,
-        AB.dispatchAnyBackend @Backend sourceInfo \source ->
-          sortOn
-            fst
-            [ (toTxt tableName, sortOn fst (HashMap.toList values))
-            | (tableName, tableInfo) <- HashMap.toList (_siTables source),
-              Just values <- [tableInfo ^. tiCoreInfo . tciEnumValues]
-            ]
-      )
+    sources = InsOrdHashMap.elems (_metaSources metadata)
+    tablesOf :: BackendSourceMetadata -> (forall b. (Backend b) => TableMetadata b -> Bool) -> Bool
+    tablesOf (BackendSourceMetadata source) p =
+      AB.dispatchAnyBackend @Backend source \sourceMetadata -> any p (_smTables sourceMetadata)
+    enumTablesFromLogicalModels source =
+      tablesOf source \table -> _tmIsEnum table && isJust (_tmLogicalModel table)
+    recreatesEventTriggers reason source@(BackendSourceMetadata anySource) = case reason of
+      CatalogUpdate (Just names)
+        | AB.dispatchAnyBackend @Backend anySource ((`HS.member` names) . _smName) ->
+            tablesOf source (not . null . _tmEventTriggers)
+      _ -> False
+    sourceBytes (name, source) =
+      [ "source",
+        txtToBs (toTxt name),
+        AB.dispatchAnyBackend @BackendMetadata source \FetchedSource {..} ->
+          LBS.toStrict
+            $ encode
+              ( _fsIntrospection,
+                sortOn fst
+                  [ (toTxt table, bimap qeError (sortOn fst . HashMap.toList) values)
+                  | (table, values) <- HashMap.toList _fsEnumValues
+                  ]
+              )
+      ]
+    remoteSchemaBytes (name, response) =
+      [ "remote",
+        txtToBs (toTxt name),
+        either (("error " <>) . txtToBs . qeError) (\(_, bytes, _) -> LBS.toStrict bytes) response
+      ]
 
 buildSourcesIntrospectionStatus ::
   Sources -> RemoteSchemas -> [StoredIntrospectionItem] -> SourcesIntrospectionStatus
@@ -663,15 +695,22 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
   where
     -- See Note [Avoiding GraphQL schema rebuilds when changing irrelevant Metadata]
     buildOutputsAndSchema = proc (Unkeyed metadata, metadataDep, dynamicConfig, invalidationKeysDep, storedIntrospection) -> do
-      (outputs, collectedInfo) <- runWriterA buildAndCollectInfo -< (dynamicConfig, metadataDep, invalidationKeysDep, storedIntrospection)
-      let (inconsistentObjects, unresolvedDependencies, storedIntrospections) = partitionCollectedInfo collectedInfo
-      out2@(resolvedOutputs, dependencyInconsistentObjects, _resolvedDependencies) <- resolveDependencies -< (outputs, unresolvedDependencies)
-      -- See Note [Reusing the GraphQL schema when its inputs are unchanged]
-      let fingerprint = schemaInputsFingerprint metadata inconsistentObjects storedIntrospections resolvedOutputs dependencyInconsistentObjects
-      Inc.cache buildSchemaFromCatalog -< ((dynamicConfig, fingerprint), Unkeyed (inconsistentObjects, storedIntrospections, out2))
+      -- See Note [Reusing the catalog and schema when their inputs are unchanged]
+      (fetched, fetchedInfo) <- runWriterA fetchExternalInputs -< (dynamicConfig, metadataDep, invalidationKeysDep, storedIntrospection)
+      buildReason <- bindA -< ask
+      let (fetchedInconsistentObjects, fetchedDependencies, fetchedStoredIntrospections) = partitionCollectedInfo fetchedInfo
+          fingerprint = schemaInputsFingerprint buildReason metadata fetched fetchedInconsistentObjects
+      (inconsistentObjects, storedIntrospections, out2, out3) <-
+        Inc.cache buildCatalogAndSchema
+          -<
+            ((dynamicConfig, fingerprint), Unkeyed (metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies))
+      returnA -< (fetchedInconsistentObjects <> inconsistentObjects, fetchedStoredIntrospections <> storedIntrospections, out2, out3)
 
-    buildSchemaFromCatalog = proc ((dynamicConfig, _), Unkeyed (inconsistentObjects, storedIntrospections, out2@(resolvedOutputs, _, _))) -> do
-      bindA -< unLogger logger $ UnstructuredLog LevelInfo (SB.fromText "building the GraphQL schema: its inputs changed")
+    buildCatalogAndSchema = proc ((dynamicConfig, _), Unkeyed (metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies)) -> do
+      bindA -< unLogger logger $ UnstructuredLog LevelInfo (SB.fromText "building the catalog and GraphQL schema: their inputs changed")
+      (outputs, collectedInfo) <- runWriterA buildAndCollectInfo -< (dynamicConfig, metadataDep, invalidationKeysDep, storedIntrospection, fetched)
+      let (inconsistentObjects, unresolvedDependencies, storedIntrospections) = partitionCollectedInfo collectedInfo
+      out2@(resolvedOutputs, _dependencyInconsistentObjects, _resolvedDependencies) <- resolveDependencies -< (outputs, fetchedDependencies <> unresolvedDependencies)
       out3 <-
         bindA
           -< do
@@ -690,6 +729,73 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
               mSchemaRegistryContext
               logger
       returnA -< (inconsistentObjects, storedIntrospections, out2, out3)
+
+    -- | Fetches everything a build needs from outside the metadata. See Note
+    -- [Reusing the catalog and schema when their inputs are unchanged].
+    fetchExternalInputs ::
+      forall arr m.
+      ( ArrowChoice arr,
+        Inc.ArrowDistribute arr,
+        Inc.ArrowCache m arr,
+        ArrowWriter (Seq CollectItem) arr,
+        MonadIO m,
+        MonadError QErr m,
+        MonadReader BuildReason m,
+        MonadBaseControl IO m,
+        ProvidesNetwork m,
+        MonadResolveSource m,
+        HasCacheStaticConfig m
+      ) =>
+      (CacheDynamicConfig, Inc.Dependency Metadata, Inc.Dependency InvalidationKeys, Maybe StoredIntrospection) `arr` FetchedInputs
+    fetchExternalInputs = proc (dynamicConfig, metadataDep, invalidationKeys, storedIntrospection) -> do
+      sources <- Inc.dependOn -< Inc.selectD #_metaSources metadataDep
+      remoteSchemas <- Inc.dependOn -< Inc.selectD #_metaRemoteSchemas metadataDep
+      backendConfigs <- Inc.dependOn -< Inc.selectD #_metaBackendConfigs metadataDep
+      backendCache <- resolveBackendCache -< (Inc.selectD #_ikBackends invalidationKeys, BackendMap.elems backendConfigs)
+      let backendInfoAndSourceMetadata = joinBackendInfosToSources backendCache sources
+      fetchedSources <-
+        (|
+          Inc.keyed
+            ( \_ exists ->
+                AB.dispatchAnyBackendArrow @BackendMetadata @BackendMetadata
+                  ( proc (backendInfoAndSourceMetadata :: BackendInfoAndSourceMetadata b, (dynamicConfig, invalidationKeys, storedIntrospection)) -> do
+                      let sourceMetadata = _bcasmSourceMetadata backendInfoAndSourceMetadata
+                          sourceName = _smName sourceMetadata
+                          sourceIntrospection = HashMap.lookup sourceName =<< siBackendIntrospection <$> storedIntrospection
+                      maybeResolvedSource <-
+                        tryResolveSource
+                          -<
+                            ( Inc.selectD #_ikSources invalidationKeys,
+                              encJToLBS <$> sourceIntrospection,
+                              backendInfoAndSourceMetadata,
+                              _cdcSchemaSampledFeatureFlags dynamicConfig
+                            )
+                      case maybeResolvedSource of
+                        Nothing -> returnA -< Nothing
+                        Just (sourceConfig, introspection) -> do
+                          let (tableInputs, _, _) = unzip3 $ map mkTableInputs $ InsOrdHashMap.elems $ _smTables sourceMetadata
+                          enumValues <- bindA -< fetchSourceEnumValues sourceConfig (_rsTables introspection) tableInputs
+                          returnA -< Just $ AB.mkAnyBackend @b $ FetchedSource sourceConfig introspection enumValues
+                  )
+                  -<
+                    (exists, (dynamicConfig, invalidationKeys, storedIntrospection))
+            )
+          |)
+          (HashMap.fromList $ InsOrdHashMap.toList backendInfoAndSourceMetadata)
+      fetchedRemoteSchemas <-
+        fetchRemoteSchemas env
+          -<
+            ( Inc.selectD #_ikRemoteSchemas invalidationKeys,
+              _cdcSchemaSampledFeatureFlags dynamicConfig,
+              HashMap.fromList [(_rsmName remoteSchema, _rsmDefinition remoteSchema) | remoteSchema <- reverse (InsOrdHashMap.elems remoteSchemas)]
+            )
+      returnA
+        -<
+          FetchedInputs
+            { _fiSources = catMaybes fetchedSources,
+              _fiRemoteSchemas = fetchedRemoteSchemas,
+              _fiBackendCache = backendCache
+            }
 
     resolveBackendInfo' ::
       forall arr m b.
@@ -1274,14 +1380,13 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
         MonadResolveSource m,
         HasCacheStaticConfig m
       ) =>
-      (CacheDynamicConfig, Inc.Dependency Metadata, Inc.Dependency InvalidationKeys, Maybe StoredIntrospection) `arr` BuildOutputs
-    buildAndCollectInfo = proc (dynamicConfig, metadataDep, invalidationKeys, storedIntrospection) -> do
+      (CacheDynamicConfig, Inc.Dependency Metadata, Inc.Dependency InvalidationKeys, Maybe StoredIntrospection, FetchedInputs) `arr` BuildOutputs
+    buildAndCollectInfo = proc (dynamicConfig, metadataDep, invalidationKeys, storedIntrospection, fetched) -> do
       sources <- Inc.dependOn -< Inc.selectD #_metaSources metadataDep
       remoteSchemas <- Inc.dependOn -< Inc.selectD #_metaRemoteSchemas metadataDep
       customTypes <- Inc.dependOn -< Inc.selectD #_metaCustomTypes metadataDep
       actions <- Inc.dependOn -< Inc.selectD #_metaActions metadataDep
       inheritedRoles <- Inc.dependOn -< Inc.selectD #_metaInheritedRoles metadataDep
-      backendConfigs <- Inc.dependOn -< Inc.selectD #_metaBackendConfigs metadataDep
       let actionRoles = map _apmRole . _amPermissions =<< InsOrdHashMap.elems actions
           remoteSchemaRoles = map _rspmRole . _rsmPermissions =<< InsOrdHashMap.elems remoteSchemas
           sourceRoles =
@@ -1321,15 +1426,13 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       remoteSchemaMap <-
         buildRemoteSchemas logger env
           -<
-            ((remoteSchemaInvalidationKeys, orderedRoles, fmap encJToLBS . siRemotes <$> storedIntrospection, _cdcSchemaSampledFeatureFlags dynamicConfig), InsOrdHashMap.elems remoteSchemas)
+            ((remoteSchemaInvalidationKeys, orderedRoles, fmap encJToLBS . siRemotes <$> storedIntrospection, _cdcSchemaSampledFeatureFlags dynamicConfig, Unkeyed (_fiRemoteSchemas fetched)), InsOrdHashMap.elems remoteSchemas)
       let remoteSchemaCtxMap = HashMap.map fst remoteSchemaMap
           !defaultNC = _cdcDefaultNamingConvention dynamicConfig
           !isNamingConventionEnabled = EFNamingConventions `elem` (_cdcExperimentalFeatures dynamicConfig)
 
-      let backendInvalidationKeys = Inc.selectD #_ikBackends invalidationKeys
-      backendCache <- resolveBackendCache -< (backendInvalidationKeys, BackendMap.elems backendConfigs)
-
-      let backendInfoAndSourceMetadata = joinBackendInfosToSources backendCache sources
+      let backendCache = _fiBackendCache fetched
+          backendInfoAndSourceMetadata = joinBackendInfosToSources backendCache sources
 
       -- sources are build in two steps
       -- first we resolve them, and build the table cache
@@ -1338,22 +1441,12 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
           Inc.keyed
             ( \_ exists ->
                 AB.dispatchAnyBackendArrow @BackendMetadata @BackendEventTrigger
-                  ( proc (backendInfoAndSourceMetadata :: BackendInfoAndSourceMetadata b, (dynamicConfig, invalidationKeys, storedIntrospection, defaultNC, isNamingConventionEnabled)) -> do
+                  ( proc (backendInfoAndSourceMetadata :: BackendInfoAndSourceMetadata b, (dynamicConfig, invalidationKeys, Unkeyed fetchedSources, defaultNC, isNamingConventionEnabled)) -> do
                       let sourceMetadata = _bcasmSourceMetadata backendInfoAndSourceMetadata
                           sourceName = _smName sourceMetadata
-                          sourceInvalidationsKeys = Inc.selectD #_ikSources invalidationKeys
-                          sourceIntrospection = HashMap.lookup sourceName =<< siBackendIntrospection <$> storedIntrospection
-                      maybeResolvedSource <-
-                        tryResolveSource
-                          -<
-                            ( sourceInvalidationsKeys,
-                              encJToLBS <$> sourceIntrospection,
-                              backendInfoAndSourceMetadata,
-                              _cdcSchemaSampledFeatureFlags dynamicConfig
-                            )
-                      case maybeResolvedSource of
+                      case AB.unpackAnyBackend @b =<< HashMap.lookup sourceName fetchedSources of
                         Nothing -> returnA -< Nothing
-                        Just (sourceConfig, source) -> do
+                        Just (FetchedSource sourceConfig source enumValues) -> do
                           let metadataInvalidationKey = Inc.selectD #_ikMetadata invalidationKeys
                               (tableInputs, _, _) = unzip3 $ map mkTableInputs $ InsOrdHashMap.elems $ _smTables sourceMetadata
                               scNamingConvention = _scNamingConvention $ _smCustomization sourceMetadata
@@ -1367,7 +1460,8 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
                                   tableInputs,
                                   metadataInvalidationKey,
                                   namingConv,
-                                  _smLogicalModels sourceMetadata
+                                  _smLogicalModels sourceMetadata,
+                                  enumValues
                                 )
 
                           let tablesMetadata = InsOrdHashMap.elems $ _smTables sourceMetadata
@@ -1396,7 +1490,7 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
                                 $ PartiallyResolvedSource sourceMetadata sourceConfig source tablesCoreInfo eventTriggerInfoMaps
                   )
                   -<
-                    (exists, (dynamicConfig, invalidationKeys, storedIntrospection, defaultNC, isNamingConventionEnabled))
+                    (exists, (dynamicConfig, invalidationKeys, Unkeyed (_fiSources fetched), defaultNC, isNamingConventionEnabled))
             )
           |)
           (HashMap.fromList $ InsOrdHashMap.toList backendInfoAndSourceMetadata)
