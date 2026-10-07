@@ -2,6 +2,7 @@
 
 module Hasura.RemoteSchema.SchemaCache.Build
   ( buildRemoteSchemas,
+    fetchRemoteSchemas,
     addRemoteSchemaP2Setup,
   )
 where
@@ -52,7 +53,13 @@ buildRemoteSchemas ::
   ) =>
   Logger Hasura ->
   Env.Environment ->
-  ( (Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey), OrderedRoles, Maybe (HashMap RemoteSchemaName BL.ByteString), SchemaSampledFeatureFlags),
+  ( ( Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey),
+      OrderedRoles,
+      Maybe (HashMap RemoteSchemaName BL.ByteString),
+      SchemaSampledFeatureFlags,
+      -- Introspection results fetched by 'fetchRemoteSchemas'
+      Unkeyed (HashMap RemoteSchemaName (Either QErr (IntrospectionResult, BL.ByteString, RemoteSchemaInfo)))
+    ),
     [RemoteSchemaMetadataG remoteRelationshipDefinition]
   )
     `arr` HashMap RemoteSchemaName (PartiallyResolvedRemoteSchemaCtxG remoteRelationshipDefinition, MetadataObject)
@@ -62,10 +69,12 @@ buildRemoteSchemas logger env =
     -- We want to cache this call because it fetches the remote schema over
     -- HTTP, and we don’t want to re-run that if the remote schema definition
     -- hasn’t changed.
-    buildRemoteSchema = Inc.cache proc ((invalidationKeys, orderedRoles, storedIntrospection, schemaSampledFeatureFlags), remoteSchema@(RemoteSchemaMetadata name defn _comment permissions relationships)) -> do
+    buildRemoteSchema = Inc.cache proc ((invalidationKeys, orderedRoles, storedIntrospection, schemaSampledFeatureFlags, Unkeyed fetched), remoteSchema@(RemoteSchemaMetadata name defn _comment permissions relationships)) -> do
       Inc.dependOn -< Inc.selectKeyD name invalidationKeys
       let metadataObj = mkRemoteSchemaMetadataObject remoteSchema
-      upstreamResponse <- bindA -< runExceptT (noopTrace $ addRemoteSchemaP2Setup name env schemaSampledFeatureFlags defn)
+      upstreamResponse <- case HashMap.lookup name fetched of
+        Just response -> returnA -< response
+        Nothing -> bindA -< runExceptT (noopTrace $ addRemoteSchemaP2Setup name env schemaSampledFeatureFlags defn)
       remoteSchemaContextParts <-
         case upstreamResponse of
           Right upstream@(_, byteString, _) -> do
@@ -126,6 +135,34 @@ buildRemoteSchemas logger env =
 
     mkRemoteSchemaMetadataObject remoteSchema =
       MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON remoteSchema)
+
+-- | Fetches the introspection of every remote schema, the same way
+-- 'buildRemoteSchemas' would, so that it can be compared before the catalog is
+-- built. See Note [Reusing the catalog and schema when their inputs are
+-- unchanged] in "Hasura.RQL.DDL.Schema.Cache".
+fetchRemoteSchemas ::
+  ( ArrowChoice arr,
+    Inc.ArrowDistribute arr,
+    Inc.ArrowCache m arr,
+    MonadIO m,
+    MonadBaseControl IO m,
+    ProvidesNetwork m
+  ) =>
+  Env.Environment ->
+  (Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey), SchemaSampledFeatureFlags, HashMap RemoteSchemaName RemoteSchemaDef)
+    `arr` HashMap RemoteSchemaName (Either QErr (IntrospectionResult, BL.ByteString, RemoteSchemaInfo))
+fetchRemoteSchemas env = proc (invalidationKeys, schemaSampledFeatureFlags, definitions) ->
+  (|
+    Inc.keyed
+      ( \name definition ->
+          fetchRemoteSchema' -< (invalidationKeys, schemaSampledFeatureFlags, name, definition)
+      )
+    |)
+    definitions
+  where
+    fetchRemoteSchema' = Inc.cache proc (invalidationKeys, schemaSampledFeatureFlags, name, definition) -> do
+      Inc.dependOn -< Inc.selectKeyD name invalidationKeys
+      bindA -< runExceptT (Tracing.ignoreTraceT $ addRemoteSchemaP2Setup name env schemaSampledFeatureFlags definition)
 
 -- | Resolves a RemoteSchemaPermission metadata object into a 'GraphQL schema'.
 buildRemoteSchemaPermissions ::

@@ -21,6 +21,7 @@ module Hasura.Table.API
     SetTableCustomization (..),
     runSetTableCustomization,
     buildTableCache,
+    fetchSourceEnumValues,
     checkConflictingNode,
     SetApolloFederationConfig (..),
     runSetApolloFederationConfig,
@@ -638,6 +639,36 @@ runUntrackTableQ q = do
 -- | Builds an initial table cache. Does not fill in permissions or event triggers, and the returned
 -- @FieldInfoMap@s only contain columns, not relationships; those pieces of information are filled
 -- in later.
+-- | Fetches the values of the enum tables of a source, the same way
+-- 'buildTableCache' would, so that they can be compared before the catalog is
+-- built. Tables whose columns come from a logical model are left out:
+-- 'buildTableCache' fetches those itself. See Note [Reusing the catalog and
+-- schema when their inputs are unchanged] in "Hasura.RQL.DDL.Schema.Cache".
+fetchSourceEnumValues ::
+  forall b m.
+  (BackendMetadata b, MonadIO m, MonadBaseControl IO m) =>
+  SourceConfig b ->
+  DBTablesMetadata b ->
+  [TableBuildInput b] ->
+  m (HashMap.HashMap (TableName b) (Either QErr EnumValues))
+fetchSourceEnumValues sourceConfig dbTablesMeta tableBuildInputs =
+  fmap HashMap.fromList
+    $ for enumTables \(name, metadataTable) -> do
+      let columns = _ptmiColumns metadataTable
+          columnMap = mapFromL (FieldName . toTxt . rciName) columns
+      result <- runExceptT do
+        rawPrimaryKey <- for (_ptmiPrimaryKey metadataTable) $ traverseOf (pkColumns . traverse) \columnName ->
+          HashMap.lookup (FieldName (toTxt columnName)) columnMap
+            `onNothing` throw500 "column in primary key not in table!"
+        liftEitherM $ fetchAndValidateEnumValues sourceConfig name rawPrimaryKey columns
+      pure (name, result)
+  where
+    enumTables =
+      [ (name, metadataTable)
+      | TableBuildInput name True _ _ Nothing <- tableBuildInputs,
+        Just metadataTable <- [HashMap.lookup name dbTablesMeta]
+      ]
+
 buildTableCache ::
   forall arr m b.
   ( ArrowChoice arr,
@@ -654,10 +685,12 @@ buildTableCache ::
     [TableBuildInput b],
     Inc.Dependency Inc.InvalidationKey,
     NamingCase,
-    LogicalModels b
+    LogicalModels b,
+    -- Enum values fetched by 'fetchSourceEnumValues'
+    HashMap.HashMap (TableName b) (Either QErr EnumValues)
   )
     `arr` HashMap.HashMap (TableName b) (TableCoreInfoG b (StructuredColumnInfo b) (ColumnInfo b))
-buildTableCache = Inc.cache proc (source, sourceConfig, dbTablesMeta, tableBuildInputs, reloadMetadataInvalidationKey, tCase, logicalModels) -> do
+buildTableCache = Inc.cache proc (source, sourceConfig, dbTablesMeta, tableBuildInputs, reloadMetadataInvalidationKey, tCase, logicalModels, fetchedEnumValues) -> do
   rawTableInfos <-
     (|
       Inc.keyed
@@ -672,7 +705,7 @@ buildTableCache = Inc.cache proc (source, sourceConfig, dbTablesMeta, tableBuild
                           -<
                             err400 NotExists $ "no such table/view exists in source: " <>> _tbiName table
                       Just metadataTable ->
-                        buildRawTableInfo -< (source, table, metadataTable, sourceConfig, reloadMetadataInvalidationKey, logicalModels)
+                        buildRawTableInfo -< (source, table, metadataTable, sourceConfig, reloadMetadataInvalidationKey, logicalModels, HashMap.lookup (_tbiName table) fetchedEnumValues)
                 )
             |)
               (mkTableMetadataObject source tableName)
@@ -710,10 +743,11 @@ buildTableCache = Inc.cache proc (source, sourceConfig, dbTablesMeta, tableBuild
           DBTableMetadata b,
           SourceConfig b,
           Inc.Dependency Inc.InvalidationKey,
-          LogicalModels b
+          LogicalModels b,
+          Maybe (Either QErr EnumValues)
         )
         (TableCoreInfoG b (RawColumnInfo b) (Column b))
-    buildRawTableInfo = Inc.cache proc (sourceName, tableBuildInput, metadataTable, sourceConfig, reloadMetadataInvalidationKey, logicalModels) -> do
+    buildRawTableInfo = Inc.cache proc (sourceName, tableBuildInput, metadataTable, sourceConfig, reloadMetadataInvalidationKey, logicalModels, fetchedEnumValues) -> do
       let TableBuildInput name isEnum config apolloFedConfig mLogicalModelName = tableBuildInput
       columns <-
         liftEitherA
@@ -745,7 +779,9 @@ buildTableCache = Inc.cache proc (source, sourceConfig, dbTablesMeta, tableBuild
             -- We want to make sure we reload enum values whenever someone explicitly calls
             -- `reload_metadata`.
             Inc.dependOn -< reloadMetadataInvalidationKey
-            eitherEnums <- bindA -< fetchAndValidateEnumValues sourceConfig name rawPrimaryKey columns
+            eitherEnums <- case fetchedEnumValues of
+              Just fetched -> returnA -< fetched
+              Nothing -> bindA -< fetchAndValidateEnumValues sourceConfig name rawPrimaryKey columns
             liftEitherA -< Just <$> eitherEnums
           else returnA -< Nothing
 

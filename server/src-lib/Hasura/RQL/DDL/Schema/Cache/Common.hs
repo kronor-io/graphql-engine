@@ -10,6 +10,7 @@ module Hasura.RQL.DDL.Schema.Cache.Common
     ApolloFederationVersion (..),
     BackendInvalidationKeysWrapper (..),
     BuildOutputs (..),
+    Unkeyed (..),
     CacheBuild,
     CacheBuildParams (CacheBuildParams),
     InvalidationKeys (..),
@@ -130,6 +131,14 @@ invalidateKeys CacheInvalidations {..} InvalidationKeys {..} =
     invalidateDataConnectors :: BackendInvalidationKeysWrapper 'DataConnector -> BackendInvalidationKeysWrapper 'DataConnector
     invalidateDataConnectors (BackendInvalidationKeysWrapper invalidationKeys) =
       BackendInvalidationKeysWrapper $ foldl' (flip invalidate) invalidationKeys ciDataConnectors
+
+-- | Compares equal to anything: a value that is passed through an 'Inc.cache'
+-- without being part of its key. See Note [Reusing the catalog and schema when
+-- their inputs are unchanged] in "Hasura.RQL.DDL.Schema.Cache".
+newtype Unkeyed a = Unkeyed a
+
+instance Eq (Unkeyed a) where
+  _ == _ = True
 
 data TableBuildInput b = TableBuildInput
   { _tbiName :: TableName b,
