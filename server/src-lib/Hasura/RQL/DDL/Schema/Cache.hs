@@ -413,6 +413,12 @@ are, and the freshly fetched source configurations are dropped. Otherwise
 everything is built as before, with the fetched inputs taking the place of
 fetching them during the build.
 
+The cache is 'Inc.cacheShallow': when the fingerprint changes, the catalog and
+schema are built from scratch rather than incrementally. Keeping the
+incremental caches inside 'buildCatalogAndSchema' between builds (a rule
+continuation per table, permission and so on) cost about 8 MiB for Kronor's
+metadata, while a changed build took as long with them as without.
+
 The fingerprint does not cover everything a build can depend on, so the
 catalog and schema are always rebuilt when the build:
 
@@ -701,7 +707,7 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       let (fetchedInconsistentObjects, fetchedDependencies, fetchedStoredIntrospections) = partitionCollectedInfo fetchedInfo
           fingerprint = schemaInputsFingerprint buildReason metadata fetched fetchedInconsistentObjects
       (inconsistentObjects, storedIntrospections, out2, out3) <-
-        Inc.cache buildCatalogAndSchema
+        Inc.cacheShallow buildCatalogAndSchema
           -<
             ((dynamicConfig, fingerprint), Unkeyed (metadataDep, invalidationKeysDep, storedIntrospection, fetched, fetchedDependencies))
       returnA -< (fetchedInconsistentObjects <> inconsistentObjects, fetchedStoredIntrospections <> storedIntrospections, out2, out3)
