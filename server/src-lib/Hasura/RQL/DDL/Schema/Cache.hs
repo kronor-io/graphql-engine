@@ -391,13 +391,22 @@ until the new one is swapped in.
 
 So the sources and remote schemas are still re-introspected and the catalog is
 still rebuilt, but the GraphQL schema is only built when one of its inputs
-changed: the metadata, the dynamic config, or what was fetched from outside the
-metadata. The latter is summarised by 'schemaInputsFingerprint': the source
-and remote schema introspection results (the same bytes stored introspection
-persists), the enum table values (which are not part of the introspection), and
-the inconsistent objects (an unreachable source or a failed validation drops
-objects from the schema). If all of these are unchanged, the previous catalog
-and schema are returned as they are, and the freshly built catalog is dropped.
+changed. Besides the dynamic config, 'schemaInputsFingerprint' summarises them:
+
+* the metadata, as the JSON it is stored as. Comparing 'Metadata' values with
+  '==' is not enough: after `replace_metadata` some parts (e.g. remote schema
+  permission documents) keep the order they were written in, and after a
+  reload they have the order Hasura prints them in, so the same metadata
+  compares unequal depending on how it was last loaded;
+* the source and remote schema introspection results (the same bytes stored
+  introspection persists);
+* the enum table values, which are not part of the introspection;
+* which objects are inconsistent, by name: an unreachable source or a failed
+  validation drops objects from the schema. The reasons are left out, for the
+  same ordering reason as above, and because they do not change the schema.
+
+If all of these are unchanged, the previous catalog and schema are returned as
+they are, and the freshly built catalog is dropped.
 
 Data connector backends fetch capabilities from their agents, which the
 fingerprint does not cover, so this is only done without data connectors.
@@ -411,8 +420,8 @@ newtype Unkeyed a = Unkeyed a
 instance Eq (Unkeyed a) where
   _ == _ = True
 
--- | What the GraphQL schema is built from besides the metadata and the dynamic
--- config. 'Uncacheable' never compares equal, so the schema is always rebuilt.
+-- | What the GraphQL schema is built from besides the dynamic config.
+-- 'Uncacheable' never compares equal, so the schema is always rebuilt.
 -- See Note [Reusing the GraphQL schema when its inputs are unchanged].
 data SchemaInputsFingerprint
   = SchemaInputsFingerprint (Crypto.Digest Crypto.SHA256)
@@ -424,14 +433,16 @@ instance Eq SchemaInputsFingerprint where
 
 -- | See Note [Reusing the GraphQL schema when its inputs are unchanged]
 schemaInputsFingerprint ::
-  [InconsistentMetadata] -> [StoredIntrospectionItem] -> BuildOutputs -> [InconsistentMetadata] -> SchemaInputsFingerprint
-schemaInputsFingerprint inconsistentObjects introspections outputs dependencyInconsistentObjects
+  Metadata -> [InconsistentMetadata] -> [StoredIntrospectionItem] -> BuildOutputs -> [InconsistentMetadata] -> SchemaInputsFingerprint
+schemaInputsFingerprint metadata inconsistentObjects introspections outputs dependencyInconsistentObjects
   | not (null (BackendMap.elems (_boBackendCache outputs))) = Uncacheable
   | otherwise =
       SchemaInputsFingerprint
         $ Crypto.hashFinalize
         $ Crypto.hashUpdates (Crypto.hashInit @Crypto.SHA256)
-        $ [LBS.toStrict (encode inconsistentObjects), LBS.toStrict (encode dependencyInconsistentObjects)]
+        $ [ LBS.toStrict (encode metadata),
+            LBS.toStrict (encode (sort (moiName <$> concatMap imObjectIds (inconsistentObjects <> dependencyInconsistentObjects))))
+          ]
         <> concatMap introspectionBytes (sortOn introspectionKey introspections)
         <> [LBS.toStrict (encode (enumValues <$> sortOn fst (HashMap.toList (_boSources outputs))))]
   where
@@ -656,10 +667,10 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
       let (inconsistentObjects, unresolvedDependencies, storedIntrospections) = partitionCollectedInfo collectedInfo
       out2@(resolvedOutputs, dependencyInconsistentObjects, _resolvedDependencies) <- resolveDependencies -< (outputs, unresolvedDependencies)
       -- See Note [Reusing the GraphQL schema when its inputs are unchanged]
-      let fingerprint = schemaInputsFingerprint inconsistentObjects storedIntrospections resolvedOutputs dependencyInconsistentObjects
-      Inc.cache buildSchemaFromCatalog -< ((metadata, dynamicConfig, fingerprint), Unkeyed (inconsistentObjects, storedIntrospections, out2))
+      let fingerprint = schemaInputsFingerprint metadata inconsistentObjects storedIntrospections resolvedOutputs dependencyInconsistentObjects
+      Inc.cache buildSchemaFromCatalog -< ((dynamicConfig, fingerprint), Unkeyed (inconsistentObjects, storedIntrospections, out2))
 
-    buildSchemaFromCatalog = proc ((_, dynamicConfig, _), Unkeyed (inconsistentObjects, storedIntrospections, out2@(resolvedOutputs, _, _))) -> do
+    buildSchemaFromCatalog = proc ((dynamicConfig, _), Unkeyed (inconsistentObjects, storedIntrospections, out2@(resolvedOutputs, _, _))) -> do
       bindA -< unLogger logger $ UnstructuredLog LevelInfo (SB.fromText "building the GraphQL schema: its inputs changed")
       out3 <-
         bindA
