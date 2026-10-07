@@ -46,7 +46,7 @@ import Language.GraphQL.Draft.Syntax qualified as G
 -- | Argument to limit the maximum number of results returned in a single batch.
 cursorBatchSizeArg ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   NamingCase ->
   InputFieldsParser n Int
 cursorBatchSizeArg tCase =

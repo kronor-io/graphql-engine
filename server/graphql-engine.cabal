@@ -259,7 +259,12 @@ common common-exe
     -- `--disable-delayed-os-memory-return` seems to help lower reported residency, in particular
     -- in situations where we seem to be dealing with haskell heap fragmentation. This is more a
     -- workaround for limitations in monitoring tools than anything...
-    "-with-rtsopts=-N -I0 -T -kc8K --disable-delayed-os-memory-return"
+    --
+    -- `-Fd1` returns the free heap left after a schema cache rebuild to the OS
+    -- in a few major GCs instead of ~12 (the default is `-Fd4`), and after a
+    -- rebuild that reuses most of the previous cache it is what lets the heap
+    -- shrink at all. See 'Hasura.GC.shrinkHeapOnRequest'.
+    "-with-rtsopts=-N -I0 -T -kc8K --disable-delayed-os-memory-return -Fd1"
 
 
 -- See 'preload-mimalloc/README.md'

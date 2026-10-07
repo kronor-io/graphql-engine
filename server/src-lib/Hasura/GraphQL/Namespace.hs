@@ -83,7 +83,7 @@ unflattenNamespaces = InsOrdHashMap.foldlWithKey' insert mempty
 -- | Wrap the field parser results in @NamespacedField@
 customizeNamespace ::
   forall n a.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Maybe G.Name ->
   (G.Name -> P.ParsedSelection a -> a) ->
   MkTypename ->

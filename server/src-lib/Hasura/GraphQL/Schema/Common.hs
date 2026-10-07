@@ -179,7 +179,7 @@ isHasuraSchema = \case
 type MonadBuildSchemaBase m n =
   ( MonadError QErr m,
     P.MonadMemoize m,
-    P.MonadParse n
+    P.IsParse n
   )
 
 -- | How a remote relationship field should be processed when building a

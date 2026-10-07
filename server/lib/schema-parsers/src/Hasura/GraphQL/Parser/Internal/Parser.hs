@@ -104,7 +104,7 @@ nullable = fmap nullableToMaybe . nullableExact
 -- variable value is absent without default.  See GraphQL spec June 2018 section
 -- 2.9.5.
 nullableExact :: forall origin k m a. (MonadParse m, 'Input <: k) => Parser origin k m a -> Parser origin k m (NullableInput a)
-nullableExact parser =
+nullableExact ~(Parser innerType innerParser) =
   gcastWith
     (inputParserInput @k)
     Parser
@@ -113,11 +113,16 @@ nullableExact parser =
           peelVariableWith False gType >=> \case
             Just (JSONValue J.Null) -> pure $ NullableInputNull gType
             Just (GraphQLValue VNull) -> pure $ NullableInputNull gType
-            Just value -> NullableInputValue <$> pParser parser value
+            Just value -> NullableInputValue <$> innerParser value
             Nothing -> pure NullableInputAbsent
       }
   where
-    schemaType = nullableType $ pType parser
+    -- Lazily match the inner parser so the closure keeps only its parse
+    -- function, not the whole record: once the record is evaluated the GC
+    -- short-circuits the selector thunks. The match must stay lazy because the
+    -- inner parser may be knot-tied (e.g. a bool_exp's `_not` field), see
+    -- Note [Tying the knot] in Hasura.GraphQL.Parser.Class.
+    schemaType = nullableType innerType
     gType = toGraphQLType schemaType
 
 -- | Decorate a schema field as NON_NULL

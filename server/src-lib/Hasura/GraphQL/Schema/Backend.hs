@@ -240,7 +240,7 @@ class
 
   -- | Parser for arguments on scalar fields in a selection set
   scalarSelectionArgumentsParser ::
-    (MonadParse n) =>
+    (IsParse n) =>
     ColumnType b ->
     InputFieldsParser n (Maybe (ScalarSelectionArguments b))
 
@@ -257,7 +257,7 @@ class
   -- | The input fields parser, for "count" aggregate field, yielding a function
   -- which generates @'CountType b' from optional "distinct" field value
   countTypeInput ::
-    (MonadParse n) =>
+    (IsParse n) =>
     Maybe (Parser 'Both n (Column b, AnnRedactionExpUnpreparedValue b)) ->
     InputFieldsParser n (CountDistinct -> CountType b (UnpreparedValue b))
 

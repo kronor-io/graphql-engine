@@ -122,6 +122,10 @@ runApp env (HGEOptions rci metadataDbUrl hgeCmd) = do
           C.forkImmortal "ourIdleGC" logger
             $ GC.ourIdleGC logger (seconds 0.3) (seconds 10) (seconds 60)
 
+        _heapShrinkThread <-
+          C.forkImmortal "shrinkHeapOnRequest" logger
+            $ GC.shrinkHeapOnRequest logger (seconds 1) 16
+
         runAppM appEnv do
           appStateRef <- initialiseAppContext env serveOptions appInit
           lowerManagedT

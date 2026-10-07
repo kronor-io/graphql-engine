@@ -1007,7 +1007,7 @@ buildMutationFields mkRootFieldName scenario sourceInfo tables (takeExposedAs FE
 --   for queries, mutations and subscriptions built in.
 buildQueryParser ::
   forall n m.
-  (MonadMemoize m, MonadError QErr m, MonadParse n) =>
+  (MonadMemoize m, MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   [P.FieldParser n (G.SchemaIntrospection -> QueryRootField UnpreparedValue)] ->
   [(RemoteSchemaName, P.FieldParser n (NamespacedField (RemoteSchemaRootField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)))] ->
@@ -1051,7 +1051,7 @@ parseBuildIntrospectionSchema q m s =
 
 queryWithIntrospectionHelper ::
   forall n m.
-  (MonadMemoize m, MonadParse n, MonadError QErr m) =>
+  (MonadMemoize m, P.IsParse n, MonadError QErr m) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   Maybe (Parser 'Output n (RootFieldMap (MutationRootField UnpreparedValue))) ->
   Maybe (Parser 'Output n (RootFieldMap (QueryRootField UnpreparedValue))) ->
@@ -1083,7 +1083,7 @@ queryWithIntrospectionHelper basicQueryFP mutationP subscriptionP = do
 
 queryRootFromFields ::
   forall n m.
-  (MonadError QErr m, MonadParse n) =>
+  (MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   m (Parser 'Output n (RootFieldMap (QueryRootField UnpreparedValue)))
 queryRootFromFields fps =
@@ -1091,7 +1091,7 @@ queryRootFromFields fps =
 
 buildMutationParser ::
   forall n m.
-  (MonadMemoize m, MonadError QErr m, MonadParse n) =>
+  (MonadMemoize m, MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (MutationRootField UnpreparedValue))] ->
   [(RemoteSchemaName, P.FieldParser n (NamespacedField (RemoteSchemaRootField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)))] ->
   [P.FieldParser n (MutationRootField UnpreparedValue)] ->
@@ -1110,7 +1110,7 @@ buildMutationParser mutationFields remoteFields actionFields = do
 -- asynchronous actions.
 buildSubscriptionParser ::
   forall n m.
-  (MonadMemoize m, MonadError QErr m, MonadParse n) =>
+  (MonadMemoize m, MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   [(RemoteSchemaName, P.FieldParser n (NamespacedField (RemoteSchemaRootField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)))] ->
   [P.FieldParser n (QueryRootField UnpreparedValue)] ->
@@ -1141,7 +1141,7 @@ safeSelectionSet name description fields =
 -- | Apply a source's customization options to a list of its fields.
 customizeFields ::
   forall f n db remote action.
-  (Functor f, MonadParse n) =>
+  (Functor f, P.IsParse n) =>
   ResolvedSourceCustomization ->
   MkTypename ->
   f [FieldParser n (RootField db remote action RFRawPayload)] ->

@@ -99,7 +99,7 @@ nodeInterface sourceCache = NodeInterfaceParserBuilder $ \context options -> mem
 -- a corresponding 'QueryRootField' that will extract the requested row.
 nodeField ::
   forall m n.
-  (MonadError QErr m, P.MonadMemoize m, P.MonadParse n) =>
+  (MonadError QErr m, P.MonadMemoize m, P.IsParse n) =>
   SourceCache ->
   SchemaContext ->
   Options.SchemaOptions ->

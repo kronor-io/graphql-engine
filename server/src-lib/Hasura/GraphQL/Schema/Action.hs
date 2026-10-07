@@ -260,7 +260,7 @@ actionAsyncQuery objectTypes actionInfo = runMaybeT do
               | otherwise -> PGJSON
 
 -- | Async action's unique id
-actionIdParser :: (MonadParse n) => Parser 'Both n ActionId
+actionIdParser :: (P.IsParse n) => Parser 'Both n ActionId
 actionIdParser = ActionId <$> P.uuid
 
 actionOutputFields ::
