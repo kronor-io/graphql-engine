@@ -1028,6 +1028,7 @@ library
                      , Hasura.GraphQL.Schema.Select
                      , Hasura.GraphQL.Schema.SubscriptionStream
                      , Hasura.GraphQL.Schema.Table
+                     , Hasura.GraphQL.Schema.TableFields
                      , Hasura.GraphQL.Schema.Typename
                      , Hasura.GraphQL.Schema.Update
                      , Hasura.GraphQL.Schema.Update.Batch
