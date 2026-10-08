@@ -122,50 +122,33 @@ tableFieldsObject ::
 tableFieldsObject name description fieldInfoMap (codes, entries) mkColumnField otherFields mkResult =
   P.objectWith name description definitions parseFields
   where
-    -- Folds over the table's fields that are part of the object, in order. A
-    -- fold rather than a list, so that GHC can't float the list out of the
-    -- parser and keep it alive with the schema.
-    foldFields :: (FieldInfo b -> TableFieldEntry (Parser k n c) (InputFieldsParser n (Maybe x)) -> a -> a) -> a -> a
-    foldFields f z =
+    -- the definitions of the fields, only evaluated for introspection
+    definitions =
       HashMap.foldr
         ( \fieldInfo continue !i ->
             let code = codes U.! i
              in if code == absentField
                   then continue (i + 1)
-                  else f fieldInfo (entries V.! fromIntegral code) (continue (i + 1))
+                  else definition fieldInfo (entries V.! fromIntegral code) (continue (i + 1))
         )
-        (const z)
+        (const $ P.ifDefinitions otherFields)
         fieldInfoMap
         (0 :: Int)
-
-    definitions =
-      foldFields
-        ( \fieldInfo entry rest -> case (entry, fieldInfo) of
-            (ColumnEntry parser, FIColumn (SCIScalarColumn columnInfo)) ->
-              P.Definition (ciName columnInfo) Nothing Nothing [] (P.InputFieldInfo (P.nullableType $ P.pType parser) Nothing) : rest
-            (OtherEntry parser, _) -> P.ifDefinitions parser ++ rest
-            _ -> rest
-        )
-        (P.ifDefinitions otherFields)
+    definition fieldInfo entry rest = case (entry, fieldInfo) of
+      (ColumnEntry parser, FIColumn (SCIScalarColumn columnInfo)) ->
+        P.Definition (ciName columnInfo) Nothing Nothing [] (P.InputFieldInfo (P.nullableType $ P.pType parser) Nothing) : rest
+      (OtherEntry parser, _) -> P.ifDefinitions parser ++ rest
+      _ -> rest
 
     parseFields input = do
-      -- the fields of the table that are given, in order
-      let given =
-            foldFields
-              ( \fieldInfo entry rest -> case (entry, fieldInfo) of
-                  (ColumnEntry parser, FIColumn (SCIScalarColumn columnInfo))
-                    | Just value <- HashMap.lookup (ciName columnInfo) input ->
-                        GivenColumn parser columnInfo value : rest
-                  (OtherEntry parser, _)
-                    | any (\d -> HashMap.member (P.dName d) input) (P.ifDefinitions parser) ->
-                        GivenOther parser : rest
-                  _ -> rest
-              )
-              []
+      -- the fields of the table that are given, in order, and how many of the
+      -- given fields they are
+      let Walk _ givenCount givenReversed = HashMap.foldl' (walk input) (Walk 0 0 []) fieldInfoMap
+          given = reverse givenReversed
           givenOthers = filter (\d -> HashMap.member (P.dName d) input) (P.ifDefinitions otherFields)
       -- Any other given field isn't a field of the object: reject it the way
       -- 'P.object' does.
-      when (length given + length givenOthers /= HashMap.size input) do
+      when (givenCount + length givenOthers /= HashMap.size input) do
         let known = HashSet.fromList $ map P.dName givenOthers ++ concatMap givenNames given
         P.checkInputObjectFields name (`HashSet.member` known) input
       tableFields <- for given \case
@@ -174,9 +157,30 @@ tableFieldsObject name description fieldInfoMap (codes, entries) mkColumnField o
         GivenOther parser -> P.ifParser parser input
       mkResult (catMaybes tableFields) <$> P.ifParser otherFields input
 
+    -- One step of the walk over the table's fields that finds the given ones.
+    -- A strict left fold, so that a parse only allocates for the given fields.
+    walk input (Walk i count acc) fieldInfo
+      | code == absentField = Walk (i + 1) count acc
+      | otherwise = case (V.unsafeIndex entries (fromIntegral code), fieldInfo) of
+          (ColumnEntry parser, FIColumn (SCIScalarColumn columnInfo))
+            | Just value <- HashMap.lookup (ciName columnInfo) input ->
+                Walk (i + 1) (count + 1) (GivenColumn parser columnInfo value : acc)
+          (OtherEntry parser, _)
+            | names <- length $ filter (\d -> HashMap.member (P.dName d) input) (P.ifDefinitions parser),
+              names > 0 ->
+                Walk (i + 1) (count + names) (GivenOther parser : acc)
+          _ -> Walk (i + 1) count acc
+      where
+        code = U.unsafeIndex codes i
+
     givenNames = \case
       GivenColumn _ columnInfo _ -> [ciName columnInfo]
       GivenOther parser -> map P.dName $ P.ifDefinitions parser
+
+-- | The state of the walk over a table's fields in 'tableFieldsObject': the
+-- index of the next field, the number of given fields found, and the given
+-- fields found, in reverse order.
+data Walk b k n c x = Walk !Int !Int [GivenField b k n c x]
 
 -- | A field of a table given in a table input object.
 data GivenField b k n c x
