@@ -165,8 +165,9 @@ buildGQLContext
     -- but that isn't really acheivable (see mono #3829). NOTE: the admin role
     -- will still be a bottleneck here, even on huge_schema which has many
     -- roles.
-    let buildHasuraRoleContext role =
+    let buildHasuraRoleContext checks role =
           buildRoleContext
+            checks
             sampledFeatureFlags
             (sqlGen, functionPermissions)
             sources
@@ -187,7 +188,7 @@ buildGQLContext
               $ \role ->
                 (role,)
                   <$> concurrentlyEIO
-                    (buildHasuraRoleContext role)
+                    (buildHasuraRoleContext CheckSchema role)
                     ( buildRelayRoleContext
                         (sqlGen, functionPermissions)
                         sources
@@ -203,7 +204,12 @@ buildGQLContext
           hctxs <-
             fmap HashMap.fromList
               $ for (Set.toList allRoles)
-              $ \role -> (role,) <$> buildRoleContextLazily role (buildHasuraRoleContext role)
+              $ \role ->
+                (role,)
+                  <$> buildRoleContextLazily
+                    role
+                    (buildHasuraRoleContext CheckSchema role)
+                    (buildHasuraRoleContext SkipSchemaChecks role)
           pure (hctxs, HashMap.empty)
 
     adminIntrospection <-
@@ -283,6 +289,13 @@ the parsers of the roles that have been used since.
 The other roles' introspection is only read by the schema registry; it is a
 thunk that rebuilds the role's context.
 
+The rebuild skips the checks for conflicting type definitions: it builds the
+same schema from the same schema cache as the eager build, which passed them.
+The checks walk every type of the schema, which would evaluate the thunks of
+the type definitions that are only needed for introspection (see Note
+[Data-driven boolean expressions] in Hasura.GraphQL.Schema.BoolExp), and keep
+them alive with the role's parsers.
+
 Nothing may hold on to the eager context, which is why the stand-in is built
 by matching on the optional parsers rather than by mapping over them, and
 evaluated in IO before it is returned.
@@ -295,11 +308,14 @@ role's Hasura and Relay contexts are built together and keep their parsers.
 buildRoleContextLazily ::
   (MonadIO m, MonadError QErr m) =>
   RoleName ->
+  -- | the eager build
+  ExceptT QErr IO RoleContextValue ->
+  -- | the rebuild, on the role's first request
   ExceptT QErr IO RoleContextValue ->
   m RoleContextValue
-buildRoleContextLazily role build = do
+buildRoleContextLazily role eagerBuild build = do
   (RoleContext eagerFrontend eagerBackend, errors, G.SchemaIntrospection eagerIntrospection) <-
-    liftEither =<< liftIO (runExceptT build)
+    liftEither =<< liftIO (runExceptT eagerBuild)
   rebuilt <- liftIO $ unsafeInterleaveIO $ runExceptT build
   let missing :: Text -> Either QErr a
       missing what = throw500 $ "the rebuilt context of role " <> roleNameToTxt role <> " has no " <> what
@@ -373,10 +389,16 @@ buildSchemaOptions
           removeEmptySubscriptionResponses
       }
 
+-- | Whether to check a role's schema for conflicting type definitions, see
+-- Note [Building role parsers lazily].
+data SchemaChecks = CheckSchema | SkipSchemaChecks
+  deriving (Eq)
+
 -- | Build the @QueryHasura@ context for a given role.
 buildRoleContext ::
   forall m.
   (MonadError QErr m, MonadIO m) =>
+  SchemaChecks ->
   SchemaSampledFeatureFlags ->
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   SourceCache ->
@@ -389,7 +411,7 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContext checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -449,12 +471,15 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
     -- information in the case of the admin role.
     !introspectionSchema <- do
       result <-
-        throwOnConflictingDefinitions
-          $ convertToSchemaIntrospection
-          <$> buildIntrospectionSchema
-            (P.parserType queryParserBackend)
-            (P.parserType <$> mutationParserBackend)
-            (P.parserType <$> subscriptionParser)
+        if checks == SkipSchemaChecks && isNothing mSchemaRegistryContext
+          then pure $ G.SchemaIntrospection mempty
+          else
+            throwOnConflictingDefinitions
+              $ convertToSchemaIntrospection
+              <$> buildIntrospectionSchema
+                (P.parserType queryParserBackend)
+                (P.parserType <$> mutationParserBackend)
+                (P.parserType <$> subscriptionParser)
       pure
         $
         -- TODO(nicuveo,sam): we treat the admin role differently in this function,
@@ -470,7 +495,8 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
               else G.SchemaIntrospection mempty
           Just _ -> result
 
-    void
+    when (checks == CheckSchema)
+      $ void
       . throwOnConflictingDefinitions
       $ buildIntrospectionSchema
         (P.parserType queryParserFrontend)
