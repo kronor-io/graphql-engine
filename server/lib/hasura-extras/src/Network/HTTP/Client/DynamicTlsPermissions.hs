@@ -1,5 +1,6 @@
 module Network.HTTP.Client.DynamicTlsPermissions
   ( dynamicTlsSettings,
+    dynamicTlsSettingsWithStore,
   )
 where
 
@@ -31,10 +32,12 @@ errorE = impureThrow . TlsServiceDefinitionError
 dynamicTlsSettings :: IO [TlsAllow] -> IO HTTP.TLSSettings
 dynamicTlsSettings currentAllow = do
   systemStore <- HTTP.getSystemCertificateStore
-  return (tlsSettingsComplex systemStore)
+  return (dynamicTlsSettingsWithStore systemStore currentAllow)
+
+-- | 'dynamicTlsSettings' with the given certificate store.
+dynamicTlsSettingsWithStore :: HTTP.CertificateStore -> IO [TlsAllow] -> HTTP.TLSSettings
+dynamicTlsSettingsWithStore systemStore currentAllow = HTTP.TLSSettings (clientParams systemStore)
   where
-    tlsSettingsComplex :: HTTP.CertificateStore -> HTTP.TLSSettings
-    tlsSettingsComplex systemStore = HTTP.TLSSettings (clientParams systemStore)
 
     clientParams :: HTTP.CertificateStore -> HTTP.ClientParams
     clientParams systemStore =
