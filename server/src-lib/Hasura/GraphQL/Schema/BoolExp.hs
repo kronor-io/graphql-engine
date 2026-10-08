@@ -21,7 +21,6 @@ import Data.Text.Casing qualified as C
 import Data.Text.Extended
 import Hasura.Base.Error (throw500)
 import Hasura.Function.Cache
-import Hasura.GraphQL.Parser.Class
 import Hasura.GraphQL.Schema.Backend
 import Hasura.GraphQL.Schema.Common
 import Hasura.GraphQL.Schema.Parser
@@ -54,7 +53,6 @@ import Hasura.RQL.Types.SourceCustomization
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
-import Type.Reflection
 
 -- | Backends implement this type class to specify the schema of
 -- aggregation predicates.

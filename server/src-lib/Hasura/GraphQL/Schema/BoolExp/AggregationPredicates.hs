@@ -30,7 +30,6 @@ import Hasura.GraphQL.Schema.Parser
 import Hasura.GraphQL.Schema.Table
 import Hasura.Name qualified as Name
 import Hasura.Prelude
-import Hasura.RQL.IR qualified as IR
 import Hasura.RQL.IR.BoolExp.AggregationPredicates
 import Hasura.RQL.IR.Value
 import Hasura.RQL.Types.Backend qualified as B

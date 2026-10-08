@@ -12,9 +12,9 @@ import Control.Concurrent.STM qualified as STM
 import Control.Exception (evaluate)
 import Control.Lens hiding (contexts)
 import Control.Monad.Memoize
+import Data.Either (fromRight)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
-import Data.Either (fromRight)
 import Data.HashSet qualified as Set
 import Data.List.Extended (duplicates)
 import Data.Text.Extended
@@ -311,7 +311,7 @@ guard against that ever changing, the rebuild is checked to have the eager
 build's root fields, and fails with an internal error if it doesn't.
 The checks walk every type of the schema, which would evaluate the thunks of
 the type definitions that are only needed for introspection (see Note
-[Data-driven boolean expressions] in Hasura.GraphQL.Schema.BoolExp), and keep
+[Data-driven table input objects] in Hasura.GraphQL.Schema.TableFields), and keep
 them alive with the role's parsers.
 
 Nothing may hold on to the eager context, which is why the stand-in is built
