@@ -39,11 +39,14 @@ import Data.Text qualified as T
 import Data.Text.Casing (GQLNameIdentifier)
 import Data.Text.Casing qualified as C
 import Data.Text.Extended
+import Data.Vector qualified as V
+import Data.Vector.Unboxed qualified as U
 import Hasura.Backends.Postgres.SQL.Types qualified as Postgres
 import Hasura.Base.Error
 import Hasura.Base.ErrorMessage (toErrorMessage)
 import Hasura.GraphQL.Parser.Class
 import Hasura.GraphQL.Parser.Internal.Parser qualified as IP
+import Hasura.GraphQL.Parser.Names (HasName (..))
 import Hasura.GraphQL.Schema.Backend
 import Hasura.GraphQL.Schema.BoolExp
 import Hasura.GraphQL.Schema.Common
@@ -56,6 +59,7 @@ import Hasura.GraphQL.Schema.Parser
   )
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Table
+import Hasura.GraphQL.Schema.TableFields (TableFieldEntries, absentField, tableFieldEntries)
 import Hasura.GraphQL.Schema.Typename
 import Hasura.LogicalModel.Cache (LogicalModelCache, LogicalModelInfo (..))
 import Hasura.LogicalModel.Types
@@ -572,7 +576,7 @@ defaultTableSelectionSet tableInfo = runMaybeT do
       mkTypename = runMkTypename $ _rscTypeNames customization
       logicalModelCache = _siLogicalModels sourceInfo
   roleName <- retrieve scRole
-  _selectPermissions <- hoistMaybe $ tableSelectPermissions roleName tableInfo
+  selectPermissions <- hoistMaybe $ tableSelectPermissions roleName tableInfo
   schemaKind <- lift $ retrieve scSchemaKind
   -- If this check fails, it means we're attempting to build a Relay schema, but
   -- the current backend b does't support Relay; rather than returning an
@@ -599,11 +603,27 @@ defaultTableSelectionSet tableInfo = runMaybeT do
             then [(G.Directive Name._key . HashMap.singleton Name._fields . G.VString) pkFieldDirective]
             else mempty
         description = G.Description . Postgres.getPGDescription <$> _tciDescription tableCoreInfo
-    fieldParsers <-
-      concat
-        <$> for
-          tableFields
-          (fieldSelection logicalModelCache tableName tableInfo)
+    -- See Note [Data-driven table selection sets]
+    fields <- for tableFields \case
+      FIColumn (SCIScalarColumn columnInfo)
+        | not (isHasuraSchema schemaKind) && ciName columnInfo == Name._id -> pure Nothing
+        | not (ciColumn columnInfo `HashMap.member` spiCols selectPermissions) -> pure Nothing
+        | otherwise -> do
+            let nullable = columnSelectionNullable selectPermissions columnInfo
+                arguments = scalarSelectionArgumentsParser @b (ciType columnInfo)
+            result <- columnParser (ciType columnInfo) (G.Nullability nullable)
+            pure $ Just $ Left ((ciType columnInfo, nullable), ColumnSelection arguments (IP.selectionArgumentNames arguments) result)
+      fieldInfo -> do
+        parsers <- fieldSelection logicalModelCache tableName tableInfo fieldInfo
+        pure if null parsers then Nothing else Just (Right (OtherSelections parsers))
+    let entries = tableFieldEntries fields
+        fieldInfoMap = _tciFieldInfoMap tableCoreInfo
+        selectionSet extra =
+          ( tableSelectionDefinitions fieldInfoMap entries <> map IP.fDefinition extra,
+            \name -> case lookupTableSelection selectPermissions fieldInfoMap entries name of
+              Just parse -> Just parse
+              Nothing -> IP.fParser <$> find ((== name) . getName . IP.fDefinition) extra
+          )
 
     -- We don't check *here* that the subselection set is non-empty,
     -- even though the GraphQL specification requires that it is (see
@@ -618,7 +638,6 @@ defaultTableSelectionSet tableInfo = runMaybeT do
       (RelaySchema nodeBuilder, Just pkeyColumns, Just xRelayInfo) -> do
         let nodeIdFieldParser =
               P.selection_ Name._id Nothing P.identifier $> IR.AFNodeId xRelayInfo sourceName tableName pkeyColumns
-            allFieldParsers = fieldParsers <> [nodeIdFieldParser]
         context <- asks getter
         options <- asks getter
         -- This `lift` is important! If we don't use it, the underlying node
@@ -627,16 +646,113 @@ defaultTableSelectionSet tableInfo = runMaybeT do
         -- recursively processing tables.
         nodeInterface <- lift $ runNodeBuilder nodeBuilder context options
         pure
-          $ selectionSetObjectWithDirective objectTypename description allFieldParsers [nodeInterface] pkDirectives
+          $ selectionSetObjectWithDirective objectTypename description (selectionSet [nodeIdFieldParser]) [nodeInterface] pkDirectives
           <&> parsedSelectionsToFields IR.AFExpression
       _ ->
         pure
-          $ selectionSetObjectWithDirective objectTypename description fieldParsers [] pkDirectives
+          $ selectionSetObjectWithDirective objectTypename description (selectionSet []) [] pkDirectives
           <&> parsedSelectionsToFields IR.AFExpression
   where
-    selectionSetObjectWithDirective name description parsers implementsInterfaces directives =
+    selectionSetObjectWithDirective name description (definitions, lookupParser) implementsInterfaces directives =
       IP.setParserDirectives directives
-        $ P.selectionSetObject name description parsers implementsInterfaces
+        $ IP.selectionSetObjectWith name description definitions lookupParser implementsInterfaces
+
+{- Note [Data-driven table selection sets]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Like the boolean and order by expressions (see Note [Data-driven table input
+objects] in Hasura.GraphQL.Schema.TableFields), the selection set of a table
+parses its scalar columns from the schema cache rather than with a field parser
+per (role, table, column).
+
+The parser of a scalar column field only depends on the column's type and
+nullability (its arguments, e.g. a JSON path, and the type of its result), and
+what it parses into on the column and the role's redaction expression for it,
+which are in the table's 'FieldInfo' and the role's select permission. So the
+columns of the same type and nullability share an entry, and parsing a field
+looks the column up by its name among the table's fields, then parses it the
+way 'P.selection' would ('IP.rawSelectionParse').
+
+The other fields (relationships, computed fields, nested and remote fields)
+keep their field parsers, as an entry of their own.
+
+The field definitions are only needed for introspection, so they are a thunk.
+The fields, their order and the errors are those of 'P.selectionSetObject'
+with a field parser per field.
+-}
+
+-- | What parsing a field of a table selection set needs beyond its
+-- 'FieldInfo'. See Note [Data-driven table selection sets].
+data SelectionEntry b n
+  = -- | a scalar column: its arguments, their names and the parser of its
+    -- result type, which the columns of the same type and nullability share
+    ColumnSelection
+      (InputFieldsParser n (Maybe (ScalarSelectionArguments b)))
+      (HashSet G.Name)
+      (Parser 'Both n (IR.ValueWithOrigin (ColumnValue b)))
+  | -- | any other field: its field parsers
+    OtherSelections [FieldParser n (AnnotatedField b)]
+
+-- | Whether the field of a column is nullable in a role's schema: see
+-- 'fieldSelection'.
+columnSelectionNullable :: (Backend b) => SelPermInfo b -> ColumnInfo b -> Bool
+columnSelectionNullable selectPermissions columnInfo =
+  ciIsNullable columnInfo || columnSelectionRedaction selectPermissions columnInfo /= NoRedaction
+
+columnSelectionRedaction :: (Backend b) => SelPermInfo b -> ColumnInfo b -> AnnRedactionExpUnpreparedValue b
+columnSelectionRedaction selectPermissions columnInfo =
+  fromMaybe NoRedaction $ getRedactionExprForColumn selectPermissions (ciColumn columnInfo)
+
+-- | The definitions of the fields of a table selection set, in order: only
+-- needed for introspection.
+tableSelectionDefinitions ::
+  FieldInfoMap (FieldInfo b) ->
+  TableFieldEntries (SelectionEntry b n) ->
+  [P.Definition P.FieldInfo]
+tableSelectionDefinitions fieldInfoMap (codes, entries) =
+  HashMap.foldr
+    ( \fieldInfo continue !i ->
+        let code = codes U.! i
+         in if code == absentField
+              then continue (i + 1)
+              else case (fieldInfo, entries V.! fromIntegral code) of
+                (FIColumn (SCIScalarColumn columnInfo), ColumnSelection arguments _ result) ->
+                  IP.selectionDefinition (ciName columnInfo) (ciDescription columnInfo) arguments result : continue (i + 1)
+                (_, OtherSelections parsers) -> map IP.fDefinition parsers <> continue (i + 1)
+                _ -> continue (i + 1)
+    )
+    (const [])
+    fieldInfoMap
+    (0 :: Int)
+
+-- | The parser of the field of a table selection set with the given name, if
+-- the table has one.
+lookupTableSelection ::
+  forall b n.
+  (Backend b, MonadParse n) =>
+  SelPermInfo b ->
+  FieldInfoMap (FieldInfo b) ->
+  TableFieldEntries (SelectionEntry b n) ->
+  G.Name ->
+  Maybe (G.Field G.NoFragments P.Variable -> n (AnnotatedField b))
+lookupTableSelection selectPermissions fieldInfoMap (codes, entries) name =
+  HashMap.foldr
+    ( \fieldInfo continue !i ->
+        let code = U.unsafeIndex codes i
+         in if code == absentField
+              then continue (i + 1)
+              else case (fieldInfo, V.unsafeIndex entries (fromIntegral code)) of
+                (FIColumn (SCIScalarColumn columnInfo), ColumnSelection arguments argumentNames _)
+                  | ciName columnInfo == name ->
+                      Just \field -> do
+                        (_, _, columnArguments) <- IP.rawSelectionParse argumentNames name arguments field
+                        pure $ IR.mkAnnColumnField (ciColumn columnInfo) (ciType columnInfo) (columnSelectionRedaction selectPermissions columnInfo) columnArguments
+                (_, OtherSelections parsers)
+                  | Just parser <- find ((== name) . getName . IP.fDefinition) parsers -> Just (IP.fParser parser)
+                _ -> continue (i + 1)
+    )
+    (const Nothing)
+    fieldInfoMap
+    (0 :: Int)
 
 -- | List of table fields object.
 -- Just a @'nonNullableObjectList' wrapper over @'tableSelectionSet'.
