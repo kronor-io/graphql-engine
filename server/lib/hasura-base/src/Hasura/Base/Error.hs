@@ -380,13 +380,18 @@ withPathKA :: (ArrowError QErr arr) => arr (e, s) a -> arr (e, (Text, s)) a
 withPathKA f = second (first $ arr (Key . K.fromText)) >>> withPathE f
 
 withPathK :: (QErrM m) => Text -> m a -> m a
-withPathK a = runKleisli proc m -> (| withPathKA (m >- bindA) |) a
+withPathK a = modifyQErr (prependPath (Key (K.fromText a)))
+{-# INLINE withPathK #-}
+
+prependPath :: JSONPathElement -> QErr -> QErr
+prependPath pe (QErr path st msg code i) = QErr (pe : path) st msg code i
 
 withPathIA :: (ArrowError QErr arr) => arr (e, s) a -> arr (e, (Int, s)) a
 withPathIA f = second (first $ arr Index) >>> withPathE f
 
 withPathI :: (QErrM m) => Int -> m a -> m a
-withPathI a = runKleisli proc m -> (| withPathIA (m >- bindA) |) a
+withPathI a = modifyQErr (prependPath (Index a))
+{-# INLINE withPathI #-}
 
 indexedFoldlA' ::
   (ArrowChoice arr, ArrowError QErr arr, Foldable t) =>
