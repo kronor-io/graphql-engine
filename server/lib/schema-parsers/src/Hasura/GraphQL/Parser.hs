@@ -45,6 +45,7 @@ module Hasura.GraphQL.Parser
     safeSelectionSet,
     selectionSetInterface,
     selectionSetObject,
+    selectionSetObjectWith,
     selectionSetUnion,
     field,
     fieldWithDefault,

@@ -264,13 +264,36 @@ selectionSetObject ::
   [Parser origin 'Output m b] ->
   Parser origin 'Output m (InsOrdHashMap.InsOrdHashMap Name (ParsedSelection a))
 {-# INLINE selectionSetObject #-}
-selectionSetObject name description parsers implementsInterfaces =
+selectionSetObject name description parsers =
+  selectionSetObjectWith name description (map fDefinition parsers) (`HashMap.lookup` parserMap)
+  where
+    parserMap =
+      parsers
+        & map (\FieldParser {fDefinition, fParser} -> (getName fDefinition, fParser))
+        & HashMap.fromList
+
+-- | A variant of 'selectionSetObject' that is given the definitions of its
+-- fields, which are only needed for introspection and so can be a thunk, and
+-- looks up the parser of a field by its name.
+selectionSetObjectWith ::
+  (MonadParse m) =>
+  Name ->
+  Maybe Description ->
+  -- | the definitions of the fields of this object, see 'selectionSetObject'
+  [Definition origin (FieldInfo origin)] ->
+  -- | the parser of a field of this object
+  (Name -> Maybe (Field NoFragments Variable -> m a)) ->
+  -- | interfaces implemented by this object
+  [Parser origin 'Output m b] ->
+  Parser origin 'Output m (InsOrdHashMap.InsOrdHashMap Name (ParsedSelection a))
+{-# INLINE selectionSetObjectWith #-}
+selectionSetObjectWith name description fieldDefinitions lookupParser implementsInterfaces =
   Parser
     { pType =
         TNamed Nullable $
           Definition name description Nothing [] $
             TIObject $
-              ObjectInfo (map fDefinition parsers) interfaces,
+              ObjectInfo fieldDefinitions interfaces,
       pParser = \input -> withKey (Key "selectionSet") do
         -- Not all fields have a selection set, but if they have one, it
         -- must contain at least one field. The GraphQL parser returns a
@@ -294,7 +317,7 @@ selectionSetObject name description parsers implementsInterfaces =
             if
               | _fName == $$(litName "__typename") ->
                   pure $ SelectTypename $ getName name
-              | Just parser <- HashMap.lookup _fName parserMap ->
+              | Just parser <- lookupParser _fName ->
                   withKey (Key (K.fromText (unName _fName))) $
                     SelectField <$> parser selectionField
               | otherwise ->
@@ -306,10 +329,6 @@ selectionSetObject name description parsers implementsInterfaces =
           pure parsedValue
     }
   where
-    parserMap =
-      parsers
-        & map (\FieldParser {fDefinition, fParser} -> (getName fDefinition, fParser))
-        & HashMap.fromList
     interfaces = mapMaybe (getInterfaceInfo . pType) implementsInterfaces
     parsedInterfaceNames = fmap getName interfaces
 
