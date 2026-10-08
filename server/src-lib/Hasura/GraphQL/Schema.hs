@@ -12,9 +12,9 @@ import Control.Concurrent.STM qualified as STM
 import Control.Exception (evaluate)
 import Control.Lens hiding (contexts)
 import Control.Monad.Memoize
+import Data.Either (fromRight)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
-import Data.Either (fromRight)
 import Data.HashSet qualified as Set
 import Data.List.Extended (duplicates)
 import Data.Text.Extended
@@ -356,8 +356,8 @@ a function of the schema they build; so the rebuild would pass them too. As a
 guard against that ever changing, the rebuild is checked to have the eager
 build's root fields, and fails with an internal error if it doesn't.
 The checks walk every type of the schema. That evaluates every type definition
-and parser that the role's requests never reach (see Note [Data-driven boolean
-expressions] in Hasura.GraphQL.Schema.BoolExp), and keeps them alive with the
+and parser that the role's requests never reach (see Note [Data-driven table
+input objects] in Hasura.GraphQL.Schema.TableFields), and keeps them alive with the
 role's parsers: for Kronor's metadata, about 4 MiB of live heap across the
 roles used in production. Unless a schema registry needs it, the rebuild's
 introspection is left empty.

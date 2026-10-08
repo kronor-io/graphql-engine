@@ -7,7 +7,6 @@ module Hasura.GraphQL.Schema.OrderBy
   )
 where
 
-import Control.Lens ((^?))
 import Data.Has
 import Data.HashMap.Strict.Extended qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -15,12 +14,10 @@ import Data.Text.Casing qualified as C
 import Data.Text.Extended
 import Hasura.Base.Error
 import Hasura.Function.Cache
-import Hasura.GraphQL.Parser.Class
 import Hasura.GraphQL.Schema.Backend
 import Hasura.GraphQL.Schema.Common
 import Hasura.GraphQL.Schema.Parser
-  ( InputFieldsParser,
-    Kind (..),
+  ( Kind (..),
     Parser,
   )
 import Hasura.GraphQL.Schema.Parser qualified as P
@@ -47,7 +44,6 @@ import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
-import Type.Reflection
 
 {-# INLINE orderByOperator #-}
 orderByOperator ::
@@ -399,13 +395,13 @@ orderByAggregation sourceInfo tableInfo = P.memoizeOn 'orderByAggregation (_siNa
         let columns = concatMap kindColumns kinds
             opText = G.unName $ applyFieldNameCaseIdentifier tCase aggregateOperator
             opTypeName = applyTypeNameCaseIdentifier tCase $ mkTableAggregateOrderByOpTypeName tableGQLName aggregateOperator
-            objectName = runMkTypename mkTypename opTypeName
-            objectDesc = Just $ G.Description $ "order by " <> opText <> "() on columns of table " <>> tableName
+            opObjectName = runMkTypename mkTypename opTypeName
+            opObjectDesc = Just $ G.Description $ "order by " <> opText <> "() on columns of table " <>> tableName
             columnDefinition (columnInfo, _, _) =
               P.Definition (ciName columnInfo) (ciDescription columnInfo) Nothing [] $ P.InputFieldInfo (P.nullableType $ P.pType operator) Nothing
-         in P.objectWith objectName objectDesc (columnDefinition <$> columns) \input -> do
+         in P.objectWith opObjectName opObjectDesc (columnDefinition <$> columns) \input -> do
               let names = HashSet.fromList [ciName columnInfo | (columnInfo, _, _) <- columns]
-              P.checkInputObjectFields objectName (`HashSet.member` names) input
+              P.checkInputObjectFields opObjectName (`HashSet.member` names) input
               orders <- for columns \(columnInfo, resultType, redactionExp) ->
                 for (HashMap.lookup (ciName columnInfo) input) \value ->
                   fmap (mkOrderByItemG @b (IR.AAOOp $ IR.AggregateOrderByColumn opText resultType columnInfo redactionExp))
