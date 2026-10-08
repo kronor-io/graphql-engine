@@ -3,6 +3,7 @@
 
 module Hasura.GraphQL.Schema.BoolExp
   ( AggregationPredicatesSchema (..),
+    AggregationPredicateField (..),
     tableBoolExp,
     logicalModelBoolExp,
     mkBoolOperator,
@@ -62,20 +63,70 @@ import Type.Reflection
 -- methods in `class BackendSchema` and `type MonadBuildSchema` should *NOT*
 -- include this class as a constraint.
 class AggregationPredicatesSchema (b :: BackendType) where
-  aggregationPredicatesParser ::
+  -- | The fields of a table's boolean expression for aggregation predicates,
+  -- in order.
+  aggregationPredicateFields ::
     forall r m n.
     (MonadBuildSourceSchema b r m n) =>
     TableInfo b ->
-    SchemaT r m (Maybe (InputFieldsParser n [AggregationPredicates b (UnpreparedValue b)]))
+    SchemaT r m [AggregationPredicateField b n]
 
 -- Overlapping instance for backends that do not implement Aggregation Predicates.
 instance {-# OVERLAPPABLE #-} (AggregationPredicates b ~ Const Void) => AggregationPredicatesSchema (b :: BackendType) where
-  aggregationPredicatesParser ::
+  aggregationPredicateFields ::
     forall r m n.
     (MonadBuildSourceSchema b r m n) =>
     TableInfo b ->
-    SchemaT r m (Maybe (InputFieldsParser n [AggregationPredicates b (UnpreparedValue b)]))
-  aggregationPredicatesParser _ = return Nothing
+    SchemaT r m [AggregationPredicateField b n]
+  aggregationPredicateFields _ = pure []
+
+-- | A field of a boolean expression for aggregation predicates (e.g. over an
+-- array relationship).
+data AggregationPredicateField b n = AggregationPredicateField
+  { apfName :: G.Name,
+    -- | The parser of the field's value, if the field exists. Lazy: it may be
+    -- knot-tied, and whether the field exists is only known once its parser is
+    -- built.
+    apfParser :: ~(Maybe (Parser 'Input n (AggregationPredicates b (UnpreparedValue b))))
+  }
+
+-- | How a field of a table or logical model is parsed in a boolean expression,
+-- beside its 'FieldInfo'. See Note [Data-driven table input objects] in
+-- Hasura.GraphQL.Schema.TableFields.
+--
+-- The parsers are lazy: they may be knot-tied.
+data BoolExpEntry b n
+  = -- | a scalar column, with the comparison expression of its type, which
+    -- the columns of that type share
+    BEColumn ~(Parser 'Input n [ComparisonExp b])
+  | -- | a relationship, with its name, target, and the target's boolean
+    -- expression
+    BERelationship G.Name (RelationshipTarget b) ~(Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
+  | -- | a computed field that returns a scalar, with its name and the
+    -- comparison expression of the scalar's type
+    BEComputedScalar G.Name ~(Parser 'Input n [ComparisonExp b])
+  | -- | a computed field that returns rows of a table, with its name and the
+    -- table's boolean expression
+    BEComputedTable G.Name ~(Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
+  | -- | a nested object column, with its name and the boolean expression of
+    -- its logical model
+    BENestedObject G.Name ~(Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
+
+-- | The target of a relationship, whose select permissions filter it.
+data RelationshipTarget b
+  = TargetTable (TableInfo b)
+  | TargetLogicalModel (LogicalModelInfo b)
+
+-- | The fields of a boolean expression after the fields of the table.
+data BoolExpTrailing b n
+  = BTOr
+  | BTAnd
+  | BTNot
+  | BTAggregationPredicates (AggregationPredicateField b n)
+
+-- | The connectives, which every boolean expression has.
+connectives :: [BoolExpTrailing b n]
+connectives = [BTOr, BTAnd, BTNot]
 
 -- |
 -- > input type_bool_exp {
@@ -85,58 +136,153 @@ instance {-# OVERLAPPABLE #-} (AggregationPredicates b ~ Const Void) => Aggregat
 -- >   column: type_comparison_exp
 -- >   ...
 -- > }
-boolExpInternal ::
-  forall b r m n name.
-  ( Typeable name,
-    Ord name,
-    ToTxt name,
-    MonadBuildSchema b r m n,
-    AggregationPredicatesSchema b
-  ) =>
-  GQLNameIdentifier ->
-  Maybe (SelPermInfo b) ->
-  [FieldInfo b] ->
+--
+-- The boolean expression of a table or logical model, from its fields. See
+-- Note [Data-driven table input objects] in Hasura.GraphQL.Schema.TableFields.
+boolExpObject ::
+  forall b r m n.
+  (MonadBuildSchema b r m n, AggregationPredicatesSchema b) =>
+  G.Name ->
   G.Description ->
-  name ->
-  SchemaT r m (Maybe (InputFieldsParser n [AggregationPredicates b (UnpreparedValue b)])) ->
+  FieldInfoMap (FieldInfo b) ->
+  -- | whether a field can be part of the object
+  (FieldInfo b -> Bool) ->
+  Maybe (SelPermInfo b) ->
+  [AggregationPredicateField b n] ->
+  -- | the boolean expression itself, for the connectives; it is knot-tied, so
+  -- it must not be forced here
+  Parser 'Input n (AnnBoolExp b (UnpreparedValue b)) ->
   SchemaT r m (Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
-boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAggPredParser = do
-  sourceInfo :: SourceInfo b <- asks getter
-  P.memoizeOn 'boolExpInternal (_siName sourceInfo, memoizeKey) do
-    let customization = _siCustomization sourceInfo
-        tCase = _rscNamingConvention customization
-        mkTypename = runMkTypename $ _rscTypeNames customization
-        name = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableBoolExpTypeName gqlName
+boolExpObject name description fieldInfoMap includeField selectPermissions aggregationPredicates recur = do
+  roleName <- retrieve scRole
+  -- Strict, so that nothing the entries were built from stays alive.
+  !entries <-
+    fmap tableFieldEntries $ for (HashMap.elems fieldInfoMap) \fieldInfo ->
+      if includeField fieldInfo
+        then boolExpEntry selectPermissions fieldInfo
+        else pure Nothing
+  let trailing = case aggregationPredicates of
+        [] -> connectives
+        _ -> connectives ++ map BTAggregationPredicates aggregationPredicates
+  pure
+    $ BoolAnd
+    <$> tableObject
+      TableObject
+        { toName = name,
+          toDescription = Just description,
+          toFieldInfoMap = fieldInfoMap,
+          toEntries = entries,
+          toFieldName = \fieldInfo -> \case
+            BEColumn _ -> columnFieldName fieldInfo
+            BERelationship fieldName _ _ -> fieldName
+            BEComputedScalar fieldName _ -> fieldName
+            BEComputedTable fieldName _ -> fieldName
+            BENestedObject fieldName _ -> fieldName,
+          toFieldDefinition = \_ entry fieldName -> case entry of
+            BEColumn parser -> optionalFieldDefinition fieldName parser
+            BERelationship _ _ parser -> optionalFieldDefinition fieldName parser
+            BEComputedScalar _ parser -> optionalFieldDefinition fieldName parser
+            BEComputedTable _ parser -> optionalFieldDefinition fieldName parser
+            BENestedObject _ parser -> optionalFieldDefinition fieldName parser,
+          toParseField = \fieldInfo entry fieldName value -> case (entry, fieldInfo) of
+            (BEColumn parser, FIColumn (SCIScalarColumn columnInfo)) -> do
+              let redactionExp = fromMaybe NoRedaction $ flip getRedactionExprForColumn (ciColumn columnInfo) =<< selectPermissions
+              Just . BoolField . AVColumn columnInfo redactionExp <$> P.parseOptionalField fieldName parser value
+            (BERelationship _ target parser, FIRelationship relationshipInfo) -> do
+              let permissions =
+                    (fmap . fmap) partialSQLExpToUnpreparedValue
+                      $ maybe annBoolExpTrue spiFilter
+                      $ case target of
+                        TargetTable tableInfo -> tableSelectPermissions roleName tableInfo
+                        TargetLogicalModel logicalModelInfo -> getSelPermInfoForLogicalModel roleName logicalModelInfo
+              Just . BoolField . AVRelationship relationshipInfo . RelationshipFilters permissions <$> P.parseOptionalField fieldName parser value
+            (BEComputedScalar _ parser, FIComputedField computedFieldInfo) -> do
+              let redactionExp = fromMaybe NoRedaction $ flip getRedactionExprForComputedField (_cfiName computedFieldInfo) =<< selectPermissions
+              Just . BoolField . computedFieldBoolExp computedFieldInfo . CFBEScalar redactionExp <$> P.parseOptionalField fieldName parser value
+            (BEComputedTable _ parser, FIComputedField computedFieldInfo@ComputedFieldInfo {_cfiReturnType})
+              | ReturnsTable table <- computedFieldReturnType @b _cfiReturnType ->
+                  Just . BoolField . computedFieldBoolExp computedFieldInfo . CFBETable table <$> P.parseOptionalField fieldName parser value
+            (BENestedObject _ parser, FIColumn (SCIObjectColumn nestedObjectInfo)) ->
+              Just . BoolField . AVNestedObject nestedObjectInfo <$> P.parseOptionalField fieldName parser value
+            _ -> pure Nothing,
+          toTrailing = trailing,
+          toTrailingField = \case
+            BTOr -> Just $ connective Name.__or (P.list recur) BoolOr
+            BTAnd -> Just $ connective Name.__and (P.list recur) BoolAnd
+            BTNot -> Just $ connective Name.__not recur BoolNot
+            BTAggregationPredicates AggregationPredicateField {apfName, apfParser} -> do
+              parser <- apfParser
+              pure
+                TrailingField
+                  { tfName = apfName,
+                    tfDefinition = optionalFieldDefinition apfName parser,
+                    tfParse = fmap (Just . BoolField . AVAggregationPredicates) . P.parseOptionalField apfName parser
+                  }
+        }
+  where
+    connective :: G.Name -> Parser 'Input n a -> (a -> AnnBoolExp b (UnpreparedValue b)) -> TrailingField n (AnnBoolExp b (UnpreparedValue b))
+    connective fieldName parser f =
+      TrailingField
+        { tfName = fieldName,
+          tfDefinition = optionalFieldDefinition fieldName parser,
+          tfParse = fmap (Just . f) . P.parseOptionalField fieldName parser
+        }
 
-    tableFieldParsers <- catMaybes <$> traverse (boolExpField selectPermissions) fieldInfos
+    computedFieldBoolExp :: ComputedFieldInfo b -> ComputedFieldBoolExp b (UnpreparedValue b) -> AnnBoolExpFld b (UnpreparedValue b)
+    computedFieldBoolExp ComputedFieldInfo {..} =
+      let ComputedFieldFunction {..} = _cfiFunction
+          functionArgs =
+            flip FunctionArgsExp mempty
+              $ fromComputedFieldImplicitArguments @b UVSession _cffComputedFieldImplicitArgs
+       in AVComputedField . AnnComputedFieldBoolExp _cfiXComputedFieldInfo _cfiName _cffName functionArgs
 
-    aggregationPredicatesParser' <- fromMaybe (pure []) <$> mkAggPredParser
-    recur <- boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAggPredParser
+-- | The entry of a field of a table or logical model in its boolean
+-- expression, if it has one.
+boolExpEntry ::
+  forall b r m n.
+  (MonadBuildSchema b r m n, AggregationPredicatesSchema b) =>
+  Maybe (SelPermInfo b) ->
+  FieldInfo b ->
+  SchemaT r m (Maybe (Either (ColumnType b, BoolExpEntry b n) (BoolExpEntry b n)))
+boolExpEntry selectPermissions fieldInfo = runMaybeT do
+  _ <- hoistMaybe selectPermissions
+  fieldName <- hoistMaybe $ fieldInfoGraphQLName fieldInfo
+  case fieldInfo of
+    -- field_name: field_type_comparison_exp
+    FIColumn (SCIScalarColumn columnInfo) ->
+      Left . (ciType columnInfo,) . BEColumn <$> lift (comparisonExps @b (ciType columnInfo))
+    FIColumn (SCIObjectColumn NestedObjectInfo {..}) -> do
+      SourceInfo {..} <- asks getter
+      logicalModelInfo <-
+        HashMap.lookup _noiType _siLogicalModels
+          `onNothing` throw500 ("Logical model " <> _noiType <<> " not found in source " <>> _siName)
+      Right . BENestedObject fieldName <$> lift (logicalModelBoolExp logicalModelInfo)
+    FIColumn (SCIArrayColumn _) -> empty -- TODO(dmoverton)
+    -- field_name: field_type_bool_exp
+    FIRelationship relationshipInfo -> do
+      case riTarget relationshipInfo of
+        RelTargetNativeQuery nativeQueryName -> do
+          logicalModelInfo <- _nqiReturns <$> askNativeQueryInfo nativeQueryName
+          Right . BERelationship fieldName (TargetLogicalModel logicalModelInfo) <$> lift (logicalModelBoolExp logicalModelInfo)
+        RelTargetTable remoteTable -> do
+          remoteTableInfo <- askTableInfo remoteTable
+          Right . BERelationship fieldName (TargetTable remoteTableInfo) <$> lift (tableBoolExp remoteTableInfo)
+    FIComputedField ComputedFieldInfo {..} -> do
+      let ComputedFieldFunction {..} = _cfiFunction
+      -- For a computed field to qualify in boolean expression it shouldn't have any input arguments
+      case toList _cffInputArgs of
+        [] ->
+          case computedFieldReturnType @b _cfiReturnType of
+            ReturnsScalar scalarType ->
+              Right . BEComputedScalar fieldName <$> lift (comparisonExps @b (ColumnScalar scalarType))
+            ReturnsTable table -> do
+              info <- askTableInfo table
+              Right . BEComputedTable fieldName <$> lift (tableBoolExp info)
+            ReturnsOthers -> hoistMaybe Nothing
+        _ -> hoistMaybe Nothing
+    -- Using remote relationship fields in boolean expressions is not supported.
+    FIRemoteRelationship _ -> empty
 
-    -- Bafflingly, ApplicativeDo doesn’t work if we inline this definition (I
-    -- think the TH splices throw it off), so we have to define it separately.
-    let connectiveFieldParsers =
-          [ P.fieldOptional Name.__or Nothing (BoolOr <$> P.list recur),
-            P.fieldOptional Name.__and Nothing (BoolAnd <$> P.list recur),
-            P.fieldOptional Name.__not Nothing (BoolNot <$> recur)
-          ]
-
-    pure
-      $ BoolAnd
-      <$> P.object name (Just description) do
-        tableFields <- map BoolField . catMaybes <$> sequenceA tableFieldParsers
-        specialFields <- catMaybes <$> sequenceA connectiveFieldParsers
-        aggregationPredicateFields <- map (BoolField . AVAggregationPredicates) <$> aggregationPredicatesParser'
-        pure (tableFields ++ specialFields ++ aggregationPredicateFields)
-
--- |
--- > input type_bool_exp {
--- >   _or: [type_bool_exp!]
--- >   _and: [type_bool_exp!]
--- >   _not: type_bool_exp
--- >   column: type_comparison_exp
--- >   ...
--- > }
 -- | Boolean expression for logical models
 logicalModelBoolExp ::
   forall b r m n.
@@ -147,107 +293,25 @@ logicalModelBoolExp ::
   SchemaT r m (Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
 logicalModelBoolExp logicalModel = do
   roleName <- retrieve scRole
-  let fieldInfos = HashMap.elems $ logicalModelFieldsToFieldInfo $ _lmiFields logicalModel
-      name = getLogicalModelName (_lmiName logicalModel)
+  sourceInfo :: SourceInfo b <- asks getter
+  let name = getLogicalModelName (_lmiName logicalModel)
       gqlName = mkTableBoolExpTypeName (C.fromCustomName name)
       selectPermissions = getSelPermInfoForLogicalModel roleName logicalModel
-
-      -- Aggregation parsers let us say things like, "select all authors
-      -- with at least one article": they are predicates based on the
-      -- object's relationship with some other entity.
-      --
-      -- Currently, logical models can't be defined to have
-      -- relationships to other entities, and so they don't support
-      -- aggregation predicates.
-      --
-      -- If you're here because you've been asked to implement them, this
-      -- is where you want to put the parser.
-      mkAggPredParser = pure (pure mempty)
-
-      memoizeKey = name
+      customization = _siCustomization sourceInfo
+      tCase = _rscNamingConvention customization
+      mkTypename = runMkTypename $ _rscTypeNames customization
+      typeName = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableBoolExpTypeName gqlName
       description =
         G.Description
           $ "Boolean expression to filter rows from the logical model for "
           <> name
           <<> ". All fields are combined with a logical 'AND'."
-  boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAggPredParser
+  P.memoizeOn 'logicalModelBoolExp (_siName sourceInfo, name) do
+    -- Logical models can't have relationships to other entities, so they
+    -- don't have aggregation predicates.
+    recur <- logicalModelBoolExp logicalModel
+    boolExpObject typeName description (logicalModelFieldsToFieldInfo $ _lmiFields logicalModel) (const True) selectPermissions [] recur
 
--- | The field of a boolean expression for one of the fields of a table or
--- logical model, if it has one.
-boolExpField ::
-  forall b r m n.
-  ( MonadBuildSchema b r m n,
-    AggregationPredicatesSchema b
-  ) =>
-  Maybe (SelPermInfo b) ->
-  FieldInfo b ->
-  SchemaT r m (Maybe (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b)))))
-boolExpField selectPermissions fieldInfo = runMaybeT do
-  selectPermissions' <- hoistMaybe selectPermissions
-  !roleName <- retrieve scRole
-  fieldName <- hoistMaybe $ fieldInfoGraphQLName fieldInfo
-  P.fieldOptional fieldName Nothing <$> case fieldInfo of
-    -- field_name: field_type_comparison_exp
-    FIColumn (SCIScalarColumn columnInfo) ->
-      let !redactionExp = fromMaybe NoRedaction $ getRedactionExprForColumn selectPermissions' (ciColumn columnInfo)
-       in lift $ fmap (AVColumn columnInfo redactionExp) <$> comparisonExps @b (ciType columnInfo)
-    FIColumn (SCIObjectColumn nestedObjectInfo@NestedObjectInfo {..}) -> do
-      SourceInfo {..} <- asks getter
-      logicalModelInfo <-
-        HashMap.lookup _noiType _siLogicalModels
-          `onNothing` throw500 ("Logical model " <> _noiType <<> " not found in source " <>> _siName)
-      lift $ fmap (AVNestedObject nestedObjectInfo) <$> logicalModelBoolExp logicalModelInfo
-    FIColumn (SCIArrayColumn _) -> empty -- TODO(dmoverton)
-    -- field_name: field_type_bool_exp
-    FIRelationship relationshipInfo -> do
-      case riTarget relationshipInfo of
-        RelTargetNativeQuery nativeQueryName -> do
-          logicalModelInfo <- _nqiReturns <$> askNativeQueryInfo nativeQueryName
-          let remoteLogicalModelPermissions =
-                (fmap . fmap) (partialSQLExpToUnpreparedValue)
-                  $ maybe annBoolExpTrue spiFilter
-                  $ getSelPermInfoForLogicalModel roleName logicalModelInfo
-          remoteBoolExp <- lift $ logicalModelBoolExp logicalModelInfo
-          pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteLogicalModelPermissions) remoteBoolExp
-        RelTargetTable remoteTable -> do
-          remoteTableInfo <- askTableInfo $ remoteTable
-          let remoteTablePermissions =
-                (fmap . fmap) (partialSQLExpToUnpreparedValue)
-                  $ maybe annBoolExpTrue spiFilter
-                  $ tableSelectPermissions roleName remoteTableInfo
-          remoteBoolExp <- lift $ tableBoolExp remoteTableInfo
-          pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteTablePermissions) remoteBoolExp
-    FIComputedField ComputedFieldInfo {..} -> do
-      let ComputedFieldFunction {..} = _cfiFunction
-      -- For a computed field to qualify in boolean expression it shouldn't have any input arguments
-      case toList _cffInputArgs of
-        [] -> do
-          let functionArgs =
-                flip FunctionArgsExp mempty
-                  $ fromComputedFieldImplicitArguments @b UVSession _cffComputedFieldImplicitArgs
-
-          fmap (AVComputedField . AnnComputedFieldBoolExp _cfiXComputedFieldInfo _cfiName _cffName functionArgs)
-            <$> case computedFieldReturnType @b _cfiReturnType of
-              ReturnsScalar scalarType ->
-                let redactionExp = fromMaybe NoRedaction $ getRedactionExprForComputedField selectPermissions' _cfiName
-                 in lift $ fmap (CFBEScalar redactionExp) <$> comparisonExps @b (ColumnScalar scalarType)
-              ReturnsTable table -> do
-                info <- askTableInfo table
-                lift $ fmap (CFBETable table) <$> tableBoolExp info
-              ReturnsOthers -> hoistMaybe Nothing
-        _ -> hoistMaybe Nothing
-
-    -- Using remote relationship fields in boolean expressions is not supported.
-    FIRemoteRelationship _ -> empty
-
--- |
--- > input type_bool_exp {
--- >   _or: [type_bool_exp!]
--- >   _and: [type_bool_exp!]
--- >   _not: type_bool_exp
--- >   column: type_comparison_exp
--- >   ...
--- > }
 -- | Booleans expressions for tables
 --
 -- See Note [Data-driven table input objects] in Hasura.GraphQL.Schema.TableFields.
@@ -272,43 +336,17 @@ tableBoolExp tableInfo = do
         tCase = _rscNamingConvention customization
         mkTypename = runMkTypename $ _rscTypeNames customization
         name = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableBoolExpTypeName gqlName
-        fieldInfoMap = _tciFieldInfoMap $ _tiCoreInfo tableInfo
         selectable = HashSet.fromList $ fieldInfoName <$> fieldInfos
-
-    -- What each of the table's fields is in this role's boolean expression,
-    -- in the order of the table's field info map. Strict, so that the list
-    -- doesn't stay alive until the first parse.
-    !entries <-
-      fmap tableFieldEntries $ for (HashMap.elems fieldInfoMap) \fieldInfo ->
-        if
-          | not $ fieldInfoName fieldInfo `HashSet.member` selectable -> pure Nothing
-          | FIColumn (SCIScalarColumn columnInfo) <- fieldInfo,
-            isJust selectPermissions ->
-              Just . Left . (ciType columnInfo,) <$> comparisonExps @b (ciType columnInfo)
-          | otherwise -> fmap Right <$> boolExpField selectPermissions fieldInfo
-
-    aggregationPredicatesParser' <- fromMaybe (pure []) <$> aggregationPredicatesParser tableInfo
+    aggregationPredicates <- aggregationPredicateFields tableInfo
     recur <- tableBoolExp tableInfo
-
-    -- Bafflingly, ApplicativeDo doesn’t work if we inline this definition (I
-    -- think the TH splices throw it off), so we have to define it separately.
-    let connectiveFieldParsers =
-          [ P.fieldOptional Name.__or Nothing (BoolOr <$> P.list recur),
-            P.fieldOptional Name.__and Nothing (BoolAnd <$> P.list recur),
-            P.fieldOptional Name.__not Nothing (BoolNot <$> recur)
-          ]
-        -- the fields that aren't fields of the table, which come after them
-        otherFields = do
-          specialFields <- catMaybes <$> sequenceA connectiveFieldParsers
-          aggregationPredicateFields <- map (BoolField . AVAggregationPredicates) <$> aggregationPredicatesParser'
-          pure (specialFields ++ aggregationPredicateFields)
-        columnField columnInfo comparisons =
-          let redactionExp = fromMaybe NoRedaction $ flip getRedactionExprForColumn (ciColumn columnInfo) =<< selectPermissions
-           in Just $ AVColumn columnInfo redactionExp comparisons
-
-    pure
-      $ tableFieldsObject name (Just description) fieldInfoMap entries columnField otherFields \tableFields rest ->
-        BoolAnd $ map BoolField tableFields ++ rest
+    boolExpObject
+      name
+      description
+      (_tciFieldInfoMap $ _tiCoreInfo tableInfo)
+      ((`HashSet.member` selectable) . fieldInfoName)
+      selectPermissions
+      aggregationPredicates
+      recur
 
 {- Note [Nullability in comparison operators]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

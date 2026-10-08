@@ -176,7 +176,7 @@ instance PostgresSchema 'Cockroach where
 -- postgres schema
 
 instance (BackendSchema ('Postgres pgKind)) => AggregationPredicatesSchema ('Postgres pgKind) where
-  aggregationPredicatesParser = Agg.defaultAggregationPredicatesParser aggregationFunctions
+  aggregationPredicateFields = Agg.defaultAggregationPredicateFields aggregationFunctions
 
 -- | The aggregation functions that are supported by postgres variants.
 aggregationFunctions :: [Agg.FunctionSignature ('Postgres pgKind)]
