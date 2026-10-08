@@ -303,6 +303,12 @@ thunk that rebuilds the role's context.
 
 The rebuild skips the checks for conflicting type definitions: it builds the
 same schema from the same schema cache as the eager build, which passed them.
+'buildRoleContext' is a function of its arguments (its only effects are the
+memoization's IORefs and the shared comparison expressions, which are built
+from the same inputs), both builds get the same arguments, and the checks are
+a function of the schema they build; so the rebuild would pass them too. As a
+guard against that ever changing, the rebuild is checked to have the eager
+build's root fields, and fails with an internal error if it doesn't.
 The checks walk every type of the schema, which would evaluate the thunks of
 the type definitions that are only needed for introspection (see Note
 [Data-driven boolean expressions] in Hasura.GraphQL.Schema.BoolExp), and keep
@@ -328,7 +334,24 @@ buildRoleContextLazily ::
 buildRoleContextLazily role eagerBuild build = do
   (RoleContext eagerFrontend eagerBackend, errors, G.SchemaIntrospection eagerIntrospection) <-
     liftEither =<< liftIO (runExceptT eagerBuild)
-  rebuilt <- liftIO $ unsafeInterleaveIO $ runExceptT build
+  -- The rebuild skips the schema checks, which is only sound if it builds the
+  -- same schema as the eager build. Check that it has the same root fields: a
+  -- cheap test that the build is still a function of its inputs.
+  -- The shapes are evaluated in IO, so that they don't keep the eager parsers
+  -- alive.
+  eagerFrontendShape <- liftIO $ evaluate $ contextShape eagerFrontend
+  eagerBackendShape <- liftIO $ traverse (evaluate . contextShape) eagerBackend
+  rebuilt <-
+    liftIO $ unsafeInterleaveIO do
+      result <- runExceptT build
+      pure do
+        built@(RoleContext frontend backend, _, _) <- result
+        unless (contextShape frontend == eagerFrontendShape && fmap contextShape backend == eagerBackendShape)
+          $ throw500
+          $ "the rebuilt context of role "
+          <> roleNameToTxt role
+          <> " doesn't have the root fields of the eager build"
+        pure built
   let missing :: Text -> Either QErr a
       missing what = throw500 $ "the rebuilt context of role " <> roleNameToTxt role <> " has no " <> what
       withRebuilt :: (RoleContext GQLContext -> Maybe GQLContext) -> (GQLContext -> Either QErr a) -> Either QErr a
@@ -448,6 +471,19 @@ buildSharedComparisons sampledFeatureFlags schemaOptions =
                     [ColumnScalar scalarType]
               _ -> []
           ]
+
+-- | What 'buildRoleContextLazily' checks the rebuild of a role's context has
+-- in common with the eager build: its root field names, and whether it has
+-- mutations and subscriptions. The fields are strict.
+data RoleContextShape = RoleContextShape [G.Name] Bool Bool
+  deriving (Eq)
+
+contextShape :: GQLContext -> RoleContextShape
+contextShape context =
+  RoleContextShape
+    (force $ gqlQueryRootFieldNames context)
+    (isJust $ gqlMutationParser context)
+    (isJust $ gqlSubscriptionParser context)
 
 -- | Whether to check a role's schema for conflicting type definitions, see
 -- Note [Building role parsers lazily].
