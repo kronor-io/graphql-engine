@@ -13,9 +13,15 @@ where
 
 import Data.Has (getter)
 import Data.HashMap.Strict qualified as HashMap
+import Data.HashSet qualified as HashSet
+import Data.Map.Strict qualified as Map
 import Data.Text.Casing (GQLNameIdentifier)
 import Data.Text.Casing qualified as C
 import Data.Text.Extended
+import Data.Traversable (mapAccumL)
+import Data.Vector qualified as V
+import Data.Vector.Unboxed qualified as U
+import Data.Word (Word16)
 import Hasura.Base.Error (throw500)
 import Hasura.Function.Cache
 import Hasura.GraphQL.Parser.Class
@@ -106,7 +112,7 @@ boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAg
         mkTypename = runMkTypename $ _rscTypeNames customization
         name = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableBoolExpTypeName gqlName
 
-    tableFieldParsers <- catMaybes <$> traverse mkField fieldInfos
+    tableFieldParsers <- catMaybes <$> traverse (boolExpField selectPermissions) fieldInfos
 
     aggregationPredicatesParser' <- fromMaybe (pure []) <$> mkAggPredParser
     recur <- boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAggPredParser
@@ -126,67 +132,6 @@ boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAg
         specialFields <- catMaybes <$> sequenceA connectiveFieldParsers
         aggregationPredicateFields <- map (BoolField . AVAggregationPredicates) <$> aggregationPredicatesParser'
         pure (tableFields ++ specialFields ++ aggregationPredicateFields)
-  where
-    mkField ::
-      FieldInfo b ->
-      SchemaT r m (Maybe (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b)))))
-    mkField fieldInfo = runMaybeT do
-      selectPermissions' <- hoistMaybe selectPermissions
-      !roleName <- retrieve scRole
-      fieldName <- hoistMaybe $ fieldInfoGraphQLName fieldInfo
-      P.fieldOptional fieldName Nothing <$> case fieldInfo of
-        -- field_name: field_type_comparison_exp
-        FIColumn (SCIScalarColumn columnInfo) ->
-          let !redactionExp = fromMaybe NoRedaction $ getRedactionExprForColumn selectPermissions' (ciColumn columnInfo)
-           in lift $ fmap (AVColumn columnInfo redactionExp) <$> comparisonExps @b (ciType columnInfo)
-        FIColumn (SCIObjectColumn nestedObjectInfo@NestedObjectInfo {..}) -> do
-          SourceInfo {..} <- asks getter
-          logicalModelInfo <-
-            HashMap.lookup _noiType _siLogicalModels
-              `onNothing` throw500 ("Logical model " <> _noiType <<> " not found in source " <>> _siName)
-          lift $ fmap (AVNestedObject nestedObjectInfo) <$> logicalModelBoolExp logicalModelInfo
-        FIColumn (SCIArrayColumn _) -> empty -- TODO(dmoverton)
-        -- field_name: field_type_bool_exp
-        FIRelationship relationshipInfo -> do
-          case riTarget relationshipInfo of
-            RelTargetNativeQuery nativeQueryName -> do
-              logicalModelInfo <- _nqiReturns <$> askNativeQueryInfo nativeQueryName
-              let remoteLogicalModelPermissions =
-                    (fmap . fmap) (partialSQLExpToUnpreparedValue)
-                      $ maybe annBoolExpTrue spiFilter
-                      $ getSelPermInfoForLogicalModel roleName logicalModelInfo
-              remoteBoolExp <- lift $ logicalModelBoolExp logicalModelInfo
-              pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteLogicalModelPermissions) remoteBoolExp
-            RelTargetTable remoteTable -> do
-              remoteTableInfo <- askTableInfo $ remoteTable
-              let remoteTablePermissions =
-                    (fmap . fmap) (partialSQLExpToUnpreparedValue)
-                      $ maybe annBoolExpTrue spiFilter
-                      $ tableSelectPermissions roleName remoteTableInfo
-              remoteBoolExp <- lift $ tableBoolExp remoteTableInfo
-              pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteTablePermissions) remoteBoolExp
-        FIComputedField ComputedFieldInfo {..} -> do
-          let ComputedFieldFunction {..} = _cfiFunction
-          -- For a computed field to qualify in boolean expression it shouldn't have any input arguments
-          case toList _cffInputArgs of
-            [] -> do
-              let functionArgs =
-                    flip FunctionArgsExp mempty
-                      $ fromComputedFieldImplicitArguments @b UVSession _cffComputedFieldImplicitArgs
-
-              fmap (AVComputedField . AnnComputedFieldBoolExp _cfiXComputedFieldInfo _cfiName _cffName functionArgs)
-                <$> case computedFieldReturnType @b _cfiReturnType of
-                  ReturnsScalar scalarType ->
-                    let redactionExp = fromMaybe NoRedaction $ getRedactionExprForComputedField selectPermissions' _cfiName
-                     in lift $ fmap (CFBEScalar redactionExp) <$> comparisonExps @b (ColumnScalar scalarType)
-                  ReturnsTable table -> do
-                    info <- askTableInfo table
-                    lift $ fmap (CFBETable table) <$> tableBoolExp info
-                  ReturnsOthers -> hoistMaybe Nothing
-            _ -> hoistMaybe Nothing
-
-        -- Using remote relationship fields in boolean expressions is not supported.
-        FIRemoteRelationship _ -> empty
 
 -- |
 -- > input type_bool_exp {
@@ -231,6 +176,74 @@ logicalModelBoolExp logicalModel = do
           <<> ". All fields are combined with a logical 'AND'."
   boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAggPredParser
 
+-- | The field of a boolean expression for one of the fields of a table or
+-- logical model, if it has one.
+boolExpField ::
+  forall b r m n.
+  ( MonadBuildSchema b r m n,
+    AggregationPredicatesSchema b
+  ) =>
+  Maybe (SelPermInfo b) ->
+  FieldInfo b ->
+  SchemaT r m (Maybe (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b)))))
+boolExpField selectPermissions fieldInfo = runMaybeT do
+  selectPermissions' <- hoistMaybe selectPermissions
+  !roleName <- retrieve scRole
+  fieldName <- hoistMaybe $ fieldInfoGraphQLName fieldInfo
+  P.fieldOptional fieldName Nothing <$> case fieldInfo of
+    -- field_name: field_type_comparison_exp
+    FIColumn (SCIScalarColumn columnInfo) ->
+      let !redactionExp = fromMaybe NoRedaction $ getRedactionExprForColumn selectPermissions' (ciColumn columnInfo)
+       in lift $ fmap (AVColumn columnInfo redactionExp) <$> comparisonExps @b (ciType columnInfo)
+    FIColumn (SCIObjectColumn nestedObjectInfo@NestedObjectInfo {..}) -> do
+      SourceInfo {..} <- asks getter
+      logicalModelInfo <-
+        HashMap.lookup _noiType _siLogicalModels
+          `onNothing` throw500 ("Logical model " <> _noiType <<> " not found in source " <>> _siName)
+      lift $ fmap (AVNestedObject nestedObjectInfo) <$> logicalModelBoolExp logicalModelInfo
+    FIColumn (SCIArrayColumn _) -> empty -- TODO(dmoverton)
+    -- field_name: field_type_bool_exp
+    FIRelationship relationshipInfo -> do
+      case riTarget relationshipInfo of
+        RelTargetNativeQuery nativeQueryName -> do
+          logicalModelInfo <- _nqiReturns <$> askNativeQueryInfo nativeQueryName
+          let remoteLogicalModelPermissions =
+                (fmap . fmap) (partialSQLExpToUnpreparedValue)
+                  $ maybe annBoolExpTrue spiFilter
+                  $ getSelPermInfoForLogicalModel roleName logicalModelInfo
+          remoteBoolExp <- lift $ logicalModelBoolExp logicalModelInfo
+          pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteLogicalModelPermissions) remoteBoolExp
+        RelTargetTable remoteTable -> do
+          remoteTableInfo <- askTableInfo $ remoteTable
+          let remoteTablePermissions =
+                (fmap . fmap) (partialSQLExpToUnpreparedValue)
+                  $ maybe annBoolExpTrue spiFilter
+                  $ tableSelectPermissions roleName remoteTableInfo
+          remoteBoolExp <- lift $ tableBoolExp remoteTableInfo
+          pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteTablePermissions) remoteBoolExp
+    FIComputedField ComputedFieldInfo {..} -> do
+      let ComputedFieldFunction {..} = _cfiFunction
+      -- For a computed field to qualify in boolean expression it shouldn't have any input arguments
+      case toList _cffInputArgs of
+        [] -> do
+          let functionArgs =
+                flip FunctionArgsExp mempty
+                  $ fromComputedFieldImplicitArguments @b UVSession _cffComputedFieldImplicitArgs
+
+          fmap (AVComputedField . AnnComputedFieldBoolExp _cfiXComputedFieldInfo _cfiName _cffName functionArgs)
+            <$> case computedFieldReturnType @b _cfiReturnType of
+              ReturnsScalar scalarType ->
+                let redactionExp = fromMaybe NoRedaction $ getRedactionExprForComputedField selectPermissions' _cfiName
+                 in lift $ fmap (CFBEScalar redactionExp) <$> comparisonExps @b (ColumnScalar scalarType)
+              ReturnsTable table -> do
+                info <- askTableInfo table
+                lift $ fmap (CFBETable table) <$> tableBoolExp info
+              ReturnsOthers -> hoistMaybe Nothing
+        _ -> hoistMaybe Nothing
+
+    -- Using remote relationship fields in boolean expressions is not supported.
+    FIRemoteRelationship _ -> empty
+
 -- |
 -- > input type_bool_exp {
 -- >   _or: [type_bool_exp!]
@@ -240,6 +253,8 @@ logicalModelBoolExp logicalModel = do
 -- >   ...
 -- > }
 -- | Booleans expressions for tables
+--
+-- See Note [Data-driven boolean expressions].
 tableBoolExp ::
   forall b r m n.
   (MonadBuildSchema b r m n, AggregationPredicatesSchema b) =>
@@ -250,15 +265,185 @@ tableBoolExp tableInfo = do
   let selectPermissions = tableSelectPermissions roleName tableInfo
   gqlName <- getTableIdentifierName tableInfo
   fieldInfos <- tableSelectFields tableInfo
-  let mkAggPredParser = aggregationPredicatesParser tableInfo
   let description =
         G.Description
           $ "Boolean expression to filter rows from the table "
           <> tableInfoName tableInfo
           <<> ". All fields are combined with a logical 'AND'."
+  sourceInfo :: SourceInfo b <- asks getter
+  P.memoizeOn 'tableBoolExp (_siName sourceInfo, tableInfoName tableInfo) do
+    let customization = _siCustomization sourceInfo
+        tCase = _rscNamingConvention customization
+        mkTypename = runMkTypename $ _rscTypeNames customization
+        name = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableBoolExpTypeName gqlName
+        fieldInfoMap = _tciFieldInfoMap $ _tiCoreInfo tableInfo
+        selectable = HashSet.fromList $ fieldInfoName <$> fieldInfos
 
-  let memoizeKey = tableInfoName tableInfo
-  boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAggPredParser
+    -- What each of the table's fields is in this role's boolean expression,
+    -- in the order of the table's field info map.
+    fields <- for (HashMap.elems fieldInfoMap) \fieldInfo ->
+      if
+        | not $ fieldInfoName fieldInfo `HashSet.member` selectable -> pure Nothing
+        | FIColumn (SCIScalarColumn columnInfo) <- fieldInfo,
+          isJust selectPermissions ->
+            Just . Left . (ciType columnInfo,) <$> comparisonExps @b (ciType columnInfo)
+        | otherwise -> fmap Right <$> boolExpField selectPermissions fieldInfo
+    -- Strict, so that the list of fields doesn't stay alive until the first
+    -- parse.
+    let !(codes, entries) = boolExpEntries fields
+
+    aggregationPredicatesParser' <- fromMaybe (pure []) <$> aggregationPredicatesParser tableInfo
+    recur <- tableBoolExp tableInfo
+
+    -- Bafflingly, ApplicativeDo doesn’t work if we inline this definition (I
+    -- think the TH splices throw it off), so we have to define it separately.
+    let connectiveFieldParsers =
+          [ P.fieldOptional Name.__or Nothing (BoolOr <$> P.list recur),
+            P.fieldOptional Name.__and Nothing (BoolAnd <$> P.list recur),
+            P.fieldOptional Name.__not Nothing (BoolNot <$> recur)
+          ]
+        -- the fields that don't correspond to fields of the table, which come
+        -- after the table's fields
+        otherFields = do
+          specialFields <- catMaybes <$> sequenceA connectiveFieldParsers
+          aggregationPredicateFields <- map (BoolField . AVAggregationPredicates) <$> aggregationPredicatesParser'
+          pure (specialFields ++ aggregationPredicateFields)
+
+        -- Folds over the table's fields that are part of the boolean
+        -- expression, in order. A fold rather than a list, so that GHC can't
+        -- float the list out of the parser and keep it alive with the schema.
+        foldFields :: (FieldInfo b -> BoolExpEntry b n -> a -> a) -> a -> a
+        foldFields f z =
+          HashMap.foldr
+            ( \fieldInfo continue !i ->
+                let code = codes U.! i
+                 in if code == absentField
+                      then continue (i + 1)
+                      else f fieldInfo (entries V.! fromIntegral code) (continue (i + 1))
+            )
+            (const z)
+            fieldInfoMap
+            0
+
+        definitions =
+          foldFields
+            ( \fieldInfo entry rest -> case (entry, fieldInfo) of
+                (ColumnEntry comparison, FIColumn (SCIScalarColumn columnInfo)) ->
+                  P.Definition (ciName columnInfo) Nothing Nothing [] (P.InputFieldInfo (P.nullableType $ P.pType comparison) Nothing) : rest
+                (OtherEntry parser, _) -> P.ifDefinitions parser ++ rest
+                _ -> rest
+            )
+            (P.ifDefinitions otherFields)
+
+        parseFields input = do
+          -- the fields of the table that are given, in order
+          let given =
+                foldFields
+                  ( \fieldInfo entry rest -> case (entry, fieldInfo) of
+                      (ColumnEntry comparison, FIColumn (SCIScalarColumn columnInfo))
+                        | Just value <- HashMap.lookup (ciName columnInfo) input ->
+                            GivenColumn comparison columnInfo value : rest
+                      (OtherEntry parser, _)
+                        | any (\d -> HashMap.member (P.dName d) input) (P.ifDefinitions parser) ->
+                            GivenOther parser : rest
+                      _ -> rest
+                  )
+                  []
+              givenOthers = filter (\d -> HashMap.member (P.dName d) input) (P.ifDefinitions otherFields)
+          -- Every given field that isn't one of these isn't a field of the
+          -- object: look for it the way 'P.object' does.
+          when (length given + length givenOthers /= HashMap.size input) do
+            let known = HashSet.fromList $ map P.dName givenOthers ++ concatMap givenNames given
+            P.checkInputObjectFields name (`HashSet.member` known) input
+          tableFields <- for given \case
+            GivenColumn comparison columnInfo value -> do
+              let redactionExp = fromMaybe NoRedaction $ flip getRedactionExprForColumn (ciColumn columnInfo) =<< selectPermissions
+              Just . BoolField . AVColumn columnInfo redactionExp <$> P.parseOptionalField (ciName columnInfo) comparison value
+            GivenOther parser -> fmap BoolField <$> P.ifParser parser input
+          rest <- P.ifParser otherFields input
+          pure $ BoolAnd $ catMaybes tableFields ++ rest
+
+    pure $ P.objectWith name (Just description) definitions parseFields
+  where
+    givenNames = \case
+      GivenColumn _ columnInfo _ -> [ciName columnInfo]
+      GivenOther parser -> map P.dName $ P.ifDefinitions parser
+
+-- | How a field of a table is parsed in a boolean expression, see Note
+-- [Data-driven boolean expressions].
+data BoolExpEntry b n
+  = -- | A scalar column, parsed with the comparison expression of its type.
+    ColumnEntry (Parser 'Input n [ComparisonExp b])
+  | -- | Any other field, parsed by its own field parser.
+    OtherEntry (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b))))
+
+-- | A field of a table given in a boolean expression.
+data GivenBoolExpField b n
+  = GivenColumn (Parser 'Input n [ComparisonExp b]) (ColumnInfo b) (P.InputValue P.Variable)
+  | GivenOther (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b))))
+
+absentField :: Word16
+absentField = maxBound
+
+-- | The entries of a table's boolean expression, see Note [Data-driven
+-- boolean expressions]: for each of the table's fields, the index of its entry
+-- or 'absentField', and the entries. Columns of the same type share an entry.
+boolExpEntries ::
+  forall b n.
+  (Backend b) =>
+  [Maybe (Either (ColumnType b, Parser 'Input n [ComparisonExp b]) (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b)))))] ->
+  (U.Vector Word16, V.Vector (BoolExpEntry b n))
+boolExpEntries fields =
+  -- Force the codes and the entries' constructors, so that neither keeps the
+  -- list of fields alive. The parsers in the entries aren't forced: they may
+  -- be knot-tied.
+  let ((_, entries), codes) = mapAccumL assign (mempty, []) fields
+      !codesVector = U.fromList codes
+      !entriesVector = V.fromList $ reverse entries
+   in V.foldr seq () entriesVector `seq` (codesVector, entriesVector)
+  where
+    assign ::
+      (Map.Map (ColumnType b) Word16, [BoolExpEntry b n]) ->
+      Maybe (Either (ColumnType b, Parser 'Input n [ComparisonExp b]) (InputFieldsParser n (Maybe (AnnBoolExpFld b (UnpreparedValue b))))) ->
+      ((Map.Map (ColumnType b) Word16, [BoolExpEntry b n]), Word16)
+    assign acc@(byType, entries) = \case
+      Nothing -> (acc, absentField)
+      Just (Left (columnType, comparison))
+        | Just code <- Map.lookup columnType byType -> (acc, code)
+        | otherwise ->
+            let !code = fromIntegral $ length entries
+             in ((Map.insert columnType code byType, ColumnEntry comparison : entries), code)
+      Just (Right parser) ->
+        let !code = fromIntegral $ length entries
+         in ((byType, OtherEntry parser : entries), code)
+
+{- Note [Data-driven boolean expressions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Every role's schema has a boolean expression for every table it can select
+from, and most of its fields are columns. Building an 'InputFieldsParser' for
+each of them costs a few hundred bytes per (role, table, column), which adds up
+to megabytes across roles.
+
+A table's columns, their types and the role's permissions are already in the
+schema cache, though, so the boolean expression parses its columns from those
+instead. For each of the table's fields, in the order of the table's field
+info map (which is the order 'tableSelectFields' gives them, and so the order
+of the conditions in the expression), it keeps a 'Word16': either
+'absentField', for a field that isn't part of the boolean expression, or the
+index of the field's 'BoolExpEntry'. Scalar columns share the entry of their
+type, which holds that type's comparison expression parser; every other field
+(relationships, computed fields, nested objects) gets an entry with its own
+field parser, as before.
+
+To parse an object, the parser walks the table's fields, looks up the ones
+that are part of the expression in the given object, and parses them in order
+with their comparison parser, which is exactly what the per-column field
+parsers did. The fields that don't belong to the table (_and, _or, _not and the
+aggregation predicates) still have their own field parsers, and come after the
+table's fields.
+
+The field definitions are only needed for introspection, so they are a thunk.
+-}
 
 {- Note [Nullability in comparison operators]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
