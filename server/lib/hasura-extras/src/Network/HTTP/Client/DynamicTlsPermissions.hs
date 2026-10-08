@@ -1,11 +1,15 @@
 module Network.HTTP.Client.DynamicTlsPermissions
   ( dynamicTlsSettings,
-    dynamicTlsSettingsWithStore,
+    CACertificates,
+    systemCACertificates,
+    dynamicTlsSettingsWith,
   )
 where
 
 import Control.Exception.Safe (Exception, impureThrow)
 import Data.ByteString.Char8 qualified as BC
+import Data.ByteString.Short qualified as SBS
+import Data.Map.Strict qualified as Map
 import Data.Default.Class qualified as HTTP
 import Data.X509 qualified as HTTP
 import Data.X509.CertificateStore qualified as HTTP
@@ -31,19 +35,59 @@ errorE = impureThrow . TlsServiceDefinitionError
 
 dynamicTlsSettings :: IO [TlsAllow] -> IO HTTP.TLSSettings
 dynamicTlsSettings currentAllow = do
-  systemStore <- HTTP.getSystemCertificateStore
-  return (dynamicTlsSettingsWithStore systemStore currentAllow)
+  caCertificates <- systemCACertificates
+  return (dynamicTlsSettingsWith caCertificates currentAllow)
 
--- | 'dynamicTlsSettings' with the given certificate store.
-dynamicTlsSettingsWithStore :: HTTP.CertificateStore -> IO [TlsAllow] -> HTTP.TLSSettings
-dynamicTlsSettingsWithStore systemStore currentAllow = HTTP.TLSSettings (clientParams systemStore)
+-- | The CA certificates to validate servers' certificates with: the encoding
+-- of each, by the encoding of its subject.
+--
+-- A parsed certificate takes about 13 KiB, and until it is completely parsed,
+-- it keeps its ASN.1 tokens and the text it was parsed from alive: the
+-- system's 172 certificates took 5.3 MiB parsed lazily, and 2.2 MiB parsed
+-- completely. Encoded, they take 0.26 MiB, in unpinned byte arrays (which can
+-- be put in a compact region). Validating a server's certificate parses the CA
+-- certificates of its chain, see 'chainStore'.
+newtype CACertificates = CACertificates (Map.Map SBS.ShortByteString SBS.ShortByteString)
+
+-- | The system's CA certificates, see 'CACertificates'.
+systemCACertificates :: IO CACertificates
+systemCACertificates = do
+  store <- HTTP.getSystemCertificateStore
+  let entry certificate =
+        ( subjectKey $ HTTP.certSubjectDN $ HTTP.getCertificate certificate,
+          SBS.toShort $ HTTP.encodeSignedObject certificate
+        )
+      !certificates = Map.fromList $ map entry $ HTTP.listCertificates store
+  pure $ CACertificates certificates
+
+-- | The key of a distinguished name in 'CACertificates'.
+subjectKey :: HTTP.DistinguishedName -> SBS.ShortByteString
+subjectKey = SBS.toShort . BC.pack . show
+
+-- | A certificate store with the CA certificates of the issuers of the
+-- certificates of a chain (and of the certificates themselves, which may be
+-- CA certificates).
+chainStore :: CACertificates -> HTTP.CertificateChain -> HTTP.CertificateStore
+chainStore (CACertificates certificates) (HTTP.CertificateChain chain) =
+  HTTP.makeCertificateStore
+    [ certificate
+    | signed <- chain,
+      let certificate' = HTTP.getCertificate signed,
+      name <- [HTTP.certIssuerDN certificate', HTTP.certSubjectDN certificate'],
+      Just encoded <- [Map.lookup (subjectKey name) certificates],
+      Right certificate <- [HTTP.decodeSignedCertificate (SBS.fromShort encoded)]
+    ]
+
+-- | 'dynamicTlsSettings' with the given CA certificates.
+dynamicTlsSettingsWith :: CACertificates -> IO [TlsAllow] -> HTTP.TLSSettings
+dynamicTlsSettingsWith caCertificates currentAllow = HTTP.TLSSettings clientParams
   where
-
-    clientParams :: HTTP.CertificateStore -> HTTP.ClientParams
-    clientParams systemStore =
+    clientParams :: HTTP.ClientParams
+    clientParams =
       (HTTP.defaultParamsClient hostName serviceIdBlob)
         { HTTP.clientSupported = HTTP.def {HTTP.supportedCiphers = TLS.ciphersuite_default}, -- supportedCiphers :: [Cipher]	Supported cipher methods. The default is empty, specify a suitable cipher list. ciphersuite_default is often a good choice.  Default: [] -- https://hackage.haskell.org/package/tls-1.5.5/docs/Network-TLS.html#t:Cipher
-          HTTP.clientShared = HTTP.def {HTTP.sharedCAStore = systemStore},
+          -- 'certValidation' validates with 'caCertificates' instead
+          HTTP.clientShared = HTTP.def {HTTP.sharedCAStore = mempty},
           HTTP.clientHooks =
             HTTP.def
               { HTTP.onServerCertificate = certValidation
@@ -51,8 +95,8 @@ dynamicTlsSettingsWithStore systemStore currentAllow = HTTP.TLSSettings (clientP
         }
 
     certValidation :: HTTP.CertificateStore -> HTTP.ValidationCache -> HTTP.ServiceID -> HTTP.CertificateChain -> IO [HTTP.FailedReason]
-    certValidation certStore validationCache sid chain = do
-      res <- HTTP.onServerCertificate HTTP.def certStore validationCache sid chain
+    certValidation _ validationCache sid chain = do
+      res <- HTTP.onServerCertificate HTTP.def (chainStore caCertificates chain) validationCache sid chain
       allowList <- currentAllow
       if any (allowed sid res) allowList
         then pure []
