@@ -5,6 +5,8 @@
 
 module Hasura.GraphQL.Schema.Common
   ( SchemaContext (..),
+    SharedComparisons,
+    SharedSourceComparisons (..),
     SchemaSampledFeatureFlags (..),
     sampleFeatureFlags,
     WithSchemaSampledFeatureFlags,
@@ -97,6 +99,7 @@ import Hasura.Prelude
 import Hasura.RQL.IR qualified as IR
 import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.Column (ColumnType)
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.ComputedField.Name (ComputedFieldName)
 import Hasura.RQL.Types.Relationships.Remote
@@ -122,8 +125,20 @@ data SchemaContext = SchemaContext
     scRemoteRelationshipParserBuilder :: RemoteRelationshipParserBuilder,
     -- | the role for which the schema is being built
     scRole :: RoleName,
-    scSampledFeatureFlags :: SchemaSampledFeatureFlags
+    scSampledFeatureFlags :: SchemaSampledFeatureFlags,
+    -- | the comparison expressions of each column type, shared by all roles;
+    -- see Note [Sharing comparison expressions between roles] in
+    -- Hasura.GraphQL.Schema.BoolExp
+    scSharedComparisons :: SharedComparisons
   }
+
+-- | The comparison expressions of the column types of each source, built once
+-- per schema and shared by all roles. Each source's map is a thunk, built when
+-- a role first needs it.
+type SharedComparisons = HashMap SourceName (AB.AnyBackend SharedSourceComparisons)
+
+newtype SharedSourceComparisons b
+  = SharedSourceComparisons (HashMap (ColumnType b) (P.Parser 'P.Input P.Parse [IR.OpExpG b (IR.UnpreparedValue b)]))
 
 -- | We want to be able to probe feature flags in the schema parsers, but we also
 -- want to be able to run schema actions without requiring IO, in part because we

@@ -14,6 +14,7 @@ import Control.Lens hiding (contexts)
 import Control.Monad.Memoize
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
+import Data.Either (fromRight)
 import Data.HashSet qualified as Set
 import Data.List.Extended (duplicates)
 import Data.Text.Extended
@@ -58,8 +59,9 @@ import Hasura.RQL.IR
 import Hasura.RQL.Types.Action
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendTag (HasTag)
+import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.Common
-import Hasura.RQL.Types.ComputedField (ComputedFieldInfo (..))
+import Hasura.RQL.Types.ComputedField
 import Hasura.RQL.Types.CustomTypes
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.Permission
@@ -172,9 +174,18 @@ buildGQLContext
     -- but that isn't really acheivable (see mono #3829). NOTE: the admin role
     -- will still be a bottleneck here, even on huge_schema which has many
     -- roles.
+    -- See Note [Sharing comparison expressions between roles] in
+    -- Hasura.GraphQL.Schema.BoolExp
+    sharedComparisons <-
+      liftIO
+        $ buildSharedComparisons
+          sampledFeatureFlags
+          (buildSchemaOptions (sqlGen, functionPermissions) experimentalFeatures)
+          sources
     let buildHasuraRoleContext checks role =
           buildRoleContext
             checks
+            sharedComparisons
             sampledFeatureFlags
             (sqlGen, functionPermissions)
             sources
@@ -227,6 +238,7 @@ buildGQLContext
                   buildRoleContextFrom
                     initialParsers
                     SkipSchemaChecks
+                    sharedComparisons
                     sampledFeatureFlags
                     (sqlGen, functionPermissions)
                     sources
@@ -536,6 +548,54 @@ buildSchemaOptions
           removeEmptySubscriptionResponses
       }
 
+-- | The comparison expressions of every column type of every source, shared by
+-- all roles. Each source's are built, all at once, when a role first needs
+-- them; if that fails, every role builds its own.
+--
+-- They are built with a role that has no permissions: comparison expressions
+-- don't depend on the role. See Note [Sharing comparison expressions between
+-- roles] in Hasura.GraphQL.Schema.BoolExp.
+buildSharedComparisons ::
+  SchemaSampledFeatureFlags ->
+  SchemaOptions ->
+  SourceCache ->
+  IO SharedComparisons
+buildSharedComparisons sampledFeatureFlags schemaOptions =
+  traverse \sourceInfo ->
+    AB.dispatchAnyBackend @BackendSchema sourceInfo \(sourceInfo' :: SourceInfo b) ->
+      fmap (AB.mkAnyBackend @b . SharedSourceComparisons . fromRight mempty)
+        $ unsafeInterleaveIO
+        $ runExceptT
+        $ runMemoizeT
+        $ runSourceSchema sharedContext schemaOptions sourceInfo'
+        $ fmap HashMap.fromList
+        $ for (sourceColumnTypes sourceInfo') \columnType ->
+          (columnType,) <$> comparisonExps @b columnType
+  where
+    sharedContext =
+      SchemaContext
+        HasuraSchema
+        ignoreRemoteRelationship
+        (mkRoleNameSafe [NT.nonEmptyTextQQ|hasura-shared-comparison-expressions|])
+        sampledFeatureFlags
+        mempty
+
+    -- the types of the columns and scalar computed fields of a source's tables
+    sourceColumnTypes :: forall b. (BackendSchema b) => SourceInfo b -> [ColumnType b]
+    sourceColumnTypes sourceInfo =
+      Set.toList
+        $ Set.fromList
+          [ columnType
+          | tableInfo <- HashMap.elems $ _siTables sourceInfo,
+            fieldInfo <- HashMap.elems $ _tciFieldInfoMap $ _tiCoreInfo tableInfo,
+            columnType <- case fieldInfo of
+              FIColumn (SCIScalarColumn columnInfo) -> [ciType columnInfo]
+              FIComputedField computedFieldInfo
+                | ReturnsScalar scalarType <- computedFieldReturnType @b (_cfiReturnType computedFieldInfo) ->
+                    [ColumnScalar scalarType]
+              _ -> []
+          ]
+
 -- | Whether to check a role's schema for conflicting type definitions, see
 -- Note [Building role parsers lazily].
 data SchemaChecks = CheckSchema | SkipSchemaChecks
@@ -546,6 +606,7 @@ buildRoleContext ::
   forall m.
   (MonadError QErr m, MonadIO m) =>
   SchemaChecks ->
+  SharedComparisons ->
   SchemaSampledFeatureFlags ->
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   SourceCache ->
@@ -558,8 +619,8 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext =
-  fst <$> buildRoleContextFrom noMemoizedParsers checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext
+buildRoleContext checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext =
+  fst <$> buildRoleContextFrom noMemoizedParsers checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext
 
 -- | 'buildRoleContext', starting from parsers memoized before (see
 -- 'inheritedRoleSharing'), and returning the parsers it memoized.
@@ -568,6 +629,7 @@ buildRoleContextFrom ::
   (MonadError QErr m, MonadIO m) =>
   MemoizedParsers ->
   SchemaChecks ->
+  SharedComparisons ->
   SchemaSampledFeatureFlags ->
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   SourceCache ->
@@ -580,7 +642,7 @@ buildRoleContextFrom ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m (RoleContextValue, MemoizedParsers)
-buildRoleContextFrom initialParsers checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContextFrom initialParsers checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -595,6 +657,7 @@ buildRoleContextFrom initialParsers checks sampledFeatureFlags options sources r
           )
           role
           sampledFeatureFlags
+          sharedComparisons
   runMemoizeTFrom initialParsers $ do
     -- build all sources (`apolloFedTableParsers` contains all the parsers and
     -- type names, which are eligible for the `_Entity` Union)
@@ -761,6 +824,7 @@ buildRelayRoleContext options sources actions customTypes role expFeatures schem
           ignoreRemoteRelationship
           role
           schemaSampledFeatureFlags
+          mempty
   runMemoizeT do
     -- build all sources, and the node root
     (node, fieldsList) <- do
@@ -906,6 +970,7 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
           )
           fakeRole
           schemaSampledFeatureFlags
+          mempty
       -- chosen arbitrarily to be as improbable as possible
       fakeRole = mkRoleNameSafe [NT.nonEmptyTextQQ|MyNameIsOzymandiasKingOfKingsLookOnMyWorksYeMightyAndDespair|]
 
