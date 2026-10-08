@@ -4,6 +4,7 @@
 module Hasura.GraphQL.Schema.BoolExp
   ( AggregationPredicatesSchema (..),
     AggregationPredicateField (..),
+    sharedComparisonExps,
     tableBoolExp,
     logicalModelBoolExp,
     mkBoolOperator,
@@ -50,6 +51,7 @@ import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
 import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
+import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
 import Type.Reflection
@@ -89,6 +91,36 @@ data AggregationPredicateField b n = AggregationPredicateField
     -- built.
     apfParser :: ~(Maybe (Parser 'Input n (AggregationPredicates b (UnpreparedValue b))))
   }
+
+{- Note [Sharing comparison expressions between roles]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The comparison expression of a column type (e.g. `String_comparison_exp`)
+doesn't depend on the role: 'comparisonExps' only reads the source and the
+schema options. Yet every role built its own, for every type its boolean
+expressions use. So 'Hasura.GraphQL.Schema.buildGQLContext' builds them once,
+for every column type of every source, with a role that has no permissions,
+and puts them in the 'SchemaContext' ('scSharedComparisons'); every role uses
+those. A type that isn't there (or a source whose shared comparison expressions
+failed to build) falls back to the role's own 'comparisonExps'.
+
+They are the same parsers, with the same type definitions, as the ones a role
+would build, so the schema doesn't change.
+-}
+
+-- | The comparison expression of a column type: the one shared by all roles,
+-- or the role's own. See Note [Sharing comparison expressions between roles].
+sharedComparisonExps ::
+  forall b r m n.
+  (MonadBuildSchema b r m n) =>
+  ColumnType b ->
+  SchemaT r m (Parser 'Input n [ComparisonExp b])
+sharedComparisonExps columnType = do
+  sourceInfo :: SourceInfo b <- asks getter
+  shared <- retrieve scSharedComparisons
+  let sharedComparison = do
+        SharedSourceComparisons comparisons <- AB.unpackAnyBackend @b =<< HashMap.lookup (_siName sourceInfo) shared
+        HashMap.lookup columnType comparisons
+  maybe (comparisonExps @b columnType) pure sharedComparison
 
 -- | How a field of a table or logical model is parsed in a boolean expression,
 -- beside its 'FieldInfo'. See Note [Data-driven table input objects] in
@@ -250,7 +282,7 @@ boolExpEntry selectPermissions fieldInfo = runMaybeT do
   case fieldInfo of
     -- field_name: field_type_comparison_exp
     FIColumn (SCIScalarColumn columnInfo) ->
-      Left . (ciType columnInfo,) . BEColumn <$> lift (comparisonExps @b (ciType columnInfo))
+      Left . (ciType columnInfo,) . BEColumn <$> lift (sharedComparisonExps @b (ciType columnInfo))
     FIColumn (SCIObjectColumn NestedObjectInfo {..}) -> do
       SourceInfo {..} <- asks getter
       logicalModelInfo <-
@@ -274,7 +306,7 @@ boolExpEntry selectPermissions fieldInfo = runMaybeT do
         [] ->
           case computedFieldReturnType @b _cfiReturnType of
             ReturnsScalar scalarType ->
-              Right . BEComputedScalar fieldName <$> lift (comparisonExps @b (ColumnScalar scalarType))
+              Right . BEComputedScalar fieldName <$> lift (sharedComparisonExps @b (ColumnScalar scalarType))
             ReturnsTable table -> do
               info <- askTableInfo table
               Right . BEComputedTable fieldName <$> lift (tableBoolExp info)

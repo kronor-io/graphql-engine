@@ -143,6 +143,7 @@ buildQueryParsers introspection customizer = do
           ignoreRemoteRelationship
           adminRoleName
           (SchemaSampledFeatureFlags [])
+          mempty
   RemoteSchemaParser query _ _ <-
     runError
       $ runMemoizeT
