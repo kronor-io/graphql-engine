@@ -57,6 +57,8 @@ module Hasura.GraphQL.Parser
     selection,
     rawSelection,
     rawSelectionParse,
+    rawSubselectionParse,
+    subselectionDefinition,
     selectionDefinition,
     selectionArgumentNames,
     selection_,

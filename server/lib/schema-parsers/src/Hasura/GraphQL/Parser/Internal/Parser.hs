@@ -504,22 +504,45 @@ rawSubselection ::
 {-# INLINE rawSubselection #-}
 rawSubselection name description argumentsParser bodyParser =
   FieldParser
-    { fDefinition =
-        Definition name description Nothing [] $
-          FieldInfo (ifDefinitions argumentsParser) (pType bodyParser),
-      fParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
-        -- check for extraneous arguments here, since the InputFieldsParser just
-        -- handles parsing the fields it cares about
-        for_ (HashMap.keys _fArguments) \argumentName ->
-          unless (argumentName `S.member` argumentNames) $
-            parseError $
-              toErrorValue name <> " has no argument named " <> toErrorValue argumentName
-        (_fAlias,_fArguments,,)
-          <$> withKey (Key "args") (ifParser argumentsParser $ GraphQLValue <$> _fArguments)
-          <*> pParser bodyParser _fSelectionSet
+    { fDefinition = subselectionDefinition name description argumentsParser bodyParser,
+      fParser = rawSubselectionParse argumentNames name argumentsParser bodyParser
     }
   where
-    argumentNames = S.fromList (dName <$> ifDefinitions argumentsParser)
+    argumentNames = selectionArgumentNames argumentsParser
+
+-- | The definition of the field that 'subselection' makes.
+subselectionDefinition ::
+  Name ->
+  Maybe Description ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Output m b ->
+  Definition origin (FieldInfo origin)
+subselectionDefinition name description argumentsParser bodyParser =
+  Definition name description Nothing [] $
+    FieldInfo (ifDefinitions argumentsParser) (pType bodyParser)
+
+-- | Parse a field the way the parser of @'rawSubselection' name _
+-- argumentsParser bodyParser@ does, given the names of the arguments
+-- ('selectionArgumentNames').
+rawSubselectionParse ::
+  (MonadParse m) =>
+  S.HashSet Name ->
+  Name ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Output m b ->
+  Field NoFragments Variable ->
+  m (Maybe Name, HashMap Name (Value Variable), a, b)
+{-# INLINE rawSubselectionParse #-}
+rawSubselectionParse argumentNames name argumentsParser bodyParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
+  -- check for extraneous arguments here, since the InputFieldsParser just
+  -- handles parsing the fields it cares about
+  for_ (HashMap.keys _fArguments) \argumentName ->
+    unless (argumentName `S.member` argumentNames) $
+      parseError $
+        toErrorValue name <> " has no argument named " <> toErrorValue argumentName
+  (_fAlias,_fArguments,,)
+    <$> withKey (Key "args") (ifParser argumentsParser $ GraphQLValue <$> _fArguments)
+    <*> pParser bodyParser _fSelectionSet
 
 -- | A shorthand for a 'selection' that takes no arguments.
 selection_ ::
