@@ -23,6 +23,7 @@ import Hasura.GraphQL.Schema.Backend (BackendSchema (..), MonadBuildSchema, colu
 import Hasura.GraphQL.Schema.Common
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Table (getTableIdentifierName, tableUpdateColumns)
+import Hasura.GraphQL.Schema.TableFields (listObject, sharedParsers)
 import Hasura.GraphQL.Schema.Typename
 import Hasura.Prelude
 import Hasura.RQL.IR.Value
@@ -149,6 +150,13 @@ mergeDisjoint parsedResults = do
 -- And (morally) parses into values:
 --
 -- > HashMap.fromList [("col1", MkOp (fp "x")), ("col2", MkOp (fp "y"))]
+--
+-- The parser of a column's value may only depend on the column's type and
+-- nullability: the columns of the same type and nullability share it, and the
+-- object parses its fields from the list of columns rather than with a field
+-- parser per column, the way the fields of a 'P.object' of 'P.fieldOptional's
+-- would be parsed. See Note [Data-driven table input objects] in
+-- Hasura.GraphQL.Schema.TableFields.
 updateOperator ::
   forall n r m b a.
   (MonadBuildSchema b r m n) =>
@@ -165,21 +173,13 @@ updateOperator tableGQLName opName opFieldName mkParser columns opDesc objDesc =
   let customization = _siCustomization sourceInfo
       tCase = _rscNamingConvention customization
       mkTypename = runMkTypename $ _rscTypeNames customization
-  fieldParsers :: NonEmpty (P.InputFieldsParser n (Maybe (Column b, a))) <-
-    for columns \columnInfo -> do
-      let fieldName = ciName columnInfo
-          fieldDesc = ciDescription columnInfo
-      fieldParser <- mkParser columnInfo
-      pure
-        $ P.fieldOptional fieldName fieldDesc fieldParser
-        `mapField` \value -> (ciColumn columnInfo, value)
+  -- the parsers of the columns' values, shared by type and nullability
+  fields <- sharedParsers (\columnInfo -> (ciType columnInfo, ciIsNullable columnInfo)) mkParser (toList columns)
   let objName = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableOperatorInputTypeName tableGQLName opName
   pure
-    $ fmap (HashMap.fromList . (fold :: Maybe [(Column b, a)] -> [(Column b, a)]))
+    $ fmap (HashMap.fromList . map (\(columnInfo, value) -> (ciColumn columnInfo, value)) . fold)
     $ P.fieldOptional (applyFieldNameCaseIdentifier tCase opFieldName) (Just opDesc)
-    $ P.object objName (Just objDesc)
-    $ (catMaybes . toList)
-    <$> sequenceA fieldParsers
+    $ listObject objName (Just objDesc) ciName ciDescription fields
 {-# ANN updateOperator ("HLint: ignore Use tuple-section" :: String) #-}
 
 setOp ::

@@ -58,7 +58,7 @@ import Data.Has (getter)
 import Data.Text.Casing qualified as C
 import Data.Text.Extended
 import Hasura.GraphQL.ApolloFederation
-import Hasura.GraphQL.Schema.Backend (BackendTableSelectSchema (..), BackendUpdateOperatorsSchema (..), MonadBuildSchema)
+import Hasura.GraphQL.Schema.Backend (BackendTableSelectSchema (..), BackendUpdateOperatorsSchema (..), MonadBuildSchema, selectTableAggregateField, selectTableField)
 import Hasura.GraphQL.Schema.BoolExp (AggregationPredicatesSchema)
 import Hasura.GraphQL.Schema.Common
 import Hasura.GraphQL.Schema.Mutation
@@ -114,9 +114,9 @@ buildTableQueryAndSubscriptionFields mkRootFieldName tableName tableInfo gqlName
       -- select table aggregate
       selectAggName = runMkRootFieldName mkRootFieldName $ setFieldNameCase tCase tableInfo _tcrfSelectAggregate mkSelectAggregateField gqlName
 
-  selectTableParser <- optionalFieldParser QDBMultipleRows $ selectTable tableInfo selectName selectDesc
+  selectTableParser <- optionalFieldParser QDBMultipleRows $ selectTableField tableInfo selectName selectDesc
   selectTableByPkParser <- optionalFieldParser QDBSingleRow $ selectTableByPk tableInfo selectPKName selectPKDesc
-  selectTableAggregateParser <- optionalFieldParser QDBAggregation $ selectTableAggregate tableInfo selectAggName selectAggDesc
+  selectTableAggregateParser <- optionalFieldParser QDBAggregation $ selectTableAggregateField tableInfo selectAggName selectAggDesc
 
   case tableSelectPermissions roleName tableInfo of
     -- No select permission found for the current role, so
