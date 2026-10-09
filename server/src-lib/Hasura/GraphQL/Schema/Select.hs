@@ -615,9 +615,12 @@ defaultTableSelectionSet tableInfo = runMaybeT do
                 arguments = scalarSelectionArgumentsParser @b (ciType columnInfo)
             result <- columnParser (ciType columnInfo) (G.Nullability nullable)
             pure $ Just $ Left ((ciType columnInfo, nullable), ColumnSelection arguments (IP.selectionArgumentNames arguments) result)
+      FIRelationship relationshipInfo -> do
+        selections <- concat . maybeToList <$> relationshipField tableName relationshipInfo
+        pure if null selections then Nothing else Just (Right (OtherSelections selections))
       fieldInfo -> do
         parsers <- fieldSelection logicalModelCache tableName tableInfo fieldInfo
-        pure if null parsers then Nothing else Just (Right (OtherSelections parsers))
+        pure if null parsers then Nothing else Just (Right (OtherSelections (map Right parsers)))
     let entries = tableFieldEntries fields
         fieldInfoMap = _tciFieldInfoMap tableCoreInfo
         selectionSet extra =
@@ -659,6 +662,49 @@ defaultTableSelectionSet tableInfo = runMaybeT do
       IP.setParserDirectives directives
         $ IP.selectionSetObjectWith name description definitions lookupParser implementsInterfaces
 
+-- | The field of an object relationship, as data: its field parser, or its
+-- entry in its table's selection set, are made from it. See Note [Data-driven
+-- table selection sets].
+data ObjectRelationshipSelection b n = ObjectRelationshipSelection
+  { orsFieldName :: G.Name,
+    orsNullability :: Nullable,
+    orsTarget :: Parser 'Output n (AnnotatedFields b),
+    orsRelationship :: RelInfo b,
+    orsTargetTable :: TableName b,
+    -- | the target's select permission filter, deduplicated
+    orsFilter :: AnnBoolExp b (IR.UnpreparedValue b)
+  }
+
+objectRelationshipDefinition :: (Applicative n) => ObjectRelationshipSelection b n -> P.Definition P.FieldInfo
+objectRelationshipDefinition ObjectRelationshipSelection {..} =
+  case orsNullability of
+    Nullable -> definition
+    -- what 'IP.nonNullableField' does
+    NotNullable
+      | P.Definition name description origin directives (P.FieldInfo arguments resultType) <- definition ->
+          P.Definition name description origin directives (P.FieldInfo arguments (P.nonNullableType resultType))
+  where
+    definition = IP.subselectionDefinition orsFieldName (Just $ G.Description "An object relationship") (pure ()) orsTarget
+
+objectRelationshipParse ::
+  (Backend b, MonadParse n) =>
+  ObjectRelationshipSelection b n ->
+  G.Field G.NoFragments P.Variable ->
+  n (AnnotatedField b)
+objectRelationshipParse ObjectRelationshipSelection {..} field = do
+  (_, _, (), fields) <- IP.rawSubselectionParse mempty orsFieldName (pure ()) orsTarget field
+  pure
+    $ IR.AFObjectRelation
+    $ IR.AnnRelationSelectG (riName orsRelationship) (unRelMapping $ riMapping orsRelationship) Nullable
+    $ IR.AnnObjectSelectG fields (IR.FromTable orsTargetTable) orsFilter
+
+objectRelationshipFieldParser ::
+  (Backend b, MonadParse n) =>
+  ObjectRelationshipSelection b n ->
+  FieldParser n (AnnotatedField b)
+objectRelationshipFieldParser selection =
+  IP.FieldParser (objectRelationshipDefinition selection) (objectRelationshipParse selection)
+
 {- Note [Data-driven table selection sets]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Like the boolean and order by expressions (see Note [Data-driven table input
@@ -691,8 +737,9 @@ data SelectionEntry b n
       (InputFieldsParser n (Maybe (ScalarSelectionArguments b)))
       (HashSet G.Name)
       (Parser 'Both n (IR.ValueWithOrigin (ColumnValue b)))
-  | -- | any other field: its field parsers
-    OtherSelections [FieldParser n (AnnotatedField b)]
+  | -- | any other field: its object relationship fields, as data, or its
+    -- field parsers
+    OtherSelections [Either (ObjectRelationshipSelection b n) (FieldParser n (AnnotatedField b))]
 
 -- | Whether the field of a column is nullable in a role's schema: see
 -- 'fieldSelection'.
@@ -707,6 +754,7 @@ columnSelectionRedaction selectPermissions columnInfo =
 -- | The definitions of the fields of a table selection set, in order: only
 -- needed for introspection.
 tableSelectionDefinitions ::
+  (Applicative n) =>
   FieldInfoMap (FieldInfo b) ->
   TableFieldEntries (SelectionEntry b n) ->
   [P.Definition P.FieldInfo]
@@ -719,7 +767,7 @@ tableSelectionDefinitions fieldInfoMap (codes, entries) =
               else case (fieldInfo, entries V.! fromIntegral code) of
                 (FIColumn (SCIScalarColumn columnInfo), ColumnSelection arguments _ result) ->
                   IP.selectionDefinition (ciName columnInfo) (ciDescription columnInfo) arguments result : continue (i + 1)
-                (_, OtherSelections parsers) -> map IP.fDefinition parsers <> continue (i + 1)
+                (_, OtherSelections selections) -> map (either objectRelationshipDefinition IP.fDefinition) selections <> continue (i + 1)
                 _ -> continue (i + 1)
     )
     (const [])
@@ -748,8 +796,9 @@ lookupTableSelection selectPermissions fieldInfoMap (codes, entries) name =
                       Just \field -> do
                         (_, _, columnArguments) <- IP.rawSelectionParse argumentNames name arguments field
                         pure $ IR.mkAnnColumnField (ciColumn columnInfo) (ciType columnInfo) (columnSelectionRedaction selectPermissions columnInfo) columnArguments
-                (_, OtherSelections parsers)
-                  | Just parser <- find ((== name) . getName . IP.fDefinition) parsers -> Just (IP.fParser parser)
+                (_, OtherSelections selections)
+                  | Just selection <- find ((== name) . either orsFieldName (getName . IP.fDefinition)) selections ->
+                      Just $ either objectRelationshipParse IP.fParser selection
                 _ -> continue (i + 1)
     )
     (const Nothing)
@@ -1486,7 +1535,7 @@ fieldSelection logicalModelCache table tableInfo = \case
   FIColumn (SCIArrayColumn NestedArrayInfo {..}) ->
     fmap (nestedArrayFieldParser _naiSupportsNestedArrays _naiIsNullable) <$> fieldSelection logicalModelCache table tableInfo (FIColumn _naiColumnInfo)
   FIRelationship relationshipInfo ->
-    concat . maybeToList <$> relationshipField table relationshipInfo
+    concat . maybeToList . fmap (map (either objectRelationshipFieldParser id)) <$> relationshipField table relationshipInfo
   FIComputedField computedFieldInfo ->
     maybeToList <$> computedField computedFieldInfo table tableInfo
   FIRemoteRelationship remoteFieldInfo -> do
@@ -1662,7 +1711,7 @@ relationshipField ::
   ) =>
   TableName b ->
   RelInfo b ->
-  SchemaT r m (Maybe [FieldParser n (AnnotatedField b)])
+  SchemaT r m (Maybe [Either (ObjectRelationshipSelection b n) (FieldParser n (AnnotatedField b))])
 relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = runMaybeT do
   tCase <- retrieve $ _rscNamingConvention . _siCustomization @b
   roleName <- retrieve scRole
@@ -1715,7 +1764,6 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
 
   case riType ri of
     ObjRel -> do
-      let desc = Just $ G.Description "An object relationship"
       selectionSetParser <- MaybeT $ tableSelectionSet otherTableInfo
       -- We need to set the correct nullability of our GraphQL field.  Manual
       -- relationships are always nullable, and so are "reverse" object
@@ -1763,17 +1811,8 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
           pure $ boolToNullable $ any ciIsNullable colInfo
         -- Manual or reverse relationships are always nullable
         _ -> pure Nullable
-      pure
-        $ pure
-        $ case nullable of Nullable -> id; NotNullable -> IP.nonNullableField
-        $ P.subselection_ relFieldName desc selectionSetParser
-        <&> \fields ->
-          IR.AFObjectRelation
-            $ IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) Nullable
-            $ IR.AnnObjectSelectG fields (IR.FromTable otherTableName)
-            $ deduplicatePermissions
-            $ IR._tpFilter
-            $ tablePermissionsInfo remotePerms
+      let !filterExp = deduplicatePermissions $ IR._tpFilter $ tablePermissionsInfo remotePerms
+      pure [Left $ ObjectRelationshipSelection relFieldName nullable selectionSetParser ri otherTableName filterExp]
     ArrRel -> do
       let arrayRelDesc = Just $ G.Description "An array relationship"
       otherTableParser <- MaybeT $ selectTable otherTableInfo relFieldName arrayRelDesc
@@ -1798,6 +1837,7 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
             relConnectionDesc = Just $ G.Description "An array relationship connection"
         MaybeT $ lift $ selectTableConnection otherTableInfo relConnectionName relConnectionDesc pkeyColumns
       pure
+        $ map Right
         $ catMaybes
           [ Just arrayRelField,
             fmap (IR.AFArrayRelation . IR.ASAggregate . IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) Nullable) <$> remoteAggField,
@@ -1820,6 +1860,7 @@ relationshipField _table ri@RelInfo {riTarget = RelTargetNativeQuery nativeQuery
 
       pure
         $ pure
+        $ Right
         $ nativeQueryParser
         <&> \selectExp ->
           IR.AFObjectRelation (IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) nullability selectExp)
@@ -1835,6 +1876,7 @@ relationshipField _table ri@RelInfo {riTarget = RelTargetNativeQuery nativeQuery
 
       pure
         $ pure
+        $ Right
         $ nativeQueryParser
         <&> \selectExp ->
           IR.AFArrayRelation
