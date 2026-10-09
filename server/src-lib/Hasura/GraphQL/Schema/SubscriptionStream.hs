@@ -25,6 +25,7 @@ import Hasura.GraphQL.Schema.Parser
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Select (tableSelectionList, tableWhereArg)
 import Hasura.GraphQL.Schema.Table (getTableGQLName, getTableIdentifierName, tableSelectColumns, tableSelectPermissions)
+import Hasura.GraphQL.Schema.TableFields (listObject, sharedParsers)
 import Hasura.GraphQL.Schema.Typename
 import Hasura.Name qualified as Name
 import Hasura.Prelude
@@ -98,23 +99,6 @@ cursorOrderingArg = do
   cursorOrderingParser' <- cursorOrderingArgParser @b
   pure $ P.fieldOptional Name._ordering (Just $ G.Description "cursor ordering") cursorOrderingParser'
 
--- | Input fields parser to parse the value of a table's column
--- > column_name: column_type
-streamColumnParserArg ::
-  forall b n m r.
-  (MonadBuildSchema b r m n) =>
-  (ColumnInfo b, IR.AnnRedactionExpUnpreparedValue b) ->
-  SchemaT r m (InputFieldsParser n (Maybe (ColumnInfo b, IR.AnnRedactionExpUnpreparedValue b, ColumnValue b)))
-streamColumnParserArg (colInfo, redactionExp) = do
-  fieldParser <- typedParser colInfo
-  let fieldName = ciName colInfo
-      fieldDesc = ciDescription colInfo
-  pure do
-    P.fieldOptional fieldName fieldDesc fieldParser <&> fmap (colInfo,redactionExp,)
-  where
-    typedParser columnInfo = do
-      fmap IR.openValueOrigin <$> columnParser (ciType columnInfo) (G.Nullability $ ciIsNullable columnInfo)
-
 -- | Input object parser whose keys are the column names and the values are the
 --   initial values of those columns from where the streaming should start.
 -- > input table_stream_cursor_value_input {
@@ -137,8 +121,17 @@ streamColumnValueParser tableGQLIdentifier colInfos = do
       objName = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkStreamCursorValueInputTypeName tableGQLIdentifier
       description = G.Description $ "Initial value of the column from where the streaming should start"
   memoizeOn 'streamColumnValueParser (sourceName, tableGQLIdentifier) $ do
-    columnVals <- sequenceA <$> traverse streamColumnParserArg colInfos
-    pure $ P.object objName (Just description) columnVals <&> (catMaybes . NE.toList)
+    -- See Note [Data-driven table input objects] in
+    -- Hasura.GraphQL.Schema.TableFields: the columns of the same type and
+    -- nullability share their parser.
+    fields <-
+      sharedParsers
+        (\(columnInfo, _) -> (ciType columnInfo, ciIsNullable columnInfo))
+        (\(columnInfo, _) -> fmap IR.openValueOrigin <$> columnParser (ciType columnInfo) (G.Nullability $ ciIsNullable columnInfo))
+        (NE.toList colInfos)
+    pure
+      $ listObject objName (Just description) (ciName . fst) (ciDescription . fst) fields
+      <&> map \((columnInfo, redactionExp), value) -> (columnInfo, redactionExp, value)
 
 -- | Argument to accept the initial value from where the streaming should start.
 -- > initial_value: table_stream_cursor_value_input!
