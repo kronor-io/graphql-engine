@@ -12,6 +12,8 @@ module Hasura.GraphQL.Schema.TableFields
     TrailingField (..),
     columnFieldName,
     optionalFieldDefinition,
+    listObject,
+    sharedParsers,
   )
 where
 
@@ -202,3 +204,54 @@ columnFieldName :: FieldInfo b -> G.Name
 columnFieldName = \case
   FIColumn columnInfo -> structuredColumnInfoName columnInfo
   fieldInfo -> fromMaybe (G.unsafeMkName "") $ fieldInfoGraphQLName fieldInfo
+
+-- | An input object with an optional field per element of a list (e.g. the
+-- columns a role can update), parsed from the list rather than with a field
+-- parser per element, the way a 'P.object' of 'P.fieldOptional's would parse
+-- it: the given fields, in the list's order. The elements' parsers are meant
+-- to be shared (see 'sharedParsers').
+listObject ::
+  forall k n c a.
+  (P.MonadParse n, 'Input P.<: k) =>
+  G.Name ->
+  Maybe G.Description ->
+  -- | the name and description of the field of an element
+  (c -> G.Name) ->
+  (c -> Maybe G.Description) ->
+  [(c, Parser k n a)] ->
+  Parser 'Input n [(c, a)]
+{-# INLINE listObject #-}
+listObject name description fieldName fieldDescription fields =
+  P.objectWith name description definitions parseFields
+  where
+    names = HashSet.fromList $ map (fieldName . fst) fields
+    -- only needed for introspection
+    definitions =
+      [ P.Definition (fieldName c) (fieldDescription c) Nothing [] $ P.InputFieldInfo (P.nullableType $ P.pType parser) Nothing
+      | (c, parser) <- fields
+      ]
+    parseFields input = do
+      P.checkInputObjectFields name (`HashSet.member` names) input
+      fmap catMaybes $ for fields \(c, parser) ->
+        for (HashMap.lookup (fieldName c) input) \value ->
+          (c,) <$> P.parseOptionalField (fieldName c) parser value
+
+-- | Pair each element of a list with a parser, building one parser per key:
+-- the elements with the same key share it. Fully evaluated, except for the
+-- parsers.
+sharedParsers :: forall m k c p. (Monad m, Ord k) => (c -> k) -> (c -> m p) -> [c] -> m [(c, p)]
+sharedParsers key build elements = do
+  shared <-
+    foldlM
+      ( \acc element ->
+          let k = key element
+           in if Map.member k acc
+                then pure acc
+                else do
+                  parser <- build element
+                  pure $! Map.insert k parser acc
+      )
+      Map.empty
+      elements
+  let !pairs = map (\element -> (element, shared Map.! key element)) elements
+  pure $! foldr (\(_, p) rest -> p `seq` rest) () pairs `seq` pairs
