@@ -52,6 +52,7 @@ import Hasura.GraphQL.Parser.Names (HasName (..))
 import Hasura.GraphQL.Schema.Backend
 import Hasura.GraphQL.Schema.BoolExp
 import Hasura.GraphQL.Schema.Common
+import Hasura.GraphQL.Schema.NamedField
 import Hasura.GraphQL.Schema.OrderBy
 import Hasura.GraphQL.Schema.Parser
   ( FieldParser,
@@ -116,12 +117,8 @@ defaultSelectTable ::
   (MonadBuildSchema b r m n, BackendTableSelectSchema b) =>
   -- | table info
   TableInfo b ->
-  -- | field display name
-  G.Name ->
-  -- | field description, if any
-  Maybe G.Description ->
-  SchemaT r m (Maybe (FieldParser n (SelectExp b)))
-defaultSelectTable tableInfo fieldName description = runMaybeT do
+  SchemaT r m (Maybe (NamedField n (SelectExp b)))
+defaultSelectTable tableInfo = runMaybeT do
   sourceInfo :: SourceInfo b <- asks getter
   let sourceName = _siName sourceInfo
       tableName = tableInfoName tableInfo
@@ -129,13 +126,13 @@ defaultSelectTable tableInfo fieldName description = runMaybeT do
   roleName <- retrieve scRole
   selectPermissions <- hoistMaybe $ tableSelectPermissions roleName tableInfo
   selectionSetParser <- MaybeT $ tableSelectionList tableInfo
-  lift $ P.memoizeOn 'defaultSelectTable (sourceName, tableName, fieldName) do
+  -- The same for every field that selects from the table, whatever its name.
+  lift $ Memoize.memoizeOn 'defaultSelectTable (sourceName, tableName) do
     stringifyNumbers <- retrieve Options.soStringifyNumbers
     tableArgsParser <- tableArguments tableInfo
     pure
-      $ P.setFieldParserOrigin (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName))
-      $ P.subselection fieldName description tableArgsParser selectionSetParser
-      <&> \(args, fields) ->
+      $ subselectionNamedField (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName)) tableArgsParser selectionSetParser
+      $ \args fields ->
         IR.AnnSelectG
           { IR._asnFields = fields,
             IR._asnFrom = IR.FromTable tableName,
@@ -285,12 +282,8 @@ defaultSelectTableAggregate ::
   (MonadBuildSchema b r m n, BackendTableSelectSchema b) =>
   -- | table info
   TableInfo b ->
-  -- | field display name
-  G.Name ->
-  -- | field description, if any
-  Maybe G.Description ->
-  SchemaT r m (Maybe (FieldParser n (AggSelectExp b)))
-defaultSelectTableAggregate tableInfo fieldName description = runMaybeT $ do
+  SchemaT r m (Maybe (NamedField n (AggSelectExp b)))
+defaultSelectTableAggregate tableInfo = runMaybeT $ do
   sourceInfo :: SourceInfo b <- asks getter
   let sourceName = _siName sourceInfo
       tableName = tableInfoName tableInfo
@@ -302,7 +295,8 @@ defaultSelectTableAggregate tableInfo fieldName description = runMaybeT $ do
   guard $ spiAllowAgg selectPermissions
   xNodesAgg <- hoistMaybe $ nodesAggExtension @b
   nodesParser <- MaybeT $ tableSelectionList tableInfo
-  lift $ P.memoizeOn 'defaultSelectTableAggregate (sourceName, tableName, fieldName) do
+  -- The same for every field that selects from the table, whatever its name.
+  lift $ Memoize.memoizeOn 'defaultSelectTableAggregate (sourceName, tableName) do
     stringifyNumbers <- retrieve Options.soStringifyNumbers
     tableGQLName <- getTableIdentifierName tableInfo
     tableArgsParser <- tableArguments tableInfo
@@ -322,9 +316,8 @@ defaultSelectTableAggregate tableInfo fieldName description = runMaybeT $ do
               (Just $ G.Description $ "aggregated selection of " <>> tableName)
               aggregateFields
     pure
-      $ P.setFieldParserOrigin (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName))
-      $ P.subselection fieldName description tableArgsParser aggregationParser
-      <&> \(args, fields) ->
+      $ subselectionNamedField (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName)) tableArgsParser aggregationParser
+      $ \args fields ->
         IR.AnnSelectG
           { IR._asnFields = fields,
             IR._asnFrom = IR.FromTable tableName,
@@ -1815,7 +1808,7 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
       pure [Left $ ObjectRelationshipSelection relFieldName nullable selectionSetParser ri otherTableName filterExp]
     ArrRel -> do
       let arrayRelDesc = Just $ G.Description "An array relationship"
-      otherTableParser <- MaybeT $ selectTable otherTableInfo relFieldName arrayRelDesc
+      otherTableParser <- MaybeT $ selectTableField otherTableInfo relFieldName arrayRelDesc
       let arrayRelField =
             otherTableParser <&> \selectExp ->
               IR.AFArrayRelation
@@ -1824,7 +1817,7 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
                 $ deduplicatePermissions' selectExp
           relAggFieldName = applyFieldNameCaseCust tCase $ relFieldName <> Name.__aggregate
           relAggDesc = Just $ G.Description "An aggregate relationship"
-      remoteAggField <- lift $ selectTableAggregate otherTableInfo relAggFieldName relAggDesc
+      remoteAggField <- lift $ selectTableAggregateField otherTableInfo relAggFieldName relAggDesc
       remoteConnectionField <- runMaybeT $ do
         -- Parse array connection field only for relay schema
         RelaySchema _ <- retrieve scSchemaKind

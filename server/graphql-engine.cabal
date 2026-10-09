@@ -1017,6 +1017,7 @@ library
                      , Hasura.GraphQL.Schema.Instances
                      , Hasura.GraphQL.Schema.Introspect
                      , Hasura.GraphQL.Schema.Mutation
+                     , Hasura.GraphQL.Schema.NamedField
                      , Hasura.GraphQL.Schema.NamingCase
                      , Hasura.GraphQL.Schema.Node
                      , Hasura.GraphQL.Schema.OrderBy

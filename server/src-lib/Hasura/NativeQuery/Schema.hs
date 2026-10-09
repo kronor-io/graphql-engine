@@ -17,6 +17,7 @@ import Hasura.GraphQL.Schema.Backend
     BackendNativeQuerySelectSchema (..),
     BackendTableSelectSchema (..),
     MonadBuildSchema,
+    selectTableField,
     tableSelectionSet,
   )
 import Hasura.GraphQL.Schema.Common
@@ -366,7 +367,7 @@ nativeQueryRelationshipField ri = do
       let arrayRelDesc = Just $ G.Description "An array relationship"
 
       otherTableInfo <- lift $ askTableInfo otherTableName
-      otherTableParser <- MaybeT $ selectTable otherTableInfo relFieldName arrayRelDesc
+      otherTableParser <- MaybeT $ selectTableField otherTableInfo relFieldName arrayRelDesc
       let arrayRelField =
             otherTableParser <&> \selectExp ->
               IR.AFArrayRelation
