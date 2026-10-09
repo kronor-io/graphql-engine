@@ -27,6 +27,7 @@ module Hasura.GraphQL.Schema.Select
 where
 
 import Control.Lens hiding (index)
+import Control.Monad.Memoize qualified as Memoize
 import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as K
 import Data.Aeson.Types qualified as J
@@ -903,10 +904,14 @@ defaultTableArgs ::
   TableInfo b ->
   SchemaT r m (InputFieldsParser n (SelectArgs b))
 defaultTableArgs tableInfo = do
-  whereParser <- tableWhereArg tableInfo
-  orderByParser <- tableOrderByArg tableInfo
-  distinctParser <- tableDistinctArg tableInfo
-  defaultArgsParser whereParser orderByParser distinctParser
+  sourceInfo :: SourceInfo b <- asks getter
+  -- The arguments of every field that selects from the table (its root fields,
+  -- and the array relationships to it) are the same, so they are built once.
+  Memoize.memoizeOn 'defaultTableArgs (_siName sourceInfo, tableInfoName tableInfo) do
+    whereParser <- tableWhereArg tableInfo
+    orderByParser <- tableOrderByArg tableInfo
+    distinctParser <- tableDistinctArg tableInfo
+    defaultArgsParser whereParser orderByParser distinctParser
 
 -- | Argument to filter rows returned from table selection
 -- > where: table_bool_exp
