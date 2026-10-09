@@ -25,6 +25,7 @@ import Hasura.GraphQL.Schema.Parser
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Select (tableSelectionList, tableWhereArg)
 import Hasura.GraphQL.Schema.Table (getTableGQLName, getTableIdentifierName, tableSelectColumns, tableSelectPermissions)
+import Hasura.GraphQL.Schema.NamedField (lazyFieldParser)
 import Hasura.GraphQL.Schema.TableFields (listObject, sharedParsers)
 import Hasura.GraphQL.Schema.Typename
 import Hasura.Name qualified as Name
@@ -258,7 +259,8 @@ selectStreamTable tableInfo fieldName description = runMaybeT $ do
   stringifyNumbers <- retrieve Options.soStringifyNumbers
   tableStreamArgsParser <- MaybeT $ tableStreamArguments tableInfo
   selectionSetParser <- MaybeT $ tableSelectionList tableInfo
-  lift
+  fmap (lazyFieldParser fieldName description (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName)))
+    $ lift
     $ memoizeOn 'selectStreamTable (sourceName, tableName, fieldName)
     $ do
       pure

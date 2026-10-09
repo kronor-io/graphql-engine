@@ -46,7 +46,7 @@ import Data.Text.Casing (GQLNameIdentifier)
 import Hasura.Function.Cache
 import Hasura.GraphQL.ApolloFederation (ApolloFederationParserFunction)
 import Hasura.GraphQL.Schema.Common
-import Hasura.GraphQL.Schema.NamedField (NamedField, namedFieldParser)
+import Hasura.GraphQL.Schema.NamedField (NamedField, lazyFieldParser, namedFieldParser)
 import Hasura.GraphQL.Schema.Parser hiding (Type)
 import Hasura.LogicalModel.Cache (LogicalModelInfo)
 import Hasura.NativeQuery.Cache (NativeQueryInfo)
@@ -63,6 +63,10 @@ import Hasura.RQL.Types.NamingCase
 import Hasura.RQL.Types.Relationships.Local
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.Source
+import Data.Has (Has, getter)
+import Hasura.RQL.Types.Metadata.Object (MetadataObjId (..), SourceMetadataObjId (..))
+import Hasura.SQL.AnyBackend qualified as AB
+import Hasura.Table.Cache (tableInfoName)
 import Hasura.RQL.Types.SourceCustomization (MkRootFieldName)
 import Hasura.StoredProcedure.Cache (StoredProcedureInfo)
 import Language.GraphQL.Draft.Syntax qualified as G
@@ -440,7 +444,9 @@ selectTableField ::
   G.Name ->
   Maybe G.Description ->
   SchemaT r m (Maybe (FieldParser n (SelectExp b)))
-selectTableField tableInfo name description = fmap (namedFieldParser name description) <$> selectTable tableInfo
+selectTableField tableInfo name description = do
+  origin <- tableOrigin tableInfo
+  fmap (lazyFieldParser name description origin . namedFieldParser name description) <$> selectTable tableInfo
 
 -- | The field with the given name and description that selects aggregates
 -- from a table.
@@ -450,4 +456,12 @@ selectTableAggregateField ::
   G.Name ->
   Maybe G.Description ->
   SchemaT r m (Maybe (FieldParser n (AggSelectExp b)))
-selectTableAggregateField tableInfo name description = fmap (namedFieldParser name description) <$> selectTableAggregate tableInfo
+selectTableAggregateField tableInfo name description = do
+  origin <- tableOrigin tableInfo
+  fmap (lazyFieldParser name description origin . namedFieldParser name description) <$> selectTableAggregate tableInfo
+
+-- | The origin of the fields that select from a table.
+tableOrigin :: forall b r m. (Backend b, MonadReader r m, Has (SourceInfo b) r) => TableInfo b -> m MetadataObjId
+tableOrigin tableInfo = do
+  sourceInfo :: SourceInfo b <- asks getter
+  pure $ MOSourceObjId (_siName sourceInfo) (AB.mkAnyBackend $ SMOTable @b $ tableInfoName tableInfo)

@@ -236,7 +236,9 @@ selectTableByPk tableInfo fieldName description = runMaybeT do
   primaryKeys <- hoistMaybe $ fmap _pkColumns . _tciPrimaryKey . _tiCoreInfo $ tableInfo
   selectionSetParser <- MaybeT $ tableSelectionSet tableInfo
   guard $ all (\c -> ciColumn c `HashMap.member` spiCols selectPermissions) primaryKeys
-  lift $ P.memoizeOn 'selectTableByPk (sourceName, tableName, fieldName) do
+  fmap (lazyFieldParser fieldName description (MOSourceObjId sourceName (AB.mkAnyBackend $ SMOTable @b tableName)))
+    $ lift
+    $ P.memoizeOn 'selectTableByPk (sourceName, tableName, fieldName) do
     stringifyNumbers <- retrieve Options.soStringifyNumbers
     argsParser <-
       sequenceA <$> for primaryKeys \columnInfo -> do

@@ -9,7 +9,8 @@ where
 
 import Control.Concurrent.Extended (concurrentlyEIO, forConcurrentlyEIO)
 import Control.Concurrent.STM qualified as STM
-import Control.Exception (evaluate)
+import Control.Exception (evaluate, throwIO)
+import Data.Text qualified as T
 import Control.Lens hiding (contexts)
 import Control.Monad.Memoize
 import Data.Either (fromRight)
@@ -178,6 +179,7 @@ buildGQLContext
           sources
     let buildHasuraRoleContext checks role =
           buildRoleContext
+            lazyRunInIO
             checks
             sharedComparisons
             sampledFeatureFlags
@@ -221,7 +223,7 @@ buildGQLContext
                   <$> buildRoleContextLazily
                     role
                     (buildHasuraRoleContext CheckSchema role)
-                    (buildHasuraRoleContext SkipSchemaChecks role)
+                    (\errors -> buildHasuraRoleContext (SkipSchemaChecks (excludedRemoteSchemas errors)) role)
           pure (hctxs, HashMap.empty)
 
     adminIntrospection <-
@@ -318,9 +320,23 @@ Nothing may hold on to the eager context, which is why the stand-in is built
 by matching on the optional parsers rather than by mapping over them, and
 evaluated in IO before it is returned.
 
+The rebuild also builds the role's parsers lazily, when they are first used
+(see Note [Building parsers lazily] in Control.Monad.Memoize): a role's queries
+only build the parsers of the tables they use. For that, the rebuild trusts the
+eager build's checks of its remote schemas too, which walk every type of the
+sources' schema: it leaves out the remote schemas that the eager build left out
+('excludedRemoteSchemas'), and doesn't check the others.
+
 This only applies when the Relay API is disabled: with Relay enabled, every
 role's Hasura and Relay contexts are built together and keep their parsers.
 -}
+
+-- | Run a role build in IO, for the parsers it builds lazily: a parser that
+-- fails to build then fails with an internal error, when it's first used. See
+-- Note [Building parsers lazily] in Control.Monad.Memoize.
+lazyRunInIO :: ExceptT QErr IO x -> IO x
+lazyRunInIO action =
+  runExceptT action >>= either (\err -> throwIO $ userError $ "building a parser lazily failed: " <> T.unpack (qeError err)) pure
 
 -- | See Note [Building role parsers lazily]
 buildRoleContextLazily ::
@@ -328,8 +344,8 @@ buildRoleContextLazily ::
   RoleName ->
   -- | the eager build
   ExceptT QErr IO RoleContextValue ->
-  -- | the rebuild, on the role's first request
-  ExceptT QErr IO RoleContextValue ->
+  -- | the rebuild, on the role's first request, given the eager build's errors
+  (Set.HashSet InconsistentMetadata -> ExceptT QErr IO RoleContextValue) ->
   m RoleContextValue
 buildRoleContextLazily role eagerBuild build = do
   (RoleContext eagerFrontend eagerBackend, errors, G.SchemaIntrospection eagerIntrospection) <-
@@ -343,7 +359,7 @@ buildRoleContextLazily role eagerBuild build = do
   eagerBackendShape <- liftIO $ traverse (evaluate . contextShape) eagerBackend
   rebuilt <-
     liftIO $ unsafeInterleaveIO do
-      result <- runExceptT build
+      result <- runExceptT (build errors)
       pure do
         built@(RoleContext frontend backend, _, _) <- result
         unless (contextShape frontend == eagerFrontendShape && fmap contextShape backend == eagerBackendShape)
@@ -487,13 +503,24 @@ contextShape context =
 
 -- | Whether to check a role's schema for conflicting type definitions, see
 -- Note [Building role parsers lazily].
-data SchemaChecks = CheckSchema | SkipSchemaChecks
+data SchemaChecks
+  = CheckSchema
+  | -- | with the remote schemas that the eager build, which checked the schema,
+    -- left out: see Note [Building role parsers lazily]
+    SkipSchemaChecks (Set.HashSet RemoteSchemaName)
   deriving (Eq)
+
+-- | The remote schemas that a role's eager build left out, from its errors.
+excludedRemoteSchemas :: Set.HashSet InconsistentMetadata -> Set.HashSet RemoteSchemaName
+excludedRemoteSchemas errors =
+  Set.fromList [name | InconsistentObject _ _ (MetadataObject (MORemoteSchema name) _) <- toList errors]
 
 -- | Build the @QueryHasura@ context for a given role.
 buildRoleContext ::
   forall m.
   (MonadError QErr m, MonadIO m) =>
+  -- | run the monad in IO, to build parsers lazily: see 'runLazyMemoizeT'
+  (forall x. m x -> IO x) ->
   SchemaChecks ->
   SharedComparisons ->
   SchemaSampledFeatureFlags ->
@@ -508,7 +535,7 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContext runInIO checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -524,7 +551,9 @@ buildRoleContext checks sharedComparisons sampledFeatureFlags options sources re
           role
           sampledFeatureFlags
           sharedComparisons
-  runMemoizeT $ do
+  -- See Note [Building role parsers lazily]: the rebuild builds the parsers
+  -- lazily, as they are used.
+  runMemo $ do
     -- build all sources (`apolloFedTableParsers` contains all the parsers and
     -- type names, which are eligible for the `_Entity` Union)
     (sourcesQueryFields, sourcesMutationFrontendFields, sourcesMutationBackendFields, sourcesSubscriptionFields, apolloFedTableParsers) <-
@@ -546,7 +575,7 @@ buildRoleContext checks sharedComparisons sampledFeatureFlags options sources re
     -- we only keep the ones that don't result in a name conflict
     (remoteSchemaFields, !remoteSchemaErrors) <-
       runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions)
-        $ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationBackendFields actionsQueryFields actionsMutationFields role remoteSchemaPermsCtx
+        $ buildAndValidateRemoteSchemas checks remotes sourcesQueryFields sourcesMutationBackendFields actionsQueryFields actionsMutationFields role remoteSchemaPermsCtx
     let remotesQueryFields = concatMap (\(n, rf) -> (n,) <$> piQuery rf) remoteSchemaFields
         remotesMutationFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piMutation rf) remoteSchemaFields
         remotesSubscriptionFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piSubscription rf) remoteSchemaFields
@@ -569,7 +598,7 @@ buildRoleContext checks sharedComparisons sampledFeatureFlags options sources re
     -- information in the case of the admin role.
     !introspectionSchema <- do
       result <-
-        if checks == SkipSchemaChecks && isNothing mSchemaRegistryContext
+        if checks /= CheckSchema && isNothing mSchemaRegistryContext
           then pure $ G.SchemaIntrospection mempty
           else
             throwOnConflictingDefinitions
@@ -624,6 +653,11 @@ buildRoleContext checks sharedComparisons sampledFeatureFlags options sources re
         introspectionSchema
       )
   where
+    runMemo :: MemoizeT m a -> m a
+    runMemo = case checks of
+      CheckSchema -> runMemoizeT
+      SkipSchemaChecks _ -> runLazyMemoizeT runInIO
+
     buildSource ::
       forall b.
       (BackendSchema b) =>
@@ -849,7 +883,7 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
         -- Permissions are disabled, unauthenticated users have access to remote schemas.
         (remoteFields, remoteSchemaErrors) <-
           runRemoteSchema fakeSchemaContext (soRemoteNullForwardingPolicy schemaOptions)
-            $ buildAndValidateRemoteSchemas allRemotes [] [] [] [] fakeRole remoteSchemaPermsCtx
+            $ buildAndValidateRemoteSchemas CheckSchema allRemotes [] [] [] [] fakeRole remoteSchemaPermsCtx
         pure
           ( (\(n, rf) -> fmap (fmap (RFRemote n)) rf) <$> concatMap (\(n, q) -> (n,) <$> piQuery q) remoteFields,
             (\(n, rf) -> fmap (fmap (RFRemote n)) rf) <$> concat (mapMaybe (\(n, q) -> fmap (n,) <$> piMutation q) remoteFields),
@@ -882,6 +916,7 @@ buildAndValidateRemoteSchemas ::
   ( MonadError QErr m,
     MonadIO m
   ) =>
+  SchemaChecks ->
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
   [FieldParser P.Parse (NamespacedField (QueryRootField UnpreparedValue))] -> -- Sources query fields
   [FieldParser P.Parse (NamespacedField (MutationRootField UnpreparedValue))] -> -- Sources mutation fields
@@ -897,7 +932,7 @@ buildAndValidateRemoteSchemas ::
     )
     (MemoizeT m)
     ([(RemoteSchemaName, RemoteSchemaParser P.Parse)], HashSet InconsistentMetadata)
-buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields actionQueryFields actionMutationFields role remoteSchemaPermsCtx =
+buildAndValidateRemoteSchemas checks remotes sourcesQueryFields sourcesMutationFields actionQueryFields actionMutationFields role remoteSchemaPermsCtx =
   runWriterT $ foldlM step [] (HashMap.elems remotes)
   where
     getFieldName = P.getName . P.fDefinition
@@ -905,6 +940,17 @@ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields a
     sourcesQueryFieldNames = getFieldName <$> sourcesQueryFields
     sourcesMutationFieldNames = getFieldName <$> sourcesMutationFields
 
+    -- The rebuild of a role's context trusts the eager build's checks, which
+    -- walk every type of the sources' schema: see Note [Building role parsers
+    -- lazily].
+    step validatedSchemas (remoteSchemaContext, _)
+      | SkipSchemaChecks excluded <- checks =
+          if _rscName remoteSchemaContext `Set.member` excluded
+            then pure validatedSchemas
+            else
+              lift (buildRemoteSchemaParser remoteSchemaPermsCtx role remoteSchemaContext) <&> \case
+                Nothing -> validatedSchemas
+                Just remoteSchemaParser -> (_rscName remoteSchemaContext, remoteSchemaParser) : validatedSchemas
     step validatedSchemas (remoteSchemaContext, metadataId) = do
       let previousSchemasQueryFieldNames = map getFieldName $ concatMap (piQuery . snd) validatedSchemas
           previousSchemasMutationFieldNames = map getFieldName $ concat $ mapMaybe (piMutation . snd) validatedSchemas

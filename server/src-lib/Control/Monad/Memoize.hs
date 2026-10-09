@@ -7,6 +7,7 @@ module Control.Monad.Memoize
     memoize,
     MemoizeT,
     runMemoizeT,
+    runLazyMemoizeT,
   )
 where
 
@@ -19,7 +20,10 @@ import Data.IORef
 import Data.Kind qualified as K
 import Hasura.Prelude
 import Language.Haskell.TH qualified as TH
-import System.IO.Unsafe (unsafeInterleaveIO)
+import Control.Concurrent (myThreadId)
+import System.Environment (lookupEnv)
+import System.IO (hPutStrLn, stderr)
+import System.IO.Unsafe (unsafeInterleaveIO, unsafePerformIO)
 import Type.Reflection (Typeable, typeRep, (:~:) (Refl))
 
 {- Note [Tying the knot]
@@ -127,18 +131,67 @@ memoize ::
 memoize name f a = memoizeOn name a (f a)
 
 newtype MemoizeT m a = MemoizeT
-  { unMemoizeT :: StateT (DMap MemoizationKey Identity) m a
+  { unMemoizeT :: ReaderT (MemoizeEnv m) m a
   }
-  deriving (Functor, Applicative, Monad, MonadError e, MonadReader r, MonadTrans)
+  deriving (Functor, Applicative, Monad, MonadError e)
 
--- | Allow code in 'MemoizeT' to have access to any underlying state capabilities,
--- hiding the fact that 'MemoizeT' itself is a state monad.
+-- | The memo of a 'MemoizeT' computation, and whether the parsers it builds are
+-- built lazily: see Note [Building parsers lazily].
+data MemoizeEnv m = MemoizeEnv
+  { meParsers :: IORef (DMap MemoizationKey Identity),
+    meLazily :: Maybe (RunInIO m)
+  }
+
+-- | Run an action of the underlying monad in IO.
+newtype RunInIO m = RunInIO (forall x. m x -> IO x)
+
+instance MonadTrans MemoizeT where
+  lift = MemoizeT . lift
+
+instance (MonadReader r m) => MonadReader r (MemoizeT m) where
+  ask = lift ask
+  local f (MemoizeT m) = MemoizeT $ mapReaderT (local f) m
+
+-- | Allow code in 'MemoizeT' to have access to any underlying state capabilities.
 instance (MonadState s m) => MonadState s (MemoizeT m) where
   get = lift get
   put = lift . put
 
-runMemoizeT :: forall m a. (Monad m) => MemoizeT m a -> m a
-runMemoizeT = flip evalStateT mempty . unMemoizeT
+instance (MonadIO m) => MonadIO (MemoizeT m) where
+  liftIO = lift . liftIO
+
+runMemoizeT :: forall m a. (MonadIO m) => MemoizeT m a -> m a
+runMemoizeT (MemoizeT m) = do
+  parsers <- liftIO $ newIORef mempty
+  runReaderT m (MemoizeEnv parsers Nothing)
+
+-- | Like 'runMemoizeT', but every memoized parser is built when it is first
+-- needed rather than when it is first asked for, running the underlying monad
+-- with the given function. See Note [Building parsers lazily].
+runLazyMemoizeT :: forall m a. (MonadIO m) => (forall x. m x -> IO x) -> MemoizeT m a -> m a
+runLazyMemoizeT runInIO (MemoizeT m) = do
+  parsers <- liftIO $ newIORef mempty
+  runReaderT m (MemoizeEnv parsers (Just (RunInIO runInIO)))
+
+{- Note [Building parsers lazily]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+With 'runLazyMemoizeT', 'memoizeOn' doesn't build the parser: it returns a thunk
+that builds it, in IO, when it's first evaluated, and records the thunk in the
+memo, so that the parser is built at most once. Nothing evaluates a parser to
+build the parsers that refer to it (see Note [Tying the knot]), so a schema
+built this way only builds the parsers that are used, when they are first used:
+e.g. the parsers of the tables a role's queries select from.
+
+Building a parser lazily means that its errors are thrown when it's first used,
+as exceptions, rather than when the schema is built. So this is only meant for
+schemas that have already been built eagerly from the same inputs, whose
+parsers are known to build (see Note [Building role parsers lazily] in
+Hasura.GraphQL.Schema).
+
+The thunks may be evaluated concurrently, from different threads:
+'unsafeInterleaveIO' makes sure that each is evaluated once, and the memo is
+updated atomically.
+-}
 
 -- | see Note [MemoizeT requires MonadIO]
 instance
@@ -147,49 +200,78 @@ instance
   where
   memoizeOn name key buildParser = MemoizeT do
     let parserId = MemoizationKey name key
-    parsersById <- get
+    env@MemoizeEnv {..} <- ask
+    parsersById <- liftIO $ readIORef meParsers
     case DM.lookup parserId parsersById of
       Just (Identity parser) -> pure parser
-      Nothing -> do
-        -- We manually do eager blackholing here using a MutVar rather than
-        -- relying on MonadFix and ordinary thunk blackholing. Why? A few
-        -- reasons:
-        --
-        --   1. We have more control. We aren’t at the whims of whatever
-        --      MonadFix instance happens to get used.
-        --
-        --   2. We can be more precise. GHC’s lazy blackholing doesn’t always
-        --      kick in when you’d expect.
-        --
-        --   3. We can provide more useful error reporting if things go wrong.
-        --      Most usefully, we can include a HasCallStack source location.
-        cell <- liftIO $ newIORef Nothing
+      Nothing -> case meLazily of
+        Just (RunInIO runInIO) -> liftIO do
+          -- See Note [Building parsers lazily]
+          thunkId <- if traceLazy then atomicModifyIORef' lazyCounter (\n -> (n + 1, n)) else pure 0
+          lazyParser <- unsafeInterleaveIO do
+            -- research: trace the parsers built lazily, by thread
+            tid <- myThreadId
+            let key = TH.pprint name <> " #" <> show thunkId
+            when traceLazy $ hPutStrLn stderr ("LAZY-START " <> show tid <> " " <> key)
+            parser <- runInIO $ runReaderT (unMemoizeT buildParser) env
+            when traceLazy $ hPutStrLn stderr ("LAZY-END " <> show tid <> " " <> key)
+            pure parser
+          -- The result is wrapped in a Maybe: 'atomicModifyIORef'' evaluates it,
+          -- which mustn't evaluate the parser.
+          raced <- atomicModifyIORef' meParsers \parsers ->
+            case DM.lookup parserId parsers of
+              Just (Identity parser) -> (parsers, Just parser)
+              Nothing -> (DM.insert parserId (Identity lazyParser) parsers, Nothing)
+          pure $ fromMaybe lazyParser raced
+        Nothing -> do
+          -- We manually do eager blackholing here using a MutVar rather than
+          -- relying on MonadFix and ordinary thunk blackholing. Why? A few
+          -- reasons:
+          --
+          --   1. We have more control. We aren’t at the whims of whatever
+          --      MonadFix instance happens to get used.
+          --
+          --   2. We can be more precise. GHC’s lazy blackholing doesn’t always
+          --      kick in when you’d expect.
+          --
+          --   3. We can provide more useful error reporting if things go wrong.
+          --      Most usefully, we can include a HasCallStack source location.
+          cell <- liftIO $ newIORef Nothing
 
-        -- We use unsafeInterleaveIO here, which sounds scary, but
-        -- unsafeInterleaveIO is actually far more safe than unsafePerformIO.
-        -- unsafeInterleaveIO just defers the execution of the action until its
-        -- result is needed, adding some laziness.
-        --
-        -- That laziness can be dangerous if the action has side-effects, since
-        -- the point at which the effect is performed can be unpredictable. But
-        -- this action just reads, never writes, so that isn’t a concern.
-        parserById <-
-          liftIO
-            $ unsafeInterleaveIO
-            $ readIORef cell
-            >>= \case
-              Just parser -> pure $ Identity parser
-              Nothing ->
-                error
-                  $ unlines
-                    [ "memoize: parser was forced before being fully constructed",
-                      "  parser constructor: " ++ TH.pprint name
-                    ]
-        put $! DM.insert parserId parserById parsersById
+          -- We use unsafeInterleaveIO here, which sounds scary, but
+          -- unsafeInterleaveIO is actually far more safe than unsafePerformIO.
+          -- unsafeInterleaveIO just defers the execution of the action until its
+          -- result is needed, adding some laziness.
+          --
+          -- That laziness can be dangerous if the action has side-effects, since
+          -- the point at which the effect is performed can be unpredictable. But
+          -- this action just reads, never writes, so that isn’t a concern.
+          parserById <-
+            liftIO
+              $ unsafeInterleaveIO
+              $ readIORef cell
+              >>= \case
+                Just parser -> pure $ Identity parser
+                Nothing ->
+                  error
+                    $ unlines
+                      [ "memoize: parser was forced before being fully constructed",
+                        "  parser constructor: " ++ TH.pprint name
+                      ]
+          liftIO $ modifyIORef' meParsers $ DM.insert parserId parserById
 
-        parser <- unMemoizeT buildParser
-        liftIO $ writeIORef cell (Just parser)
-        pure parser
+          parser <- unMemoizeT buildParser
+          liftIO $ writeIORef cell (Just parser)
+          pure parser
+
+-- | research: HGE_RESEARCH_TRACE_LAZY logs each parser built lazily
+traceLazy :: Bool
+traceLazy = unsafePerformIO $ isJust <$> lookupEnv "HGE_RESEARCH_TRACE_LAZY"
+{-# NOINLINE traceLazy #-}
+
+lazyCounter :: IORef Int
+lazyCounter = unsafePerformIO $ newIORef 0
+{-# NOINLINE lazyCounter #-}
 
 {- Note [MemoizeT requires MonadIO]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

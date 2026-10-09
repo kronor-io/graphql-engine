@@ -4,6 +4,7 @@ module Hasura.GraphQL.Schema.NamedField
   ( NamedField (..),
     namedFieldParser,
     subselectionNamedField,
+    lazyFieldParser,
   )
 where
 
@@ -57,4 +58,18 @@ subselectionNamedField origin arguments body build =
         pure $ build parsedArguments parsedBody
     }
   where
-    !argumentNames = IP.selectionArgumentNames arguments
+    -- lazy, so that making the field doesn't build its arguments' parsers: see
+    -- Note [Building parsers lazily] in Control.Monad.Memoize
+    argumentNames = IP.selectionArgumentNames arguments
+
+-- | A field parser with the given name, description and origin, whose type and
+-- parser are those of the given field parser, which is only evaluated when they
+-- are needed: so that making a root field doesn't build the parsers of what it
+-- selects. See Note [Building parsers lazily] in Control.Monad.Memoize.
+lazyFieldParser :: G.Name -> Maybe G.Description -> MetadataObjId -> FieldParser n a -> FieldParser n a
+lazyFieldParser name description origin parser =
+  IP.FieldParser
+    (P.Definition name description (Just origin) [] info)
+    (\field -> IP.fParser parser field)
+  where
+    info = case IP.fDefinition parser of P.Definition _ _ _ _ i -> i
