@@ -39,6 +39,7 @@ import Data.Text qualified as T
 import Data.Text.Casing (GQLNameIdentifier)
 import Data.Text.Casing qualified as C
 import Data.Text.Extended
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.Vector qualified as V
 import Data.Vector.Unboxed qualified as U
 import Hasura.Backends.Postgres.SQL.Types qualified as Postgres
@@ -1266,9 +1267,9 @@ tableAggregationFields tableInfo = do
           )
         & nonEmpty
 
-    mkColumnAggComputedFields :: TableName b -> [ComputedFieldInfo b] -> SchemaT r m [FieldParser n (IR.SelectionField b (IR.UnpreparedValue b))]
+    mkColumnAggComputedFields :: TableName b -> [ComputedFieldInfo b] -> SchemaT r m [AggregateColumnField b n]
     mkColumnAggComputedFields tableName computedFieldInfos =
-      traverse (mkColumnAggComputedField tableName) computedFieldInfos <&> catMaybes
+      traverse (mkColumnAggComputedField tableName) computedFieldInfos <&> map AggregateOtherField . catMaybes
 
     mkColumnAggComputedField :: TableName b -> ComputedFieldInfo b -> SchemaT r m (Maybe (FieldParser n (IR.SelectionField b (IR.UnpreparedValue b))))
     mkColumnAggComputedField tableName computedFieldInfo = do
@@ -1283,39 +1284,24 @@ tableAggregationFields tableInfo = do
           (Just fieldParser) -> (pure . Just) (fieldParser `P.bindField` annotatedFieldToSelectionField)
           Nothing -> pure Nothing
 
-    mkNumericAggFields :: GQLNameIdentifier -> [(ColumnInfo b, AnnRedactionExpUnpreparedValue b)] -> SchemaT r m [FieldParser n (IR.SelectionField b (IR.UnpreparedValue b))]
+    mkNumericAggFields :: GQLNameIdentifier -> [(ColumnInfo b, AnnRedactionExpUnpreparedValue b)] -> SchemaT r m [AggregateColumnField b n]
     mkNumericAggFields name
       | (C.toSnakeG name) == Name._sum = traverse mkColumnAggField
-      -- Memoize here for more sharing. Note: we can't do `P.memoizeOn 'mkNumericAggFields...`
-      -- due to stage restrictions, so just add a string key:
-      | otherwise = traverse \(columnInfo, redactionExp) ->
-          P.memoizeOn 'tableAggregationFields ("mkNumericAggFields" :: Text, columnInfo)
-            $
-            -- CAREFUL!: below must only reference columnInfo else memoization key needs to be adapted
-            pure
-            $! do
-              let !cfcol = IR.SFCol (ciColumn columnInfo) (ciType columnInfo) redactionExp
-              P.selection_
-                (ciName columnInfo)
-                (ciDescription columnInfo)
-                (P.nullable P.float)
-                $> cfcol
+      | otherwise = pure . map \(columnInfo, redactionExp) -> AggregateColumn columnInfo redactionExp floatType
 
-    mkColumnAggField :: (ColumnInfo b, AnnRedactionExpUnpreparedValue b) -> SchemaT r m (FieldParser n (IR.SelectionField b (IR.UnpreparedValue b)))
+    -- the result type of the numeric aggregate operators other than sum
+    floatType :: P.Type 'Both
+    floatType = P.pType (P.nullable P.float :: Parser 'Both n (Maybe Double))
+
+    mkColumnAggField :: (ColumnInfo b, AnnRedactionExpUnpreparedValue b) -> SchemaT r m (AggregateColumnField b n)
     mkColumnAggField columnAndRedactionExp@(columnInfo, _redactionExp) =
       mkColumnAggField' columnAndRedactionExp (ciType columnInfo)
 
-    mkColumnAggField' :: (ColumnInfo b, AnnRedactionExpUnpreparedValue b) -> ColumnType b -> SchemaT r m (FieldParser n (IR.SelectionField b (IR.UnpreparedValue b)))
-    mkColumnAggField' (columnInfo, redactionExp) resultType = do
-      field <- columnParser resultType (G.Nullability True)
-      pure
-        $ P.selection_
-          (ciName columnInfo)
-          (ciDescription columnInfo)
-          field
-        $> IR.SFCol (ciColumn columnInfo) (ciType columnInfo) redactionExp
+    mkColumnAggField' :: (ColumnInfo b, AnnRedactionExpUnpreparedValue b) -> ColumnType b -> SchemaT r m (AggregateColumnField b n)
+    mkColumnAggField' (columnInfo, redactionExp) resultType =
+      AggregateColumn columnInfo redactionExp . P.pType <$> columnParser resultType (G.Nullability True)
 
-    mkNullableScalarTypeAggField :: (ColumnInfo b, AnnRedactionExpUnpreparedValue b) -> ScalarType b -> SchemaT r m (FieldParser n (IR.SelectionField b (IR.UnpreparedValue b)))
+    mkNullableScalarTypeAggField :: (ColumnInfo b, AnnRedactionExpUnpreparedValue b) -> ScalarType b -> SchemaT r m (AggregateColumnField b n)
     mkNullableScalarTypeAggField columnInfo resultType =
       mkColumnAggField' columnInfo (ColumnScalar resultType)
 
@@ -1340,7 +1326,7 @@ tableAggregationFields tableInfo = do
       GQLNameIdentifier ->
       NamingCase ->
       GQLNameIdentifier ->
-      [FieldParser n (IR.SelectionField b (IR.UnpreparedValue b))] ->
+      [AggregateColumnField b n] ->
       FieldParser n (IR.AggregateField b (IR.UnpreparedValue b))
     parseAggOperator makeTypename operator tCase tableGQLName columns =
       let opFieldName = applyFieldNameCaseIdentifier tCase operator
@@ -1348,10 +1334,45 @@ tableAggregationFields tableInfo = do
           setName = runMkTypename makeTypename $ applyTypeNameCaseIdentifier tCase $ mkTableAggOperatorTypeName tableGQLName operator
           setDesc = Just $ G.Description $ "aggregate " <> opText <> " on columns"
           subselectionParser =
-            P.selectionSet setName setDesc columns
+            aggregateColumnsSelectionSet setName setDesc columns
               <&> parsedSelectionsToFields IR.SFExp
        in P.subselection_ opFieldName Nothing subselectionParser
             <&> IR.AFOp . IR.AggregateOp opText
+
+-- | A field of the selection set of an aggregate operator on the columns of a
+-- table: a column, with its redaction expression and the operator's result
+-- type for it, or any other field. A column field parses the same way for every
+-- column, so it is data rather than a field parser; see Note [Data-driven table
+-- selection sets].
+data AggregateColumnField b n
+  = AggregateColumn (ColumnInfo b) (AnnRedactionExpUnpreparedValue b) (P.Type 'Both)
+  | AggregateOtherField (FieldParser n (IR.SelectionField b (IR.UnpreparedValue b)))
+
+-- | The selection set of an aggregate operator, the way 'P.selectionSet' with a
+-- field parser per field would parse it.
+aggregateColumnsSelectionSet ::
+  forall b n.
+  (Backend b, MonadParse n) =>
+  G.Name ->
+  Maybe G.Description ->
+  [AggregateColumnField b n] ->
+  Parser 'Output n (InsOrdHashMap.InsOrdHashMap G.Name (IP.ParsedSelection (IR.SelectionField b (IR.UnpreparedValue b))))
+aggregateColumnsSelectionSet name description fields =
+  IP.selectionSetObjectWith name description (map definition fields) lookupField []
+  where
+    definition = \case
+      AggregateColumn columnInfo _ resultType ->
+        P.Definition (ciName columnInfo) (ciDescription columnInfo) Nothing [] $ P.FieldInfo [] resultType
+      AggregateOtherField parser -> IP.fDefinition parser
+    lookupField fieldName = listToMaybe $ mapMaybe (match fieldName) fields
+    match fieldName = \case
+      AggregateColumn columnInfo redactionExp _
+        | ciName columnInfo == fieldName -> Just \field -> do
+            _ <- IP.rawSelectionParse mempty fieldName (pure ()) field
+            pure $ IR.SFCol (ciColumn columnInfo) (ciType columnInfo) redactionExp
+      AggregateOtherField parser
+        | getName (IP.fDefinition parser) == fieldName -> Just (IP.fParser parser)
+      _ -> Nothing
 
 -- | shared implementation between tables and logical models
 defaultArgsParser ::
