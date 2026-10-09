@@ -29,7 +29,10 @@ import Hasura.GraphQL.Schema.Parser
 import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Select
 import Hasura.GraphQL.Schema.Table
+import Hasura.GraphQL.Schema.TableFields (TableObject (..), columnFieldName, tableFieldEntries, tableObject)
 import Hasura.GraphQL.Schema.Typename
+import Hasura.GraphQL.Parser.Internal.Parser qualified as IP
+import Hasura.GraphQL.Parser.Names (HasName (..))
 import Hasura.Name qualified as Name
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
@@ -197,50 +200,74 @@ tableFieldsInput tableInfo = do
       mkTypename = runMkTypename $ _rscTypeNames customization
   P.memoizeOn 'tableFieldsInput (sourceName, tableName) do
     tableGQLName <- getTableIdentifierName tableInfo
-    objectFields <- traverse mkFieldParser (HashMap.elems allFields)
+    roleName <- retrieve scRole
+    let insertPerms = _permIns $ getRolePermInfo roleName tableInfo
+    -- Strict, so that nothing the entries were built from stays alive.
+    !entries <- fmap tableFieldEntries $ for (HashMap.elems allFields) (insertEntry insertPerms)
     let objectName = mkTypename $ applyTypeNameCaseIdentifier tCase $ mkTableInsertInputTypeName tableGQLName
         objectDesc = G.Description $ "input type for inserting data into table " <>> tableName
-    pure $ P.object objectName (Just objectDesc) $ coalesceFields objectFields
+    pure
+      $ tableObject
+        TableObject
+          { toName = objectName,
+            toDescription = Just objectDesc,
+            toFieldInfoMap = allFields,
+            toEntries = entries,
+            toFieldName = \fieldInfo -> \case
+              InsertColumn _ -> columnFieldName fieldInfo
+              InsertRelationship fieldName _ -> fieldName,
+            toFieldDefinition = \fieldInfo entry fieldName -> case entry of
+              InsertColumn parser ->
+                P.Definition fieldName (fieldDescription fieldInfo) Nothing [] $ P.InputFieldInfo (P.nullableType $ P.pType parser) Nothing
+              InsertRelationship _ parser -> case IP.ifDefinitions parser of
+                [definition] -> definition
+                _ -> error "tableFieldsInput: a relationship field has one definition",
+            toParseField = \fieldInfo entry fieldName value -> case (entry, fieldInfo) of
+              (InsertColumn parser, FIColumn (SCIScalarColumn columnInfo)) ->
+                Just . IR.AIColumn . (ciColumn columnInfo,) . IR.mkParameter <$> P.parseOptionalField fieldName parser value
+              (InsertRelationship _ parser, _) -> IP.ifParser parser (HashMap.singleton fieldName value)
+              _ -> pure Nothing,
+            toTrailing = [] :: [()],
+            toTrailingField = const Nothing
+          }
   where
-    -- For each field, we have a Maybe parser: not all fields will be allowed
-    -- (we don't allow insertions in computed fields for instance). Each parser
-    -- returns a maybe value, as some of the fields may be omitted. This
-    -- function does the necessary transformations to coalesce all of this in
-    -- one 'InputFieldsParser'.
-    coalesceFields ::
-      [Maybe (InputFieldsParser n (Maybe (IR.AnnotatedInsertField b (IR.UnpreparedValue b))))] ->
-      InputFieldsParser n (IR.AnnotatedInsertRow b (IR.UnpreparedValue b))
-    coalesceFields = fmap catMaybes . sequenceA . catMaybes
+    fieldDescription = \case
+      FIColumn (SCIScalarColumn columnInfo) -> ciDescription columnInfo
+      _ -> Nothing
 
-    mkFieldParser ::
+    -- See Note [Data-driven table input objects] in
+    -- Hasura.GraphQL.Schema.TableFields: the columns of the same type and
+    -- nullability share their parser.
+    insertEntry ::
+      Maybe (InsPermInfo b) ->
       FieldInfo b ->
-      SchemaT r m (Maybe (InputFieldsParser n (Maybe (IR.AnnotatedInsertField b (IR.UnpreparedValue b)))))
-    mkFieldParser = \case
+      SchemaT r m (Maybe (Either ((ColumnType b, Bool), InsertEntry b n) (InsertEntry b n)))
+    insertEntry insertPerms = \case
       FIComputedField _ -> pure Nothing
       FIRemoteRelationship _ -> pure Nothing
-      FIColumn (SCIScalarColumn columnInfo) -> do
-        if (_cmIsInsertable $ ciMutability columnInfo)
-          then mkColumnParser columnInfo
-          else pure Nothing
+      FIColumn (SCIScalarColumn columnInfo)
+        | _cmIsInsertable (ciMutability columnInfo),
+          Just perms <- insertPerms,
+          Set.member (ciColumn columnInfo) (ipiCols perms) -> do
+            let nullable = ciIsNullable columnInfo
+            parser <- columnParser (ciType columnInfo) (G.Nullability nullable)
+            pure $ Just $ Left ((ciType columnInfo, nullable), InsertColumn parser)
+        | otherwise -> pure Nothing
       FIColumn (SCIObjectColumn _) -> pure Nothing -- TODO(dmoverton)
       FIColumn (SCIArrayColumn _) -> pure Nothing -- TODO(dmoverton)
-      FIRelationship relInfo -> mkRelationshipParser relInfo
+      FIRelationship relInfo ->
+        mkRelationshipParser relInfo <&> fmap \parser ->
+          Right $ InsertRelationship (maybe (G.unsafeMkName "") getName $ listToMaybe $ IP.ifDefinitions parser) parser
 
-    mkColumnParser ::
-      ColumnInfo b ->
-      SchemaT r m (Maybe (InputFieldsParser n (Maybe (IR.AnnotatedInsertField b (IR.UnpreparedValue b)))))
-    mkColumnParser columnInfo = runMaybeT $ do
-      roleName <- retrieve scRole
-      insertPerms <- hoistMaybe $ _permIns $ getRolePermInfo roleName tableInfo
-      let columnName = ciName columnInfo
-          columnDesc = ciDescription columnInfo
-          isAllowed = Set.member (ciColumn columnInfo) (ipiCols insertPerms)
-      guard isAllowed
-      fieldParser <- lift $ columnParser (ciType columnInfo) (G.Nullability $ ciIsNullable columnInfo)
-      pure
-        $ P.fieldOptional columnName columnDesc fieldParser
-        `mapField` \value ->
-          IR.AIColumn (ciColumn columnInfo, IR.mkParameter value)
+-- | What parsing a field of a table insert input object needs beyond its
+-- 'FieldInfo'. See Note [Data-driven table input objects] in
+-- Hasura.GraphQL.Schema.TableFields.
+data InsertEntry b n
+  = -- | a column: the parser of its value, which the columns of the same type
+    -- and nullability share
+    InsertColumn (Parser 'Both n (IR.ValueWithOrigin (ColumnValue b)))
+  | -- | a relationship: its name and field parser
+    InsertRelationship G.Name (InputFieldsParser n (Maybe (IR.AnnotatedInsertField b (IR.UnpreparedValue b))))
 
 mkDefaultRelationshipParser ::
   forall b r m n.
