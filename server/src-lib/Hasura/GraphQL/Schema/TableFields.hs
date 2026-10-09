@@ -6,6 +6,7 @@
 module Hasura.GraphQL.Schema.TableFields
   ( TableFieldEntries,
     tableFieldEntries,
+    absentField,
     TableObject (..),
     tableObject,
     TrailingField (..),

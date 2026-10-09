@@ -418,19 +418,8 @@ rawSelection ::
 {-# INLINE rawSelection #-}
 rawSelection name description argumentsParser resultParser =
   FieldParser
-    { fDefinition =
-        Definition name description Nothing [] $
-          FieldInfo (ifDefinitions argumentsParser) (pType resultParser),
-      fParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
-        unless (null _fSelectionSet) $
-          parseError "unexpected subselection set for non-object field"
-        -- check for extraneous arguments here, since the InputFieldsParser just
-        -- handles parsing the fields it cares about
-        for_ (HashMap.keys _fArguments) \argumentName ->
-          unless (argumentName `S.member` argumentNames) $
-            parseError $
-              toErrorValue name <> " has no argument named " <> toErrorValue argumentName
-        fmap (_fAlias,_fArguments,) $ withKey (Key "args") $ ifParser argumentsParser $ GraphQLValue <$> _fArguments
+    { fDefinition = selectionDefinition name description argumentsParser resultParser,
+      fParser = rawSelectionParse argumentNames name argumentsParser
     }
   where
     -- If  `ifDefinitions` is empty, then not forcing this will lead to
@@ -439,7 +428,45 @@ rawSelection name description argumentsParser resultParser =
     -- Forcing it will lead to the statically allocated empty set.
     -- If it's non-empty then it will be forced the first time the parser
     -- is used so might as well force it when constructing the parser.
-    !argumentNames = S.fromList (dName <$> ifDefinitions argumentsParser)
+    !argumentNames = selectionArgumentNames argumentsParser
+
+-- | The definition of the field that 'selection' makes.
+selectionDefinition ::
+  Name ->
+  Maybe Description ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Both m b ->
+  Definition origin (FieldInfo origin)
+selectionDefinition name description argumentsParser resultParser =
+  Definition name description Nothing [] $
+    FieldInfo (ifDefinitions argumentsParser) (pType resultParser)
+
+-- | The names of the arguments of a 'selection'.
+selectionArgumentNames :: InputFieldsParser origin m a -> S.HashSet Name
+selectionArgumentNames argumentsParser = S.fromList (dName <$> ifDefinitions argumentsParser)
+
+-- | Parse a field the way the parser of @'rawSelection' name _
+-- argumentsParser _@ does, given the names of the arguments
+-- ('selectionArgumentNames'): so that fields of the same type can share
+-- everything but their name.
+rawSelectionParse ::
+  (MonadParse m) =>
+  S.HashSet Name ->
+  Name ->
+  InputFieldsParser origin m a ->
+  Field NoFragments Variable ->
+  m (Maybe Name, HashMap Name (Value Variable), a)
+{-# INLINE rawSelectionParse #-}
+rawSelectionParse argumentNames name argumentsParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
+  unless (null _fSelectionSet) $
+    parseError "unexpected subselection set for non-object field"
+  -- check for extraneous arguments here, since the InputFieldsParser just
+  -- handles parsing the fields it cares about
+  for_ (HashMap.keys _fArguments) \argumentName ->
+    unless (argumentName `S.member` argumentNames) $
+      parseError $
+        toErrorValue name <> " has no argument named " <> toErrorValue argumentName
+  fmap (_fAlias,_fArguments,) $ withKey (Key "args") $ ifParser argumentsParser $ GraphQLValue <$> _fArguments
 
 -- | Builds a 'FieldParser' for a field that takes a subselection set, i.e. a
 -- field that returns an object.
