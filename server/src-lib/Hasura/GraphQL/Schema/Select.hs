@@ -668,6 +668,63 @@ data ObjectRelationshipSelection b n = ObjectRelationshipSelection
     orsFilter :: AnnBoolExp b (IR.UnpreparedValue b)
   }
 
+-- | The fields of a relationship of a table selection set, as data. See Note
+-- [Data-driven table selection sets].
+data RelationshipSelection b n
+  = RSObject (ObjectRelationshipSelection b n)
+  | RSArray (ArrayRelationshipSelection b n)
+
+-- | The fields of an array relationship: the relationship itself and its
+-- aggregate, made from the target table's select fields.
+data ArrayRelationshipSelection b n = ArrayRelationshipSelection
+  { arsFieldName :: G.Name,
+    arsSelect :: NamedField n (SelectExp b),
+    arsAggregate :: Maybe (G.Name, NamedField n (AggSelectExp b)),
+    arsRelationship :: RelInfo b,
+    -- | whether the target's permission filter is dropped
+    arsDropFilter :: Bool
+  }
+
+relationshipDefinitions :: (Applicative n) => RelationshipSelection b n -> [P.Definition P.FieldInfo]
+relationshipDefinitions = \case
+  RSObject selection -> [objectRelationshipDefinition selection]
+  RSArray ArrayRelationshipSelection {..} ->
+    nfDefinition arsSelect arsFieldName arrayRelationshipDescription
+      : [nfDefinition aggregate name aggregateRelationshipDescription | (name, aggregate) <- maybeToList arsAggregate]
+
+relationshipLookup ::
+  (Backend b, MonadParse n) =>
+  G.Name ->
+  RelationshipSelection b n ->
+  Maybe (G.Field G.NoFragments P.Variable -> n (AnnotatedField b))
+relationshipLookup name = \case
+  RSObject selection
+    | orsFieldName selection == name -> Just $ objectRelationshipParse selection
+  RSArray ArrayRelationshipSelection {..}
+    | arsFieldName == name -> Just \field -> do
+        selectExp <- nfParse arsSelect name field
+        let selectExp'
+              | arsDropFilter = selectExp {IR._asnPerm = (IR._asnPerm selectExp) {IR._tpFilter = BoolAnd []}}
+              | otherwise = selectExp
+        pure $ IR.AFArrayRelation $ IR.ASSimple $ relationSelect arsRelationship selectExp'
+    | Just (aggregateName, aggregate) <- arsAggregate,
+      aggregateName == name ->
+        Just \field -> IR.AFArrayRelation . IR.ASAggregate . relationSelect arsRelationship <$> nfParse aggregate name field
+  _ -> Nothing
+  where
+    relationSelect relationship = IR.AnnRelationSelectG (riName relationship) (unRelMapping $ riMapping relationship) Nullable
+
+relationshipFieldParsers :: (Backend b, MonadParse n) => RelationshipSelection b n -> [FieldParser n (AnnotatedField b)]
+relationshipFieldParsers selection =
+  [ IP.FieldParser definition parse
+  | definition <- relationshipDefinitions selection,
+    Just parse <- [relationshipLookup (getName definition) selection]
+  ]
+
+arrayRelationshipDescription, aggregateRelationshipDescription :: Maybe G.Description
+arrayRelationshipDescription = Just $ G.Description "An array relationship"
+aggregateRelationshipDescription = Just $ G.Description "An aggregate relationship"
+
 objectRelationshipDefinition :: (Applicative n) => ObjectRelationshipSelection b n -> P.Definition P.FieldInfo
 objectRelationshipDefinition ObjectRelationshipSelection {..} =
   case orsNullability of
@@ -732,7 +789,7 @@ data SelectionEntry b n
       (Parser 'Both n (IR.ValueWithOrigin (ColumnValue b)))
   | -- | any other field: its object relationship fields, as data, or its
     -- field parsers
-    OtherSelections [Either (ObjectRelationshipSelection b n) (FieldParser n (AnnotatedField b))]
+    OtherSelections [Either (RelationshipSelection b n) (FieldParser n (AnnotatedField b))]
 
 -- | Whether the field of a column is nullable in a role's schema: see
 -- 'fieldSelection'.
@@ -760,7 +817,7 @@ tableSelectionDefinitions fieldInfoMap (codes, entries) =
               else case (fieldInfo, entries V.! fromIntegral code) of
                 (FIColumn (SCIScalarColumn columnInfo), ColumnSelection arguments _ result) ->
                   IP.selectionDefinition (ciName columnInfo) (ciDescription columnInfo) arguments result : continue (i + 1)
-                (_, OtherSelections selections) -> map (either objectRelationshipDefinition IP.fDefinition) selections <> continue (i + 1)
+                (_, OtherSelections selections) -> concatMap (either relationshipDefinitions (pure . IP.fDefinition)) selections <> continue (i + 1)
                 _ -> continue (i + 1)
     )
     (const [])
@@ -790,8 +847,8 @@ lookupTableSelection selectPermissions fieldInfoMap (codes, entries) name =
                         (_, _, columnArguments) <- IP.rawSelectionParse argumentNames name arguments field
                         pure $ IR.mkAnnColumnField (ciColumn columnInfo) (ciType columnInfo) (columnSelectionRedaction selectPermissions columnInfo) columnArguments
                 (_, OtherSelections selections)
-                  | Just selection <- find ((== name) . either orsFieldName (getName . IP.fDefinition)) selections ->
-                      Just $ either objectRelationshipParse IP.fParser selection
+                  | parse : _ <- mapMaybe (either (relationshipLookup name) (\parser -> IP.fParser parser <$ guard (getName (IP.fDefinition parser) == name))) selections ->
+                      Just parse
                 _ -> continue (i + 1)
     )
     (const Nothing)
@@ -1528,7 +1585,7 @@ fieldSelection logicalModelCache table tableInfo = \case
   FIColumn (SCIArrayColumn NestedArrayInfo {..}) ->
     fmap (nestedArrayFieldParser _naiSupportsNestedArrays _naiIsNullable) <$> fieldSelection logicalModelCache table tableInfo (FIColumn _naiColumnInfo)
   FIRelationship relationshipInfo ->
-    concat . maybeToList . fmap (map (either objectRelationshipFieldParser id)) <$> relationshipField table relationshipInfo
+    concat . maybeToList . fmap (concatMap (either relationshipFieldParsers pure)) <$> relationshipField table relationshipInfo
   FIComputedField computedFieldInfo ->
     maybeToList <$> computedField computedFieldInfo table tableInfo
   FIRemoteRelationship remoteFieldInfo -> do
@@ -1704,7 +1761,7 @@ relationshipField ::
   ) =>
   TableName b ->
   RelInfo b ->
-  SchemaT r m (Maybe [Either (ObjectRelationshipSelection b n) (FieldParser n (AnnotatedField b))])
+  SchemaT r m (Maybe [Either (RelationshipSelection b n) (FieldParser n (AnnotatedField b))])
 relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = runMaybeT do
   tCase <- retrieve $ _rscNamingConvention . _siCustomization @b
   roleName <- retrieve scRole
@@ -1749,10 +1806,6 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
                     then BoolAnd []
                     else x
           _ -> x
-      deduplicatePermissions' :: SelectExp b -> SelectExp b
-      deduplicatePermissions' expr =
-        let newFilter = deduplicatePermissions (IR._tpFilter (IR._asnPerm expr))
-         in expr {IR._asnPerm = (IR._asnPerm expr) {IR._tpFilter = newFilter}}
   -- END black magic to deduplicate permission checks
 
   case riType ri of
@@ -1805,19 +1858,10 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
         -- Manual or reverse relationships are always nullable
         _ -> pure Nullable
       let !filterExp = deduplicatePermissions $ IR._tpFilter $ tablePermissionsInfo remotePerms
-      pure [Left $ ObjectRelationshipSelection relFieldName nullable selectionSetParser ri otherTableName filterExp]
+      pure [Left $ RSObject $ ObjectRelationshipSelection relFieldName nullable selectionSetParser ri otherTableName filterExp]
     ArrRel -> do
-      let arrayRelDesc = Just $ G.Description "An array relationship"
-      otherTableParser <- MaybeT $ selectTableField otherTableInfo relFieldName arrayRelDesc
-      let arrayRelField =
-            otherTableParser <&> \selectExp ->
-              IR.AFArrayRelation
-                $ IR.ASSimple
-                $ IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) Nullable
-                $ deduplicatePermissions' selectExp
-          relAggFieldName = applyFieldNameCaseCust tCase $ relFieldName <> Name.__aggregate
-          relAggDesc = Just $ G.Description "An aggregate relationship"
-      remoteAggField <- lift $ selectTableAggregateField otherTableInfo relAggFieldName relAggDesc
+      select <- MaybeT $ selectTable otherTableInfo
+      aggregate <- lift $ selectTableAggregate otherTableInfo
       remoteConnectionField <- runMaybeT $ do
         -- Parse array connection field only for relay schema
         RelaySchema _ <- retrieve scSchemaKind
@@ -1829,13 +1873,17 @@ relationshipField table ri@RelInfo {riTarget = RelTargetTable otherTableName} = 
         let relConnectionName = relFieldName <> Name.__connection
             relConnectionDesc = Just $ G.Description "An array relationship connection"
         MaybeT $ lift $ selectTableConnection otherTableInfo relConnectionName relConnectionDesc pkeyColumns
+      -- whether the target's permission filter is dropped, see
+      -- 'deduplicatePermissions'
+      let !dropFilter = case deduplicatePermissions $ IR._tpFilter $ tablePermissionsInfo remotePerms of
+            BoolAnd [] -> True
+            _ -> False
+          !aggregateFieldName = applyFieldNameCaseCust tCase $ relFieldName <> Name.__aggregate
       pure
-        $ map Right
-        $ catMaybes
-          [ Just arrayRelField,
-            fmap (IR.AFArrayRelation . IR.ASAggregate . IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) Nullable) <$> remoteAggField,
-            fmap (IR.AFArrayRelation . IR.ASConnection . IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) Nullable) <$> remoteConnectionField
-          ]
+        $ Left (RSArray $ ArrayRelationshipSelection relFieldName select ((aggregateFieldName,) <$> aggregate) ri dropFilter)
+        : map
+          (Right . fmap (IR.AFArrayRelation . IR.ASConnection . IR.AnnRelationSelectG (riName ri) (unRelMapping $ riMapping ri) Nullable))
+          (maybeToList remoteConnectionField)
 relationshipField _table ri@RelInfo {riTarget = RelTargetNativeQuery nativeQueryName} = runMaybeT do
   relFieldName <- lift $ textToName $ relNameToTxt $ riName ri
 
