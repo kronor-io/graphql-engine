@@ -251,7 +251,9 @@ buildGQLContext
                           "parent " <> show (roleNameToTxt parent) <> ", shared tables " <> show (Set.size sharedTables)
                             <> ", parent rebuilt " <> show (maybe False (\(Deferred r) -> either (const False) (const True) r) (HashMap.lookup parent rebuildsByRole))
                   hPutStrLn stderr $ "SHARING " <> show (roleNameToTxt role) <> ": " <> described <> ", initial memo entries " <> show (memoizedParsersSize initialParsers)
-                fmap (keptParsers role) <$> buildRoleContextFrom
+                -- the kept parsers are evaluated here: a thunk would keep all
+                -- of the role's memoized parsers alive
+                (context, parsers) <- buildRoleContextFrom
                   initialParsers
                   SkipSchemaChecks
                   sharedComparisons
@@ -266,6 +268,8 @@ buildGQLContext
                   experimentalFeatures
                   apolloFederationStatus
                   mSchemaRegistryContext
+                let !kept = keptParsers role parsers
+                pure (context, kept)
               pure (role, Deferred rebuild)
           -- One role at a time, see Note [Building role parsers lazily]
           hctxs <-
