@@ -19,7 +19,7 @@ import Data.List.Extended (duplicates)
 import Data.Text.Extended
 import Data.Text.NonEmpty qualified as NT
 import Database.PG.Query.Pool qualified as PG
-import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleNameSafe, roleNameToTxt)
+import Hasura.Authentication.Role (ParentRoles (..), Role (..), RoleName, adminRoleName, mkRoleNameSafe, roleNameToTxt)
 import Hasura.Base.Error
 import Hasura.Base.ErrorMessage
 import Hasura.Base.ToErrorValue
@@ -59,6 +59,7 @@ import Hasura.RQL.Types.Action
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendTag (HasTag)
 import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.ComputedField (ComputedFieldInfo (..))
 import Hasura.RQL.Types.CustomTypes
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.Permission
@@ -77,6 +78,10 @@ import Hasura.Server.Types
 import Hasura.StoredProcedure.Cache (StoredProcedureCache, _spiReturns)
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
+import Data.Typeable (Typeable, cast)
+import Hasura.RQL.Types.BackendType (BackendType (Postgres), PostgresKind (Vanilla))
+import Hasura.RQL.Types.Relationships.Local (RelTarget (..), riTarget)
+import System.IO (fixIO)
 import System.IO.Unsafe (unsafeInterleaveIO)
 
 -------------------------------------------------------------------------------
@@ -122,6 +127,7 @@ buildGQLContext ::
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
   ActionCache ->
   AnnotatedCustomTypes ->
+  HashMap RoleName Role ->
   Maybe SchemaRegistryContext ->
   Logger Hasura ->
   m
@@ -149,6 +155,7 @@ buildGQLContext
   allRemoteSchemas
   allActions
   customTypes
+  roles
   mSchemaRegistryContext
   logger = do
     let remoteSchemasRoles = concatMap (HashMap.keys . _rscPermissions . fst . snd) $ HashMap.toList allRemoteSchemas
@@ -200,6 +207,42 @@ buildGQLContext
                     )
           pure (fst <$> contexts, snd <$> contexts)
         else do
+          -- The rebuilds of the roles' contexts, each on its role's first
+          -- request, see Note [Sharing parsers with an inherited role].
+          let sharing = HashMap.fromList [(role, shared) | role <- Set.toList allRoles, Just shared <- [inheritedRoleSharing roles sources role]]
+              sharedTablesByParent = HashMap.fromListWith (<>) (HashMap.elems sharing)
+              keptParsers role parsers = case HashMap.lookup role sharedTablesByParent of
+                Just sharedTables -> restrictMemoizedParsers (isSharedTableKey sharedTables) parsers
+                Nothing -> noMemoizedParsers
+          rebuilds <- liftIO $ fixIO \rebuildsByRole ->
+            fmap HashMap.fromList $ for (Set.toList allRoles) \role -> do
+              rebuild <- unsafeInterleaveIO $ runExceptT do
+                let initialParsers = case HashMap.lookup role sharing of
+                      Just (parent, sharedTables)
+                        | Just (Deferred parentRebuild) <- HashMap.lookup parent rebuildsByRole,
+                          Right (_, parentParsers) <- parentRebuild ->
+                            restrictMemoizedParsers (isSharedTableKey sharedTables) parentParsers
+                      _ -> noMemoizedParsers
+                (context, parsers) <-
+                  buildRoleContextFrom
+                    initialParsers
+                    SkipSchemaChecks
+                    sampledFeatureFlags
+                    (sqlGen, functionPermissions)
+                    sources
+                    allRemoteSchemas
+                    allActionInfos
+                    customTypes
+                    role
+                    remoteSchemaPermissions
+                    experimentalFeatures
+                    apolloFederationStatus
+                    mSchemaRegistryContext
+                -- Evaluated: a thunk would keep all of the role's memoized
+                -- parsers alive.
+                let !kept = keptParsers role parsers
+                pure (context, kept)
+              pure (role, Deferred rebuild)
           -- One role at a time, see Note [Building role parsers lazily]
           hctxs <-
             fmap HashMap.fromList
@@ -209,7 +252,10 @@ buildGQLContext
                   <$> buildRoleContextLazily
                     role
                     (buildHasuraRoleContext CheckSchema role)
-                    (buildHasuraRoleContext SkipSchemaChecks role)
+                    ( case HashMap.lookup role rebuilds of
+                        Just (Deferred rebuild) -> liftEither $ fst <$> rebuild
+                        Nothing -> buildHasuraRoleContext SkipSchemaChecks role
+                    )
           pure (hctxs, HashMap.empty)
 
     adminIntrospection <-
@@ -304,6 +350,106 @@ evaluated in IO before it is returned.
 This only applies when the Relay API is disabled: with Relay enabled, every
 role's Hasura and Relay contexts are built together and keep their parsers.
 -}
+
+{- Note [Sharing parsers with an inherited role]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An inherited role with a single parent has, on most tables, exactly its
+parent's permissions: inherited roles are often a parent role plus a few
+extra tables or columns. On those tables both roles build the same parsers, so
+once the parent has been rebuilt (see Note [Building role parsers lazily]),
+the inherited role's rebuild starts its 'MemoizeT' from the parent's memoized
+parsers of those tables instead of from nothing, and the two roles share them.
+
+A table's parsers are a function of the source, the table, and the role's
+permissions on it and, through relationships, on the tables they lead to. So a
+table is shared when both roles have equal permissions on it (select, insert,
+update and delete), and all of its relationships lead to shared tables
+('inheritedRoleSharing' computes the largest such set). Tables with remote
+relationships, relationships to native queries, or computed fields returning
+tables are not shared: their parsers depend on more than that. Only memoized
+parsers keyed by a shared table are reused ('isSharedTableKey'); any other key
+is built afresh, which is always correct.
+
+For permissions to compare equal, the combined select permission of a role with
+a single parent must not wrap the parent's filter in a one-element 'BoolOr'
+(see 'combinedSelPermInfoToSelPermInfo').
+
+A parent keeps only its memoized parsers of the tables it shares, evaluated, so
+that it doesn't keep the rest of its memo alive. The parent's rebuild is forced
+by the child's, if it hasn't happened yet: the rebuilds are lazy values in a
+map built with 'fixIO', each looking up its parent's.
+
+The eager build on apply, which checks for conflicts, doesn't share.
+-}
+
+-- | A value that isn't evaluated when its container is.
+data Deferred a = Deferred ~a
+
+-- | Whether a memoization key is the key of a table in a set (its source and
+-- name, possibly with a field name).
+isSharedTableKey :: (Typeable key) => HashSet (SourceName, TableName ('Postgres 'Vanilla)) -> key -> Bool
+isSharedTableKey sharedTables key
+  | Just table <- cast key = table `Set.member` sharedTables
+  | Just (source, table, _ :: G.Name) <- cast key = (source, table) `Set.member` sharedTables
+  | otherwise = False
+
+-- | When a role inherits from a single role, its parent and the tables whose
+-- parsers it can share with it: those on which both have the same
+-- permissions, and whose relationships only lead to such tables.
+--
+-- A table's parsers are a function of the source, the table and the role's
+-- permissions on it (and, through relationships, on other tables), so on such
+-- a table a role and its parent build the same parsers. Tables with remote
+-- relationships, relationships to native queries, or computed fields that
+-- return tables are left out, as their parsers depend on more than that.
+-- Only Postgres sources are considered.
+inheritedRoleSharing :: HashMap RoleName Role -> SourceCache -> RoleName -> Maybe (RoleName, HashSet (SourceName, TableName ('Postgres 'Vanilla)))
+inheritedRoleSharing roles sources role = do
+  Role _ (ParentRoles parents) <- HashMap.lookup role roles
+  [parent] <- pure $ toList parents
+  pure
+    ( parent,
+      Set.fromList
+        [ (_siName sourceInfo, table)
+        | anySourceInfo <- HashMap.elems sources,
+          Just (sourceInfo :: SourceInfo ('Postgres 'Vanilla)) <- [AB.unpackAnyBackend anySourceInfo],
+          table <- toList $ sharedTables parent (_siTables sourceInfo)
+        ]
+    )
+  where
+    sharedTables parent tables =
+      let candidates = HashMap.keysSet $ HashMap.filter (\tableInfo -> samePermissions parent tableInfo && all shareableField (fields tableInfo)) tables
+       in closure candidates
+      where
+        -- remove tables with a relationship to a table outside the set, until none is left
+        closure shared =
+          let shared' = Set.filter (\table -> all (`Set.member` shared) (maybe [] relationshipTargets (HashMap.lookup table tables))) shared
+           in if Set.size shared' == Set.size shared then shared else closure shared'
+        relationshipTargets tableInfo = [target | FIRelationship relInfo <- fields tableInfo, RelTargetTable target <- [riTarget relInfo]]
+
+    fields = HashMap.elems . _tciFieldInfoMap . _tiCoreInfo
+
+    shareableField :: FieldInfo ('Postgres 'Vanilla) -> Bool
+    shareableField = \case
+      FIRemoteRelationship _ -> False
+      FIRelationship relInfo -> case riTarget relInfo of
+        RelTargetTable _ -> True
+        _ -> False
+      FIComputedField computedFieldInfo -> case computedFieldReturnType @('Postgres 'Vanilla) (_cfiReturnType computedFieldInfo) of
+        ReturnsScalar _ -> True
+        _ -> False
+      FIColumn _ -> True
+
+    samePermissions parent tableInfo =
+      let permissions = _tiRolePermInfoMap tableInfo
+       in case (HashMap.lookup role permissions, HashMap.lookup parent permissions) of
+            (Nothing, Nothing) -> True
+            (Just own, Just parents') ->
+              _permSel own == _permSel parents'
+                && _permIns own == _permIns parents'
+                && _permUpd own == _permUpd parents'
+                && _permDel own == _permDel parents'
+            _ -> False
 
 -- | See Note [Building role parsers lazily]
 buildRoleContextLazily ::
@@ -412,7 +558,29 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContext checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext =
+  fst <$> buildRoleContextFrom noMemoizedParsers checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext
+
+-- | 'buildRoleContext', starting from parsers memoized before (see
+-- 'inheritedRoleSharing'), and returning the parsers it memoized.
+buildRoleContextFrom ::
+  forall m.
+  (MonadError QErr m, MonadIO m) =>
+  MemoizedParsers ->
+  SchemaChecks ->
+  SchemaSampledFeatureFlags ->
+  (SQLGenCtx, Options.InferFunctionPermissions) ->
+  SourceCache ->
+  HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
+  [ActionInfo] ->
+  AnnotatedCustomTypes ->
+  RoleName ->
+  Options.RemoteSchemaPermissions ->
+  Set.HashSet ExperimentalFeature ->
+  ApolloFederationStatus ->
+  Maybe SchemaRegistryContext ->
+  m (RoleContextValue, MemoizedParsers)
+buildRoleContextFrom initialParsers checks sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -427,7 +595,7 @@ buildRoleContext checks sampledFeatureFlags options sources remotes actions cust
           )
           role
           sampledFeatureFlags
-  runMemoizeT $ do
+  runMemoizeTFrom initialParsers $ do
     -- build all sources (`apolloFedTableParsers` contains all the parsers and
     -- type names, which are eligible for the `_Entity` Union)
     (sourcesQueryFields, sourcesMutationFrontendFields, sourcesMutationBackendFields, sourcesSubscriptionFields, apolloFedTableParsers) <-

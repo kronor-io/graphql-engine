@@ -596,6 +596,7 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
               (_boRemoteSchemas resolvedOutputs)
               (_boActions resolvedOutputs)
               (_boCustomTypes resolvedOutputs)
+              (_boRoles resolvedOutputs)
               mSchemaRegistryContext
               logger
       returnA -< (inconsistentObjects, storedIntrospections, out2, out3)
