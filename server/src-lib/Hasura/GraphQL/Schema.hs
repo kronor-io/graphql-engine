@@ -83,7 +83,8 @@ import Language.GraphQL.Draft.Syntax qualified as G
 import Data.Typeable (Typeable, cast)
 import Hasura.RQL.Types.BackendType (BackendType (Postgres), PostgresKind (Vanilla))
 import Hasura.RQL.Types.Relationships.Local (RelTarget (..), riTarget)
-import System.IO (fixIO)
+import System.Environment (lookupEnv)
+import System.IO (fixIO, hPutStrLn, stderr)
 import System.IO.Unsafe (unsafeInterleaveIO)
 
 -------------------------------------------------------------------------------
@@ -230,6 +231,15 @@ buildGQLContext
                           Right (_, parentParsers) <- parentRebuild ->
                             restrictMemoizedParsers (isSharedTableKey sharedTables) parentParsers
                       _ -> noMemoizedParsers
+                -- RESEARCH: HGE_RESEARCH_TRACE_SHARING
+                traceSharing <- liftIO $ isJust <$> lookupEnv "HGE_RESEARCH_TRACE_SHARING"
+                liftIO $ when traceSharing do
+                  let described = case inheritedRoleSharing roles sources role of
+                        Nothing -> "no single parent"
+                        Just (parent, sharedTables) ->
+                          "parent " <> show (roleNameToTxt parent) <> ", shared tables " <> show (Set.size sharedTables)
+                            <> ", parent rebuilt " <> show (maybe False (\(Deferred r) -> either (const False) (const True) r) (HashMap.lookup parent rebuildsByRole))
+                  hPutStrLn stderr $ "SHARING " <> show (roleNameToTxt role) <> ": " <> described <> ", initial memo entries " <> show (memoizedParsersSize initialParsers)
                 buildRoleContextFrom
                   initialParsers
                   SkipSchemaChecks

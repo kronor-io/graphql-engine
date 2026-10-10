@@ -11,6 +11,7 @@ module Control.Monad.Memoize
     noMemoizedParsers,
     runMemoizeTFrom,
     restrictMemoizedParsers,
+    memoizedParsersSize,
   )
 where
 
@@ -156,6 +157,10 @@ runMemoizeTFrom :: forall m a. (Monad m) => MemoizedParsers -> MemoizeT m a -> m
 runMemoizeTFrom (MemoizedParsers parsers) action = do
   (result, parsers') <- runStateT (unMemoizeT action) parsers
   pure (result, MemoizedParsers parsers')
+
+-- | RESEARCH: how many parsers are memoized.
+memoizedParsersSize :: MemoizedParsers -> Int
+memoizedParsersSize (MemoizedParsers parsers) = DM.size parsers
 
 -- | The memoized parsers whose key satisfies a predicate.
 restrictMemoizedParsers :: (forall a. (Typeable a) => a -> Bool) -> MemoizedParsers -> MemoizedParsers
