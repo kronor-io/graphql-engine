@@ -136,7 +136,8 @@ buildRemoteSchemas logger env =
     -- Without its permissions: they are metadata objects of their own, and the
     -- definition, which is lazy, would keep their parsed SDL alive.
     mkRemoteSchemaMetadataObject remoteSchema =
-      MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON remoteSchema {_rsmPermissions = []})
+      let !withoutPermissions = remoteSchema {_rsmPermissions = []}
+       in MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON withoutPermissions)
 
 -- | Fetches the introspection of every remote schema, the same way
 -- 'buildRemoteSchemas' would, so that it can be compared before the catalog is

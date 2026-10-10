@@ -515,7 +515,11 @@ combinedSelPermInfoToSelPermInfo selPermsCount CombinedSelPermInfo {..} =
   SelPermInfo
     (mergeColumnsWithBoolExp <$> HashMap.unionsAll cspiCols)
     (mergeColumnsWithBoolExp <$> HashMap.unionsAll cspiComputedFields)
-    (BoolOr cspiFilter)
+    -- A single parent's filter as it is, rather than as a disjunction of one,
+    -- so that the permissions of a role inheriting from a single role are
+    -- equal to its parent's (and its parsers can be shared, see
+    -- 'Hasura.GraphQL.Schema.inheritedRoleSharing').
+    (case cspiFilter of [single] -> single; filters -> BoolOr filters)
     (getMax <$> cspiLimit)
     (getAny cspiAllowAgg)
     cspiRequiredHeaders

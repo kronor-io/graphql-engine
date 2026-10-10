@@ -7,6 +7,11 @@ module Control.Monad.Memoize
     memoize,
     MemoizeT,
     runMemoizeT,
+    MemoizedParsers,
+    noMemoizedParsers,
+    runMemoizeTFrom,
+    restrictMemoizedParsers,
+    memoizedParsersSize,
   )
 where
 
@@ -139,6 +144,28 @@ instance (MonadState s m) => MonadState s (MemoizeT m) where
 
 runMemoizeT :: forall m a. (Monad m) => MemoizeT m a -> m a
 runMemoizeT = flip evalStateT mempty . unMemoizeT
+
+-- | The parsers memoized by a run of 'MemoizeT'.
+newtype MemoizedParsers = MemoizedParsers (DMap MemoizationKey Identity)
+
+noMemoizedParsers :: MemoizedParsers
+noMemoizedParsers = MemoizedParsers mempty
+
+-- | 'runMemoizeT', starting from parsers memoized before, and returning the
+-- parsers memoized when it is done (those it started from included).
+runMemoizeTFrom :: forall m a. (Monad m) => MemoizedParsers -> MemoizeT m a -> m (a, MemoizedParsers)
+runMemoizeTFrom (MemoizedParsers parsers) action = do
+  (result, parsers') <- runStateT (unMemoizeT action) parsers
+  pure (result, MemoizedParsers parsers')
+
+-- | RESEARCH: how many parsers are memoized.
+memoizedParsersSize :: MemoizedParsers -> Int
+memoizedParsersSize (MemoizedParsers parsers) = DM.size parsers
+
+-- | The memoized parsers whose key satisfies a predicate.
+restrictMemoizedParsers :: (forall a. (Typeable a) => a -> Bool) -> MemoizedParsers -> MemoizedParsers
+restrictMemoizedParsers keep (MemoizedParsers parsers) =
+  MemoizedParsers $ DM.filterWithKey (\(MemoizationKey _ key) _ -> keep key) parsers
 
 -- | see Note [MemoizeT requires MonadIO]
 instance
