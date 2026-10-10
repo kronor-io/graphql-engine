@@ -124,8 +124,10 @@ buildRemoteSchemas logger env =
     -- TODO(Antoine): do this when changing CacheBuild to be on top of the app's m.
     noopTrace = Tracing.ignoreTraceT
 
+    -- Without its permissions: they are metadata objects of their own, and
+    -- rendering them would copy every role's permission SDL.
     mkRemoteSchemaMetadataObject remoteSchema =
-      MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON remoteSchema)
+      MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON remoteSchema {_rsmPermissions = []})
 
 -- | Resolves a RemoteSchemaPermission metadata object into a 'GraphQL schema'.
 buildRemoteSchemaPermissions ::
