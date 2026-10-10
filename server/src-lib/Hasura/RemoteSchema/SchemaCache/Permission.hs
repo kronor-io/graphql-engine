@@ -1072,7 +1072,9 @@ resolveRoleBasedRemoteSchema roleName remoteSchemaName remoteSchemaIntrospection
             $ validateRemoteSchema
             $ irDoc remoteSchemaIntrospection
         )
-  pure (shareWithUpstream (irDoc remoteSchemaIntrospection) introspectionRes, schemaDependency)
+  -- Evaluated completely, so that no thunk keeps the role's parsed SDL alive.
+  let !shared = force $ shareWithUpstream (irDoc remoteSchemaIntrospection) introspectionRes
+  pure (shared, schemaDependency)
   where
     showErrors :: [RoleBasedSchemaValidationError] -> Text
     showErrors errors =
@@ -1185,8 +1187,12 @@ shareWithUpstream (RemoteSchemaIntrospection upstream) (IntrospectionResult (Rem
       G.VList values -> G.VList (map copyValue values)
       G.VObject fields -> G.VObject (HashMap.fromList [(copyName name, copyValue value) | (name, value) <- HashMap.toList fields])
       G.VVariable (SessionPresetVariable variable name info) ->
-        G.VVariable (SessionPresetVariable (fromMaybe variable (mkSessionVariable (T.copy (toTxt variable)))) (copyName name) info)
+        G.VVariable (SessionPresetVariable (fromMaybe variable (mkSessionVariable (T.copy (toTxt variable)))) (copyName name) (copyInfo info))
       value -> value
+
+    copyInfo = \case
+      SessionArgumentPresetEnum values -> SessionArgumentPresetEnum (S.map (G.EnumValue . copyName . G.unEnumValue) values)
+      info -> info
 
     copyName :: G.Name -> G.Name
     copyName name = fromMaybe name (G.mkName (T.copy (G.unName name)))

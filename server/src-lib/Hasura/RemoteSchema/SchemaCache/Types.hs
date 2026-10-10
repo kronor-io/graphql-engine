@@ -46,6 +46,7 @@ module Hasura.RemoteSchema.SchemaCache.Types
   )
 where
 
+import Control.DeepSeq (NFData (rnf))
 import Control.Lens
 import Data.Aeson qualified as J
 import Data.Aeson.TH qualified as J
@@ -82,6 +83,8 @@ data IntrospectionResult = IntrospectionResult
     irSubscriptionRoot :: Maybe G.Name
   }
   deriving (Show, Eq, Generic)
+
+instance NFData IntrospectionResult
 
 -- | The resolved information of a remote schema. It is parameterized by
 -- `remoteFieldInfo` so as to work on an arbitrary 'remote relationship'
@@ -247,6 +250,8 @@ data SessionArgumentPresetInfo
 
 instance Hashable SessionArgumentPresetInfo
 
+instance NFData SessionArgumentPresetInfo
+
 -- | Details required to resolve a "session variable preset" variable.
 --
 -- See Notes [Remote Schema Argument Presets] and [Remote Schema Permissions
@@ -259,6 +264,14 @@ data RemoteSchemaVariable
 
 instance Hashable RemoteSchemaVariable
 
+-- | Query variables only occur in queries, never in the presets of a role's
+-- remote schema, which is what this instance is for.
+instance NFData RemoteSchemaVariable where
+  rnf = \case
+    SessionPresetVariable variable name info -> rnf variable `seq` rnf name `seq` rnf info
+    QueryVariable variable -> variable `seq` ()
+    RemoteJSONValue gType value -> rnf gType `seq` rnf value
+
 -- | Extends 'G.InputValueDefinition' with an optional preset argument.
 --
 -- See Note [Remote Schema Argument Presets] for additional information.
@@ -270,9 +283,13 @@ data RemoteSchemaInputValueDefinition = RemoteSchemaInputValueDefinition
 
 instance Hashable RemoteSchemaInputValueDefinition
 
+instance NFData RemoteSchemaInputValueDefinition
+
 newtype RemoteSchemaIntrospection
   = RemoteSchemaIntrospection (HashMap G.Name (G.TypeDefinition [G.Name] RemoteSchemaInputValueDefinition))
   deriving (Show, Eq, Generic, Hashable, Ord)
+
+instance NFData RemoteSchemaIntrospection
 
 -- | Extracts the name of a given type from its definition.
 -- TODO: move this to Language.GraphQL.Draft.Syntax.
