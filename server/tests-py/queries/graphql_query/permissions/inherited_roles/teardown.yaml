@@ -15,3 +15,7 @@ args:
   - type: drop_inherited_role
     args:
       role_name: non_paying_user
+
+  - type: drop_inherited_role
+    args:
+      role_name: author_published_articles

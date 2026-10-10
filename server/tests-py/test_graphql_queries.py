@@ -599,6 +599,34 @@ class TestGraphQLInheritedRolesPostgres:
     def test_inherited_role_when_some_roles_may_not_have_permission_configured(self, hge_ctx, transport):
         check_query_f(hge_ctx, self.dir() + '/inherited_role_with_some_roles_having_no_permissions.yaml')
 
+    def test_inherited_role_with_single_parent(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/inherited_role_with_single_parent.yaml', transport)
+
+# With Relay disabled, each role's parsers are built on its first request, and
+# an inherited role with a single parent shares its parent's parsers.
+@pytest.mark.parametrize('transport', ['http', 'websocket'])
+@pytest.mark.hge_env('HASURA_GRAPHQL_ENABLE_RELAY', 'false')
+@usefixtures('per_class_tests_db_state')
+class TestGraphQLInheritedRolesLazyPostgres:
+
+    @classmethod
+    def dir(cls):
+        return 'queries/graphql_query/permissions/inherited_roles'
+
+    setup_metadata_api_version = "v2"
+
+    def test_basic_inherited_role(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/basic_inherited_roles.yaml')
+
+    def test_explicit_metadata_permission_should_override_role_inheritance(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/override_inherited_permission.yaml')
+
+    def test_inherited_role_inherits_from_inherited_role(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/inherited_role_parent_is_another_inherited_role.yaml')
+
+    def test_inherited_role_with_single_parent(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/inherited_role_with_single_parent.yaml', transport)
+
 @pytest.mark.parametrize('transport', ['http', 'websocket'])
 @pytest.mark.backend('mssql')
 @usefixtures('per_class_tests_db_state')
