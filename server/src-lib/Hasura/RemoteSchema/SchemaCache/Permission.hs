@@ -1072,7 +1072,7 @@ resolveRoleBasedRemoteSchema roleName remoteSchemaName remoteSchemaIntrospection
             $ validateRemoteSchema
             $ irDoc remoteSchemaIntrospection
         )
-  pure (introspectionRes, schemaDependency)
+  pure (shareWithUpstream (irDoc remoteSchemaIntrospection) introspectionRes, schemaDependency)
   where
     showErrors :: [RoleBasedSchemaValidationError] -> Text
     showErrors errors =
@@ -1091,3 +1091,86 @@ resolveRoleBasedRemoteSchema roleName remoteSchemaName remoteSchemaIntrospection
       map (\n -> G.ScalarTypeDefinition Nothing n [])
         . toList
         $ GName.builtInScalars
+
+-- | Make a role's resolved remote schema use the upstream schema's definitions
+-- wherever they are equal: its types, fields, arguments, input fields and enum
+-- values, and the names of its types.
+--
+-- A role's remote schema is parsed from the SDL of its permission, so each of
+-- its names and descriptions is a slice of that SDL's text, which they keep
+-- alive; and the roles' SDLs repeat most of the upstream schema. Sharing the
+-- upstream's definitions, which are kept anyway, lets the roles' copies (and
+-- their SDL texts) be collected.
+shareWithUpstream :: RemoteSchemaIntrospection -> IntrospectionResult -> IntrospectionResult
+shareWithUpstream (RemoteSchemaIntrospection upstream) (IntrospectionResult (RemoteSchemaIntrospection roleTypes) queryRoot mutationRoot subscriptionRoot) =
+  IntrospectionResult
+    (RemoteSchemaIntrospection $ HashMap.fromList [(getTypeName shared, shared) | shared <- map shareType $ HashMap.elems roleTypes])
+    (typeName queryRoot)
+    (typeName <$> mutationRoot)
+    (typeName <$> subscriptionRoot)
+  where
+    typeName name = maybe name getTypeName $ HashMap.lookup name upstream
+
+    shareType roleType = case HashMap.lookup (getTypeName roleType) upstream of
+      Nothing -> roleType
+      Just upstreamType
+        | upstreamType == roleType -> upstreamType
+        | otherwise -> shareParts upstreamType roleType
+
+    shareParts upstreamType roleType = case (upstreamType, roleType) of
+      (G.TypeDefinitionObject u, G.TypeDefinitionObject r) ->
+        G.TypeDefinitionObject
+          r
+            { G._otdName = G._otdName u,
+              G._otdDescription = same (G._otdDescription u) (G._otdDescription r),
+              G._otdFieldsDefinition = shareFields (G._otdFieldsDefinition u) (G._otdFieldsDefinition r)
+            }
+      (G.TypeDefinitionInterface u, G.TypeDefinitionInterface r) ->
+        G.TypeDefinitionInterface
+          r
+            { G._itdName = G._itdName u,
+              G._itdDescription = same (G._itdDescription u) (G._itdDescription r),
+              G._itdFieldsDefinition = shareFields (G._itdFieldsDefinition u) (G._itdFieldsDefinition r)
+            }
+      (G.TypeDefinitionInputObject u, G.TypeDefinitionInputObject r) ->
+        G.TypeDefinitionInputObject
+          r
+            { G._iotdName = G._iotdName u,
+              G._iotdDescription = same (G._iotdDescription u) (G._iotdDescription r),
+              G._iotdValueDefinitions = shareList inputName (G._iotdValueDefinitions u) (G._iotdValueDefinitions r)
+            }
+      (G.TypeDefinitionEnum u, G.TypeDefinitionEnum r) ->
+        G.TypeDefinitionEnum
+          r
+            { G._etdName = G._etdName u,
+              G._etdDescription = same (G._etdDescription u) (G._etdDescription r),
+              G._etdValueDefinitions = shareList (G.unEnumValue . G._evdName) (G._etdValueDefinitions u) (G._etdValueDefinitions r)
+            }
+      _ -> roleType
+
+    shareFields upstreamFields roleFields =
+      [ case find ((== G._fldName roleField) . G._fldName) upstreamFields of
+          Just upstreamField
+            | upstreamField == roleField -> upstreamField
+            | otherwise ->
+                roleField
+                  { G._fldName = G._fldName upstreamField,
+                    G._fldDescription = same (G._fldDescription upstreamField) (G._fldDescription roleField),
+                    G._fldArgumentsDefinition = shareList inputName (G._fldArgumentsDefinition upstreamField) (G._fldArgumentsDefinition roleField)
+                  }
+          Nothing -> roleField
+      | roleField <- roleFields
+      ]
+
+    inputName = G._ivdName . _rsitdDefinition
+
+    -- each of the role's elements, or the upstream's equal one with its name
+    shareList :: (Eq a) => (a -> G.Name) -> [a] -> [a] -> [a]
+    shareList nameOf upstreamElements roleElements =
+      [ fromMaybe roleElement $ find (== roleElement) $ filter ((== nameOf roleElement) . nameOf) upstreamElements
+      | roleElement <- roleElements
+      ]
+
+    -- the upstream's value if it is equal to the role's
+    same :: (Eq a) => a -> a -> a
+    same upstreamValue roleValue = if upstreamValue == roleValue then upstreamValue else roleValue

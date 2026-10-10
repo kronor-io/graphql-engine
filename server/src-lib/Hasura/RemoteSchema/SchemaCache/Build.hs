@@ -133,8 +133,10 @@ buildRemoteSchemas logger env =
     -- TODO(Antoine): do this when changing CacheBuild to be on top of the app's m.
     noopTrace = Tracing.ignoreTraceT
 
+    -- Without its permissions: they are metadata objects of their own, and the
+    -- definition, which is lazy, would keep their parsed SDL alive.
     mkRemoteSchemaMetadataObject remoteSchema =
-      MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON remoteSchema)
+      MetadataObject (MORemoteSchema (_rsmName remoteSchema)) (toJSON remoteSchema {_rsmPermissions = []})
 
 -- | Fetches the introspection of every remote schema, the same way
 -- 'buildRemoteSchemas' would, so that it can be compared before the catalog is
