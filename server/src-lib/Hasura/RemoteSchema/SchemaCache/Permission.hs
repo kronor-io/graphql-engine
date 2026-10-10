@@ -1137,7 +1137,7 @@ shareWithUpstream (RemoteSchemaIntrospection upstream) (IntrospectionResult (Rem
           r
             { G._iotdName = G._iotdName u,
               G._iotdDescription = same (G._iotdDescription u) (G._iotdDescription r),
-              G._iotdValueDefinitions = shareList inputName (G._iotdValueDefinitions u) (G._iotdValueDefinitions r)
+              G._iotdValueDefinitions = shareInputs (G._iotdValueDefinitions u) (G._iotdValueDefinitions r)
             }
       (G.TypeDefinitionEnum u, G.TypeDefinitionEnum r) ->
         G.TypeDefinitionEnum
@@ -1156,13 +1156,40 @@ shareWithUpstream (RemoteSchemaIntrospection upstream) (IntrospectionResult (Rem
                 roleField
                   { G._fldName = G._fldName upstreamField,
                     G._fldDescription = same (G._fldDescription upstreamField) (G._fldDescription roleField),
-                    G._fldArgumentsDefinition = shareList inputName (G._fldArgumentsDefinition upstreamField) (G._fldArgumentsDefinition roleField)
+                    G._fldArgumentsDefinition = shareInputs (G._fldArgumentsDefinition upstreamField) (G._fldArgumentsDefinition roleField)
                   }
           Nothing -> roleField
       | roleField <- roleFields
       ]
 
     inputName = G._ivdName . _rsitdDefinition
+
+    -- An argument or input field with a preset differs from the upstream's in
+    -- its preset and in its directives (the @preset directive, which is only
+    -- read to parse the preset). Use the upstream's definition, and copy the
+    -- preset's text out of the role's SDL.
+    shareInputs :: [RemoteSchemaInputValueDefinition] -> [RemoteSchemaInputValueDefinition] -> [RemoteSchemaInputValueDefinition]
+    shareInputs upstreamInputs roleInputs =
+      [ case find ((== inputName roleInput) . inputName) upstreamInputs of
+          Just (RemoteSchemaInputValueDefinition upstreamDefinition _)
+            | upstreamDefinition == roleDefinition {G._ivdDirectives = G._ivdDirectives upstreamDefinition} ->
+                RemoteSchemaInputValueDefinition upstreamDefinition (copyValue <$> preset)
+          _ -> roleInput
+      | roleInput@(RemoteSchemaInputValueDefinition roleDefinition preset) <- roleInputs
+      ]
+
+    copyValue :: G.Value RemoteSchemaVariable -> G.Value RemoteSchemaVariable
+    copyValue = \case
+      G.VString text -> G.VString (T.copy text)
+      G.VEnum (G.EnumValue name) -> G.VEnum (G.EnumValue (copyName name))
+      G.VList values -> G.VList (map copyValue values)
+      G.VObject fields -> G.VObject (HashMap.fromList [(copyName name, copyValue value) | (name, value) <- HashMap.toList fields])
+      G.VVariable (SessionPresetVariable variable name info) ->
+        G.VVariable (SessionPresetVariable (fromMaybe variable (mkSessionVariable (T.copy (toTxt variable)))) (copyName name) info)
+      value -> value
+
+    copyName :: G.Name -> G.Name
+    copyName name = fromMaybe name (G.mkName (T.copy (G.unName name)))
 
     -- each of the role's elements, or the upstream's equal one with its name
     shareList :: (Eq a) => (a -> G.Name) -> [a] -> [a] -> [a]
