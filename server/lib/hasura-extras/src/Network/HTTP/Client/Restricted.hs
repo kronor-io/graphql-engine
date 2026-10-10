@@ -57,7 +57,7 @@ restrictManagerSettings ::
   HTTP.ManagerSettings
 restrictManagerSettings mcontext mtls cfg base =
   base
-    { HTTP.managerRawConnection = restrictedRawConnection cfg,
+    { HTTP.managerRawConnection = restrictedRawConnection mcontext cfg,
       HTTP.managerTlsConnection = restrictedTlsConnection mcontext mtls cfg,
       HTTP.managerWrapException = wrapOurExceptions base
     }
@@ -100,8 +100,11 @@ wrapOurExceptions base req a =
         | otherwise = se
    in HTTP.managerWrapException base req (handle (throwIO . wrapper) a)
 
-restrictedRawConnection :: Restriction -> IO (Maybe HostAddress -> String -> Int -> IO HTTP.Connection)
-restrictedRawConnection cfg = getConnection cfg Nothing Nothing
+-- | The connection context is passed even though plain connections don't use
+-- it: without one, 'getConnection' makes its own, which reads (and keeps) the
+-- system certificate store.
+restrictedRawConnection :: Maybe NC.ConnectionContext -> Restriction -> IO (Maybe HostAddress -> String -> Int -> IO HTTP.Connection)
+restrictedRawConnection mcontext cfg = getConnection cfg Nothing mcontext
 
 restrictedTlsConnection :: Maybe NC.ConnectionContext -> Maybe NC.TLSSettings -> Restriction -> IO (Maybe HostAddress -> String -> Int -> IO HTTP.Connection)
 restrictedTlsConnection mcontext mtls cfg =
