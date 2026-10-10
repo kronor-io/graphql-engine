@@ -222,6 +222,17 @@ buildGQLContext
           -- The rebuilds of the roles' contexts, each on its role's first
           -- request. A role that inherits from a single role starts from the
           -- parsers its parent memoized, see 'inheritedRoleSharing'.
+          -- the tables each parent shares with its children: only these of its
+          -- memoized parsers are kept, and only for parents
+          let sharedTablesByParent =
+                HashMap.fromListWith (<>)
+                  [ (parent, sharedTables)
+                  | role <- Set.toList allRoles,
+                    Just (parent, sharedTables) <- [inheritedRoleSharing roles sources role]
+                  ]
+              keptParsers role parsers = case HashMap.lookup role sharedTablesByParent of
+                Just sharedTables -> restrictMemoizedParsers (isSharedTableKey sharedTables) parsers
+                Nothing -> noMemoizedParsers
           rebuilds <- liftIO $ fixIO \rebuildsByRole ->
             fmap HashMap.fromList $ for (Set.toList allRoles) \role -> do
               rebuild <- unsafeInterleaveIO $ runExceptT do
@@ -240,7 +251,7 @@ buildGQLContext
                           "parent " <> show (roleNameToTxt parent) <> ", shared tables " <> show (Set.size sharedTables)
                             <> ", parent rebuilt " <> show (maybe False (\(Deferred r) -> either (const False) (const True) r) (HashMap.lookup parent rebuildsByRole))
                   hPutStrLn stderr $ "SHARING " <> show (roleNameToTxt role) <> ": " <> described <> ", initial memo entries " <> show (memoizedParsersSize initialParsers)
-                buildRoleContextFrom
+                fmap (keptParsers role) <$> buildRoleContextFrom
                   initialParsers
                   SkipSchemaChecks
                   sharedComparisons
