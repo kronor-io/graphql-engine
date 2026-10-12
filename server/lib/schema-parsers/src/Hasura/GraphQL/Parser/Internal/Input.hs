@@ -13,6 +13,9 @@ module Hasura.GraphQL.Parser.Internal.Input
     inputParserInput,
     list,
     object,
+    objectWith,
+    checkInputObjectFields,
+    parseOptionalField,
     pInputParser,
   )
 where
@@ -319,6 +322,19 @@ fieldOptional' name description parser =
   where
     expectedType = toGraphQLType $ nullableType $ pType parser
 
+-- | Parses the given value of an optional field the way 'fieldOptional' does,
+-- for parsers that look up their fields themselves (see 'objectWith').
+parseOptionalField ::
+  (MonadParse m, 'Input <: k) =>
+  Name ->
+  Parser origin k m a ->
+  InputValue Variable ->
+  m a
+{-# INLINE parseOptionalField #-}
+parseOptionalField name parser =
+  withKey (J.Key (K.fromText (unName name)))
+    . (pInputParser parser <=< peelVariable (toGraphQLType $ nullableType $ pType parser))
+
 -- | Creates a parser for an input field with the given default value. The
 -- resulting field will always be optional, even if the underlying parser
 -- rejects `null` values. The underlying parser is always called.
@@ -430,7 +446,66 @@ object ::
   InputFieldsParser origin m a ->
   Parser origin 'Input m a
 {-# INLINE object #-}
-object name description parser =
+object name description (InputFieldsParser fieldDefinitions fieldsParser) =
+  Parser
+    { pType = schemaType,
+      pParser =
+        peelVariable (toGraphQLType schemaType) >=> \case
+          GraphQLValue (VObject fields) -> parseFields $ GraphQLValue <$> fields
+          JSONValue (J.Object fields) -> do
+            translatedFields <-
+              HashMap.fromList <$> for (KM.toList fields) \(K.toText -> key, val) -> do
+                name' <- maybe (invalidName key) pure $ mkName key
+                pure (name', JSONValue val)
+            parseFields translatedFields
+          other -> typeMismatch name "an object" other
+    }
+  where
+    -- 'InputObjectInfo' keeps its own, sorted copy of the field definitions.
+    -- Take the field names from that copy, and capture only the field parser
+    -- function rather than the whole 'InputFieldsParser': otherwise the
+    -- unsorted 'fieldDefinitions' list stays reachable from every input
+    -- object in the schema for as long as the schema lives. The match is
+    -- strict on purpose: a lazy one gets turned back into a projection inside
+    -- the (inlined) parse closure, which then captures the whole record.
+    -- 'InputFieldsParser's are never knot-tied, only 'Parser's are.
+    inputObjectInfo@(InputObjectInfo sortedFieldDefinitions) = InputObjectInfo fieldDefinitions
+    schemaType =
+      TNamed NonNullable $
+        Definition name description Nothing [] $
+          TIInputObject inputObjectInfo
+    fieldNames = S.fromList (dName <$> sortedFieldDefinitions)
+    parseFields fields = do
+      -- check for extraneous fields here, since the InputFieldsParser just
+      -- handles parsing the fields it cares about
+      for_ (HashMap.keys fields) \fieldName ->
+        unless (fieldName `S.member` fieldNames) $
+          withKey (J.Key (K.fromText (unName fieldName))) $
+            parseError $
+              "field " <> toErrorValue fieldName <> " not found in type: " <> toErrorValue name
+      fieldsParser fields
+    invalidName key = parseError $ "variable value contains object with key " <> ErrorValue.dquote key <> ", which is not a legal GraphQL name"
+
+-- | An input object whose fields are parsed by a function of the whole
+-- object, rather than by an 'InputFieldsParser'. This lets a schema parse an
+-- object from data it already has (e.g. a table's columns), instead of
+-- building a parser for each field. The function must reject the fields that
+-- aren't part of the object, before parsing any field, with
+-- 'checkInputObjectFields'.
+--
+-- The field definitions are only needed for introspection: they are not
+-- forced here, so they can be a thunk that is never evaluated if the object
+-- is never introspected.
+objectWith ::
+  (MonadParse m) =>
+  Name ->
+  Maybe Description ->
+  -- | the definitions of the fields, in any order
+  [Definition origin (InputFieldInfo origin)] ->
+  (HashMap Name (InputValue Variable) -> m a) ->
+  Parser origin 'Input m a
+{-# INLINE objectWith #-}
+objectWith name description fieldDefinitions parseFields =
   Parser
     { pType = schemaType,
       pParser =
@@ -448,18 +523,19 @@ object name description parser =
     schemaType =
       TNamed NonNullable $
         Definition name description Nothing [] $
-          TIInputObject (InputObjectInfo (ifDefinitions parser))
-    fieldNames = S.fromList (dName <$> ifDefinitions parser)
-    parseFields fields = do
-      -- check for extraneous fields here, since the InputFieldsParser just
-      -- handles parsing the fields it cares about
-      for_ (HashMap.keys fields) \fieldName ->
-        unless (fieldName `S.member` fieldNames) $
-          withKey (J.Key (K.fromText (unName fieldName))) $
-            parseError $
-              "field " <> toErrorValue fieldName <> " not found in type: " <> toErrorValue name
-      ifParser parser fields
+          TIInputObject (InputObjectInfo fieldDefinitions)
     invalidName key = parseError $ "variable value contains object with key " <> ErrorValue.dquote key <> ", which is not a legal GraphQL name"
+
+-- | Reject the first of the given fields (in the map's order) that isn't a
+-- field of the input object with the given name.
+checkInputObjectFields :: (MonadParse m) => Name -> (Name -> Bool) -> HashMap Name v -> m ()
+{-# INLINE checkInputObjectFields #-}
+checkInputObjectFields name isField fields =
+  for_ (HashMap.keys fields) \fieldName ->
+    unless (isField fieldName) $
+      withKey (J.Key (K.fromText (unName fieldName))) $
+        parseError $
+          "field " <> toErrorValue fieldName <> " not found in type: " <> toErrorValue name
 
 list :: forall origin k m a. (MonadParse m, 'Input <: k) => Parser origin k m a -> Parser origin k m [a]
 {-# INLINE list #-}

@@ -596,6 +596,7 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
               (_boRemoteSchemas resolvedOutputs)
               (_boActions resolvedOutputs)
               (_boCustomTypes resolvedOutputs)
+              (_boRoles resolvedOutputs)
               mSchemaRegistryContext
               logger
       returnA -< (inconsistentObjects, storedIntrospections, out2, out3)
@@ -1362,7 +1363,9 @@ buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryCont
             let remoteSchemaIntrospection = irDoc $ _rscIntroOriginal partiallyResolvedRemoteSchemaCtx
             resolvedSchemaCtx <- for partiallyResolvedRemoteSchemaCtx \PartiallyResolvedRemoteRelationship {..} ->
               buildRemoteSchemaRemoteRelationship partiallyResolvedSources remoteSchemaCtxMap (_rscName partiallyResolvedRemoteSchemaCtx) remoteSchemaIntrospection _prrrTypeName _prrrDefinition
-            pure $ (catMaybes resolvedSchemaCtx, metadataObj)
+            -- Evaluated, or the metadata object stays a thunk over the remote
+            -- schema's metadata, which keeps every role's parsed permission SDL.
+            metadataObj `seq` pure (catMaybes resolvedSchemaCtx, metadataObj)
 
       -- actions
       (actionCache, annotatedCustomTypes) <-

@@ -1,0 +1,86 @@
+# The parent first, so that the inherited role's parsers are built from the
+# parent's memoized ones.
+- description: The parent role sees all of its own articles
+  url: /v1/graphql
+  status: 200
+  headers:
+    X-Hasura-Role: author
+    X-Hasura-Author-Id: '1'
+  query:
+    query: |
+      query {
+        articles (order_by: {title: asc}) {
+          title
+          content
+        }
+      }
+  response:
+    data:
+      articles:
+        - title: title 1
+          content: content 1
+        - title: title 3
+          content: content 3
+
+- description: The inherited role has its parent's permission on authors
+  url: /v1/graphql
+  status: 200
+  headers:
+    X-Hasura-Role: author_published_articles
+    X-Hasura-Author-Id: '1'
+  query:
+    query: |
+      query {
+        authors {
+          id
+          name
+          followers
+        }
+      }
+  response:
+    data:
+      authors:
+        - id: 1
+          name: J.K.Rowling
+          followers: 1232344
+
+- description: The inherited role has its own permission on articles
+  url: /v1/graphql
+  status: 200
+  headers:
+    X-Hasura-Role: author_published_articles
+    X-Hasura-Author-Id: '1'
+  query:
+    query: |
+      query {
+        articles (order_by: {title: asc}) {
+          title
+        }
+      }
+  response:
+    data:
+      articles:
+        - title: title 2
+        - title: title 3
+        - title: title 4
+        - title: title 5
+
+- description: The inherited role doesn't get its parent's columns of articles
+  url: /v1/graphql
+  status: 200
+  headers:
+    X-Hasura-Role: author_published_articles
+    X-Hasura-Author-Id: '1'
+  query:
+    query: |
+      query {
+        articles {
+          content
+        }
+      }
+  response:
+    errors:
+      - extensions:
+          path: $.selectionSet.articles.selectionSet.content
+          code: validation-failed
+        message: "field 'content' not found in type: 'articles'"

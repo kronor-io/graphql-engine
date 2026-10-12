@@ -9,8 +9,10 @@ where
 
 import Control.Concurrent.Extended (concurrentlyEIO, forConcurrentlyEIO)
 import Control.Concurrent.STM qualified as STM
+import Control.Exception (evaluate)
 import Control.Lens hiding (contexts)
 import Control.Monad.Memoize
+import Data.Either (fromRight)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.HashSet qualified as Set
@@ -18,7 +20,7 @@ import Data.List.Extended (duplicates)
 import Data.Text.Extended
 import Data.Text.NonEmpty qualified as NT
 import Database.PG.Query.Pool qualified as PG
-import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleNameSafe)
+import Hasura.Authentication.Role (ParentRoles (..), Role (..), RoleName, adminRoleName, mkRoleNameSafe, roleNameToTxt)
 import Hasura.Base.Error
 import Hasura.Base.ErrorMessage
 import Hasura.Base.ToErrorValue
@@ -57,7 +59,9 @@ import Hasura.RQL.IR
 import Hasura.RQL.Types.Action
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendTag (HasTag)
+import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.ComputedField
 import Hasura.RQL.Types.CustomTypes
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.Permission
@@ -76,6 +80,11 @@ import Hasura.Server.Types
 import Hasura.StoredProcedure.Cache (StoredProcedureCache, _spiReturns)
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
+import Data.Typeable (Typeable, cast)
+import Hasura.RQL.Types.BackendType (BackendType (Postgres), PostgresKind (Vanilla))
+import Hasura.RQL.Types.Relationships.Local (RelTarget (..), riTarget)
+import System.IO (fixIO)
+import System.IO.Unsafe (unsafeInterleaveIO)
 
 -------------------------------------------------------------------------------
 
@@ -120,6 +129,7 @@ buildGQLContext ::
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
   ActionCache ->
   AnnotatedCustomTypes ->
+  HashMap RoleName Role ->
   Maybe SchemaRegistryContext ->
   Logger Hasura ->
   m
@@ -147,6 +157,7 @@ buildGQLContext
   allRemoteSchemas
   allActions
   customTypes
+  roles
   mSchemaRegistryContext
   logger = do
     let remoteSchemasRoles = concatMap (HashMap.keys . _rscPermissions . fst . snd) $ HashMap.toList allRemoteSchemas
@@ -163,8 +174,18 @@ buildGQLContext
     -- but that isn't really acheivable (see mono #3829). NOTE: the admin role
     -- will still be a bottleneck here, even on huge_schema which has many
     -- roles.
-    let buildHasuraRoleContext role =
+    -- See Note [Sharing comparison expressions between roles] in
+    -- Hasura.GraphQL.Schema.BoolExp
+    sharedComparisons <-
+      liftIO
+        $ buildSharedComparisons
+          sampledFeatureFlags
+          (buildSchemaOptions (sqlGen, functionPermissions) experimentalFeatures)
+          sources
+    let buildHasuraRoleContext checks role =
           buildRoleContext
+            checks
+            sharedComparisons
             sampledFeatureFlags
             (sqlGen, functionPermissions)
             sources
@@ -185,7 +206,7 @@ buildGQLContext
               $ \role ->
                 (role,)
                   <$> concurrentlyEIO
-                    (buildHasuraRoleContext role)
+                    (buildHasuraRoleContext CheckSchema role)
                     ( buildRelayRoleContext
                         (sqlGen, functionPermissions)
                         sources
@@ -197,10 +218,56 @@ buildGQLContext
                     )
           pure (fst <$> contexts, snd <$> contexts)
         else do
+          -- The rebuilds of the roles' contexts, each on its role's first
+          -- request, see Note [Sharing parsers with an inherited role].
+          let sharing = HashMap.fromList [(role, shared) | role <- Set.toList allRoles, Just shared <- [inheritedRoleSharing roles sources role]]
+              sharedTablesByParent = HashMap.fromListWith (<>) (HashMap.elems sharing)
+              keptParsers role parsers = case HashMap.lookup role sharedTablesByParent of
+                Just sharedTables -> restrictMemoizedParsers (isSharedTableKey sharedTables) parsers
+                Nothing -> noMemoizedParsers
+          rebuilds <- liftIO $ fixIO \rebuildsByRole ->
+            fmap HashMap.fromList $ for (Set.toList allRoles) \role -> do
+              rebuild <- unsafeInterleaveIO $ runExceptT do
+                let initialParsers = case HashMap.lookup role sharing of
+                      Just (parent, sharedTables)
+                        | Just (Deferred parentRebuild) <- HashMap.lookup parent rebuildsByRole,
+                          Right (_, parentParsers) <- parentRebuild ->
+                            restrictMemoizedParsers (isSharedTableKey sharedTables) parentParsers
+                      _ -> noMemoizedParsers
+                (context, parsers) <-
+                  buildRoleContextFrom
+                    initialParsers
+                    SkipSchemaChecks
+                    sharedComparisons
+                    sampledFeatureFlags
+                    (sqlGen, functionPermissions)
+                    sources
+                    allRemoteSchemas
+                    allActionInfos
+                    customTypes
+                    role
+                    remoteSchemaPermissions
+                    experimentalFeatures
+                    apolloFederationStatus
+                    mSchemaRegistryContext
+                -- Evaluated: a thunk would keep all of the role's memoized
+                -- parsers alive.
+                let !kept = keptParsers role parsers
+                pure (context, kept)
+              pure (role, Deferred rebuild)
+          -- One role at a time, see Note [Building role parsers lazily]
           hctxs <-
             fmap HashMap.fromList
-              $ forConcurrentlyEIO 10 (Set.toList allRoles)
-              $ \role -> (role,) <$> buildHasuraRoleContext role
+              $ for (Set.toList allRoles)
+              $ \role ->
+                (role,)
+                  <$> buildRoleContextLazily
+                    role
+                    (buildHasuraRoleContext CheckSchema role)
+                    ( case HashMap.lookup role rebuilds of
+                        Just (Deferred rebuild) -> liftEither $ fst <$> rebuild
+                        Nothing -> buildHasuraRoleContext SkipSchemaChecks role
+                    )
           pure (hctxs, HashMap.empty)
 
     adminIntrospection <-
@@ -260,6 +327,209 @@ buildGQLContext
           let schemaSdl = generateSDL schemaIntrospection
            in (GQLSchemaInformation (SchemaSDL schemaSdl) (calculateSchemaSDLHash schemaSdl r))
 
+{- Note [Building role parsers lazily]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The roles' parsers are most of the schema cache, and while a new schema cache
+is built the old one stays live to serve requests, so building every role's
+parsers up front holds two full sets of parsers at the peak of a rebuild. What
+the schema cache needs right away is much smaller: the inconsistencies found
+while building each role, its root field names, which optional parsers exist,
+and the admin role's introspection (to validate query collections and REST
+endpoints, and for OpenAPI and the schema registry).
+
+So we build each role's context on its own, one role at a time, keep only
+those, and let its parsers become garbage before the next role is built. In
+their place we store a context whose parsers rebuild the real one on the
+role's first GraphQL request and keep it from then on. During a rebuild the new
+schema cache holds at most one role's parsers, and after the swap the heap holds
+the parsers of the roles that have been used since.
+
+The other roles' introspection is only read by the schema registry; it is a
+thunk that rebuilds the role's context.
+
+The rebuild skips the checks for conflicting type definitions: it builds the
+same schema from the same schema cache as the eager build, which passed them.
+'buildRoleContext' is a function of its arguments (its only effects are the
+memoization's IORefs and the shared comparison expressions, which are built
+from the same inputs), both builds get the same arguments, and the checks are
+a function of the schema they build; so the rebuild would pass them too. As a
+guard against that ever changing, the rebuild is checked to have the eager
+build's root fields, and fails with an internal error if it doesn't.
+The checks walk every type of the schema. That evaluates every type definition
+and parser that the role's requests never reach (see Note [Data-driven table
+input objects] in Hasura.GraphQL.Schema.TableFields), and keeps them alive with the
+role's parsers: for Kronor's metadata, about 4 MiB of live heap across the
+roles used in production. Unless a schema registry needs it, the rebuild's
+introspection is left empty.
+
+Nothing may hold on to the eager context, which is why the stand-in is built
+by matching on the optional parsers rather than by mapping over them, and
+evaluated in IO before it is returned.
+
+This only applies when the Relay API is disabled: with Relay enabled, every
+role's Hasura and Relay contexts are built together and keep their parsers.
+-}
+
+{- Note [Sharing parsers with an inherited role]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An inherited role with a single parent has, on most tables, exactly its
+parent's permissions: inherited roles are often a parent role plus a few
+extra tables or columns. On those tables both roles build the same parsers, so
+once the parent has been rebuilt (see Note [Building role parsers lazily]),
+the inherited role's rebuild starts its 'MemoizeT' from the parent's memoized
+parsers of those tables instead of from nothing, and the two roles share them.
+
+A table's parsers are a function of the source, the table, and the role's
+permissions on it and, through relationships, on the tables they lead to. So a
+table is shared when both roles have equal permissions on it (select, insert,
+update and delete), and all of its relationships lead to shared tables
+('inheritedRoleSharing' computes the largest such set). Tables with remote
+relationships, relationships to native queries, or computed fields returning
+tables are not shared: their parsers depend on more than that. Only memoized
+parsers keyed by a shared table are reused ('isSharedTableKey'); any other key
+is built afresh, which is always correct.
+
+For permissions to compare equal, the combined select permission of a role with
+a single parent must not wrap the parent's filter in a one-element 'BoolOr'
+(see 'combinedSelPermInfoToSelPermInfo').
+
+A parent keeps only its memoized parsers of the tables it shares, evaluated, so
+that it doesn't keep the rest of its memo alive. The parent's rebuild is forced
+by the child's, if it hasn't happened yet: the rebuilds are lazy values in a
+map built with 'fixIO', each looking up its parent's.
+
+The eager build on apply, which checks for conflicts, doesn't share.
+-}
+
+-- | A value that isn't evaluated when its container is.
+data Deferred a = Deferred ~a
+
+-- | Whether a memoization key is the key of a table in a set (its source and
+-- name, possibly with a field name).
+isSharedTableKey :: (Typeable key) => HashSet (SourceName, TableName ('Postgres 'Vanilla)) -> key -> Bool
+isSharedTableKey sharedTables key
+  | Just table <- cast key = table `Set.member` sharedTables
+  | Just (source, table, _ :: G.Name) <- cast key = (source, table) `Set.member` sharedTables
+  | otherwise = False
+
+-- | When a role inherits from a single role, its parent and the tables whose
+-- parsers it can share with it: those on which both have the same
+-- permissions, and whose relationships only lead to such tables.
+--
+-- A table's parsers are a function of the source, the table and the role's
+-- permissions on it (and, through relationships, on other tables), so on such
+-- a table a role and its parent build the same parsers. Tables with remote
+-- relationships, relationships to native queries, or computed fields that
+-- return tables are left out, as their parsers depend on more than that.
+-- Only Postgres sources are considered.
+inheritedRoleSharing :: HashMap RoleName Role -> SourceCache -> RoleName -> Maybe (RoleName, HashSet (SourceName, TableName ('Postgres 'Vanilla)))
+inheritedRoleSharing roles sources role = do
+  Role _ (ParentRoles parents) <- HashMap.lookup role roles
+  [parent] <- pure $ toList parents
+  pure
+    ( parent,
+      Set.fromList
+        [ (_siName sourceInfo, table)
+        | anySourceInfo <- HashMap.elems sources,
+          Just (sourceInfo :: SourceInfo ('Postgres 'Vanilla)) <- [AB.unpackAnyBackend anySourceInfo],
+          table <- toList $ sharedTables parent (_siTables sourceInfo)
+        ]
+    )
+  where
+    sharedTables parent tables =
+      let candidates = HashMap.keysSet $ HashMap.filter (\tableInfo -> samePermissions parent tableInfo && all shareableField (fields tableInfo)) tables
+       in closure candidates
+      where
+        -- remove tables with a relationship to a table outside the set, until none is left
+        closure shared =
+          let shared' = Set.filter (\table -> all (`Set.member` shared) (maybe [] relationshipTargets (HashMap.lookup table tables))) shared
+           in if Set.size shared' == Set.size shared then shared else closure shared'
+        relationshipTargets tableInfo = [target | FIRelationship relInfo <- fields tableInfo, RelTargetTable target <- [riTarget relInfo]]
+
+    fields = HashMap.elems . _tciFieldInfoMap . _tiCoreInfo
+
+    shareableField :: FieldInfo ('Postgres 'Vanilla) -> Bool
+    shareableField = \case
+      FIRemoteRelationship _ -> False
+      FIRelationship relInfo -> case riTarget relInfo of
+        RelTargetTable _ -> True
+        _ -> False
+      FIComputedField computedFieldInfo -> case computedFieldReturnType @('Postgres 'Vanilla) (_cfiReturnType computedFieldInfo) of
+        ReturnsScalar _ -> True
+        _ -> False
+      FIColumn _ -> True
+
+    samePermissions parent tableInfo =
+      let permissions = _tiRolePermInfoMap tableInfo
+       in case (HashMap.lookup role permissions, HashMap.lookup parent permissions) of
+            (Nothing, Nothing) -> True
+            (Just own, Just parents') ->
+              _permSel own == _permSel parents'
+                && _permIns own == _permIns parents'
+                && _permUpd own == _permUpd parents'
+                && _permDel own == _permDel parents'
+            _ -> False
+
+-- | See Note [Building role parsers lazily]
+buildRoleContextLazily ::
+  (MonadIO m, MonadError QErr m) =>
+  RoleName ->
+  -- | the eager build
+  ExceptT QErr IO RoleContextValue ->
+  -- | the rebuild, on the role's first request
+  ExceptT QErr IO RoleContextValue ->
+  m RoleContextValue
+buildRoleContextLazily role eagerBuild build = do
+  (RoleContext eagerFrontend eagerBackend, errors, G.SchemaIntrospection eagerIntrospection) <-
+    liftEither =<< liftIO (runExceptT eagerBuild)
+  -- The rebuild skips the schema checks, which is only sound if it builds the
+  -- same schema as the eager build. Check that it has the same root fields: a
+  -- cheap test that the build is still a function of its inputs.
+  -- The shapes are evaluated in IO, so that they don't keep the eager parsers
+  -- alive.
+  eagerFrontendShape <- liftIO $ evaluate $ contextShape eagerFrontend
+  eagerBackendShape <- liftIO $ traverse (evaluate . contextShape) eagerBackend
+  rebuilt <-
+    liftIO $ unsafeInterleaveIO do
+      result <- runExceptT build
+      pure do
+        built@(RoleContext frontend backend, _, _) <- result
+        unless (contextShape frontend == eagerFrontendShape && fmap contextShape backend == eagerBackendShape)
+          $ throw500
+          $ "the rebuilt context of role "
+          <> roleNameToTxt role
+          <> " doesn't have the root fields of the eager build"
+        pure built
+  let missing :: Text -> Either QErr a
+      missing what = throw500 $ "the rebuilt context of role " <> roleNameToTxt role <> " has no " <> what
+      withRebuilt :: (RoleContext GQLContext -> Maybe GQLContext) -> (GQLContext -> Either QErr a) -> Either QErr a
+      withRebuilt select k = do
+        (context, _, _) <- rebuilt
+        maybe (missing "parser") k (select context)
+      standIn select eager =
+        GQLContext
+          { gqlQueryParser = \s -> withRebuilt select \c -> gqlQueryParser c s,
+            gqlQueryRootFieldNames = force (gqlQueryRootFieldNames eager),
+            gqlMutationParser = case gqlMutationParser eager of
+              Nothing -> Nothing
+              Just _ -> Just \s -> withRebuilt select \c -> maybe (missing "mutation parser") ($ s) (gqlMutationParser c),
+            gqlSubscriptionParser = case gqlSubscriptionParser eager of
+              Nothing -> Nothing
+              Just _ -> Just \s -> withRebuilt select \c -> maybe (missing "subscription parser") ($ s) (gqlSubscriptionParser c)
+          }
+  -- Evaluate everything we keep here, in IO: a pure binding could be inlined
+  -- into the result as a thunk that still points at the eager parsers.
+  liftIO do
+    frontend <- evaluate $ standIn (Just . _rctxDefault) eagerFrontend
+    backend <- traverse (evaluate . standIn _rctxBackend) eagerBackend
+    roleContext <- evaluate $ RoleContext frontend backend
+    introspection <-
+      if role == adminRoleName
+        then evaluate $ force eagerIntrospection
+        else pure $ either (const mempty) (\(_, _, G.SchemaIntrospection i) -> i) rebuilt
+    errors' <- evaluate errors
+    pure (roleContext, errors', G.SchemaIntrospection introspection)
+
 buildSchemaOptions ::
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   HashSet ExperimentalFeature ->
@@ -302,10 +572,78 @@ buildSchemaOptions
           removeEmptySubscriptionResponses
       }
 
+-- | The comparison expressions of every column type of every source, shared by
+-- all roles. Each source's are built, all at once, when a role first needs
+-- them; if that fails, every role builds its own.
+--
+-- They are built with a role that has no permissions: comparison expressions
+-- don't depend on the role. See Note [Sharing comparison expressions between
+-- roles] in Hasura.GraphQL.Schema.BoolExp.
+buildSharedComparisons ::
+  SchemaSampledFeatureFlags ->
+  SchemaOptions ->
+  SourceCache ->
+  IO SharedComparisons
+buildSharedComparisons sampledFeatureFlags schemaOptions =
+  traverse \sourceInfo ->
+    AB.dispatchAnyBackend @BackendSchema sourceInfo \(sourceInfo' :: SourceInfo b) ->
+      fmap (AB.mkAnyBackend @b . SharedSourceComparisons . fromRight mempty)
+        $ unsafeInterleaveIO
+        $ runExceptT
+        $ runMemoizeT
+        $ runSourceSchema sharedContext schemaOptions sourceInfo'
+        $ fmap HashMap.fromList
+        $ for (sourceColumnTypes sourceInfo') \columnType ->
+          (columnType,) <$> comparisonExps @b columnType
+  where
+    sharedContext =
+      SchemaContext
+        HasuraSchema
+        ignoreRemoteRelationship
+        (mkRoleNameSafe [NT.nonEmptyTextQQ|hasura-shared-comparison-expressions|])
+        sampledFeatureFlags
+        mempty
+
+    -- the types of the columns and scalar computed fields of a source's tables
+    sourceColumnTypes :: forall b. (BackendSchema b) => SourceInfo b -> [ColumnType b]
+    sourceColumnTypes sourceInfo =
+      Set.toList
+        $ Set.fromList
+          [ columnType
+          | tableInfo <- HashMap.elems $ _siTables sourceInfo,
+            fieldInfo <- HashMap.elems $ _tciFieldInfoMap $ _tiCoreInfo tableInfo,
+            columnType <- case fieldInfo of
+              FIColumn (SCIScalarColumn columnInfo) -> [ciType columnInfo]
+              FIComputedField computedFieldInfo
+                | ReturnsScalar scalarType <- computedFieldReturnType @b (_cfiReturnType computedFieldInfo) ->
+                    [ColumnScalar scalarType]
+              _ -> []
+          ]
+
+-- | What 'buildRoleContextLazily' checks the rebuild of a role's context has
+-- in common with the eager build: its root field names, and whether it has
+-- mutations and subscriptions. The fields are strict.
+data RoleContextShape = RoleContextShape [G.Name] Bool Bool
+  deriving (Eq)
+
+contextShape :: GQLContext -> RoleContextShape
+contextShape context =
+  RoleContextShape
+    (force $ gqlQueryRootFieldNames context)
+    (isJust $ gqlMutationParser context)
+    (isJust $ gqlSubscriptionParser context)
+
+-- | Whether to check a role's schema for conflicting type definitions, see
+-- Note [Building role parsers lazily].
+data SchemaChecks = CheckSchema | SkipSchemaChecks
+  deriving (Eq)
+
 -- | Build the @QueryHasura@ context for a given role.
 buildRoleContext ::
   forall m.
   (MonadError QErr m, MonadIO m) =>
+  SchemaChecks ->
+  SharedComparisons ->
   SchemaSampledFeatureFlags ->
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   SourceCache ->
@@ -318,7 +656,30 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContext checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext =
+  fst <$> buildRoleContextFrom noMemoizedParsers checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext
+
+-- | 'buildRoleContext', starting from parsers memoized before (see
+-- 'inheritedRoleSharing'), and returning the parsers it memoized.
+buildRoleContextFrom ::
+  forall m.
+  (MonadError QErr m, MonadIO m) =>
+  MemoizedParsers ->
+  SchemaChecks ->
+  SharedComparisons ->
+  SchemaSampledFeatureFlags ->
+  (SQLGenCtx, Options.InferFunctionPermissions) ->
+  SourceCache ->
+  HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
+  [ActionInfo] ->
+  AnnotatedCustomTypes ->
+  RoleName ->
+  Options.RemoteSchemaPermissions ->
+  Set.HashSet ExperimentalFeature ->
+  ApolloFederationStatus ->
+  Maybe SchemaRegistryContext ->
+  m (RoleContextValue, MemoizedParsers)
+buildRoleContextFrom initialParsers checks sharedComparisons sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -333,7 +694,8 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
           )
           role
           sampledFeatureFlags
-  runMemoizeT $ do
+          sharedComparisons
+  runMemoizeTFrom initialParsers $ do
     -- build all sources (`apolloFedTableParsers` contains all the parsers and
     -- type names, which are eligible for the `_Entity` Union)
     (sourcesQueryFields, sourcesMutationFrontendFields, sourcesMutationBackendFields, sourcesSubscriptionFields, apolloFedTableParsers) <-
@@ -378,12 +740,15 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
     -- information in the case of the admin role.
     !introspectionSchema <- do
       result <-
-        throwOnConflictingDefinitions
-          $ convertToSchemaIntrospection
-          <$> buildIntrospectionSchema
-            (P.parserType queryParserBackend)
-            (P.parserType <$> mutationParserBackend)
-            (P.parserType <$> subscriptionParser)
+        if checks == SkipSchemaChecks && isNothing mSchemaRegistryContext
+          then pure $ G.SchemaIntrospection mempty
+          else
+            throwOnConflictingDefinitions
+              $ convertToSchemaIntrospection
+              <$> buildIntrospectionSchema
+                (P.parserType queryParserBackend)
+                (P.parserType <$> mutationParserBackend)
+                (P.parserType <$> subscriptionParser)
       pure
         $
         -- TODO(nicuveo,sam): we treat the admin role differently in this function,
@@ -399,7 +764,8 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
               else G.SchemaIntrospection mempty
           Just _ -> result
 
-    void
+    when (checks == CheckSchema)
+      $ void
       . throwOnConflictingDefinitions
       $ buildIntrospectionSchema
         (P.parserType queryParserFrontend)
@@ -495,6 +861,7 @@ buildRelayRoleContext options sources actions customTypes role expFeatures schem
           ignoreRemoteRelationship
           role
           schemaSampledFeatureFlags
+          mempty
   runMemoizeT do
     -- build all sources, and the node root
     (node, fieldsList) <- do
@@ -640,6 +1007,7 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
           )
           fakeRole
           schemaSampledFeatureFlags
+          mempty
       -- chosen arbitrarily to be as improbable as possible
       fakeRole = mkRoleNameSafe [NT.nonEmptyTextQQ|MyNameIsOzymandiasKingOfKingsLookOnMyWorksYeMightyAndDespair|]
 
@@ -1007,7 +1375,7 @@ buildMutationFields mkRootFieldName scenario sourceInfo tables (takeExposedAs FE
 --   for queries, mutations and subscriptions built in.
 buildQueryParser ::
   forall n m.
-  (MonadMemoize m, MonadError QErr m, MonadParse n) =>
+  (MonadMemoize m, MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   [P.FieldParser n (G.SchemaIntrospection -> QueryRootField UnpreparedValue)] ->
   [(RemoteSchemaName, P.FieldParser n (NamespacedField (RemoteSchemaRootField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)))] ->
@@ -1051,7 +1419,7 @@ parseBuildIntrospectionSchema q m s =
 
 queryWithIntrospectionHelper ::
   forall n m.
-  (MonadMemoize m, MonadParse n, MonadError QErr m) =>
+  (MonadMemoize m, P.IsParse n, MonadError QErr m) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   Maybe (Parser 'Output n (RootFieldMap (MutationRootField UnpreparedValue))) ->
   Maybe (Parser 'Output n (RootFieldMap (QueryRootField UnpreparedValue))) ->
@@ -1083,7 +1451,7 @@ queryWithIntrospectionHelper basicQueryFP mutationP subscriptionP = do
 
 queryRootFromFields ::
   forall n m.
-  (MonadError QErr m, MonadParse n) =>
+  (MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   m (Parser 'Output n (RootFieldMap (QueryRootField UnpreparedValue)))
 queryRootFromFields fps =
@@ -1091,7 +1459,7 @@ queryRootFromFields fps =
 
 buildMutationParser ::
   forall n m.
-  (MonadMemoize m, MonadError QErr m, MonadParse n) =>
+  (MonadMemoize m, MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (MutationRootField UnpreparedValue))] ->
   [(RemoteSchemaName, P.FieldParser n (NamespacedField (RemoteSchemaRootField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)))] ->
   [P.FieldParser n (MutationRootField UnpreparedValue)] ->
@@ -1110,7 +1478,7 @@ buildMutationParser mutationFields remoteFields actionFields = do
 -- asynchronous actions.
 buildSubscriptionParser ::
   forall n m.
-  (MonadMemoize m, MonadError QErr m, MonadParse n) =>
+  (MonadMemoize m, MonadError QErr m, P.IsParse n) =>
   [P.FieldParser n (NamespacedField (QueryRootField UnpreparedValue))] ->
   [(RemoteSchemaName, P.FieldParser n (NamespacedField (RemoteSchemaRootField (RemoteRelationshipField UnpreparedValue) RemoteSchemaVariable)))] ->
   [P.FieldParser n (QueryRootField UnpreparedValue)] ->
@@ -1141,7 +1509,7 @@ safeSelectionSet name description fields =
 -- | Apply a source's customization options to a list of its fields.
 customizeFields ::
   forall f n db remote action.
-  (Functor f, MonadParse n) =>
+  (Functor f, P.IsParse n) =>
   ResolvedSourceCustomization ->
   MkTypename ->
   f [FieldParser n (RootField db remote action RFRawPayload)] ->

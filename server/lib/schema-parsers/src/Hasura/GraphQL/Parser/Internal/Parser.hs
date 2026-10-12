@@ -104,7 +104,7 @@ nullable = fmap nullableToMaybe . nullableExact
 -- variable value is absent without default.  See GraphQL spec June 2018 section
 -- 2.9.5.
 nullableExact :: forall origin k m a. (MonadParse m, 'Input <: k) => Parser origin k m a -> Parser origin k m (NullableInput a)
-nullableExact parser =
+nullableExact ~(Parser innerType innerParser) =
   gcastWith
     (inputParserInput @k)
     Parser
@@ -113,11 +113,16 @@ nullableExact parser =
           peelVariableWith False gType >=> \case
             Just (JSONValue J.Null) -> pure $ NullableInputNull gType
             Just (GraphQLValue VNull) -> pure $ NullableInputNull gType
-            Just value -> NullableInputValue <$> pParser parser value
+            Just value -> NullableInputValue <$> innerParser value
             Nothing -> pure NullableInputAbsent
       }
   where
-    schemaType = nullableType $ pType parser
+    -- Lazily match the inner parser so the closure keeps only its parse
+    -- function, not the whole record: once the record is evaluated the GC
+    -- short-circuits the selector thunks. The match must stay lazy because the
+    -- inner parser may be knot-tied (e.g. a bool_exp's `_not` field), see
+    -- Note [Tying the knot] in Hasura.GraphQL.Parser.Class.
+    schemaType = nullableType innerType
     gType = toGraphQLType schemaType
 
 -- | Decorate a schema field as NON_NULL
@@ -259,13 +264,36 @@ selectionSetObject ::
   [Parser origin 'Output m b] ->
   Parser origin 'Output m (InsOrdHashMap.InsOrdHashMap Name (ParsedSelection a))
 {-# INLINE selectionSetObject #-}
-selectionSetObject name description parsers implementsInterfaces =
+selectionSetObject name description parsers =
+  selectionSetObjectWith name description (map fDefinition parsers) (`HashMap.lookup` parserMap)
+  where
+    parserMap =
+      parsers
+        & map (\FieldParser {fDefinition, fParser} -> (getName fDefinition, fParser))
+        & HashMap.fromList
+
+-- | A variant of 'selectionSetObject' that is given the definitions of its
+-- fields, which are only needed for introspection and so can be a thunk, and
+-- looks up the parser of a field by its name.
+selectionSetObjectWith ::
+  (MonadParse m) =>
+  Name ->
+  Maybe Description ->
+  -- | the definitions of the fields of this object, see 'selectionSetObject'
+  [Definition origin (FieldInfo origin)] ->
+  -- | the parser of a field of this object
+  (Name -> Maybe (Field NoFragments Variable -> m a)) ->
+  -- | interfaces implemented by this object
+  [Parser origin 'Output m b] ->
+  Parser origin 'Output m (InsOrdHashMap.InsOrdHashMap Name (ParsedSelection a))
+{-# INLINE selectionSetObjectWith #-}
+selectionSetObjectWith name description fieldDefinitions lookupParser implementsInterfaces =
   Parser
     { pType =
         TNamed Nullable $
           Definition name description Nothing [] $
             TIObject $
-              ObjectInfo (map fDefinition parsers) interfaces,
+              ObjectInfo fieldDefinitions interfaces,
       pParser = \input -> withKey (Key "selectionSet") do
         -- Not all fields have a selection set, but if they have one, it
         -- must contain at least one field. The GraphQL parser returns a
@@ -292,7 +320,7 @@ selectionSetObject name description parsers implementsInterfaces =
             if
               | _fName == $$(litName "__typename") ->
                   pure $ SelectTypename $ getName name
-              | Just parser <- HashMap.lookup _fName parserMap ->
+              | Just parser <- lookupParser _fName ->
                   withKey (Key (K.fromText (unName _fName))) $
                     SelectField <$> parser selectionField
               | otherwise ->
@@ -305,10 +333,6 @@ selectionSetObject name description parsers implementsInterfaces =
         pure $ InsOrdHashMap.fromList parsedFields
     }
   where
-    parserMap =
-      parsers
-        & map (\FieldParser {fDefinition, fParser} -> (getName fDefinition, fParser))
-        & HashMap.fromList
     interfaces = mapMaybe (getInterfaceInfo . pType) implementsInterfaces
     parsedInterfaceNames = fmap getName interfaces
 
@@ -398,19 +422,8 @@ rawSelection ::
 {-# INLINE rawSelection #-}
 rawSelection name description argumentsParser resultParser =
   FieldParser
-    { fDefinition =
-        Definition name description Nothing [] $
-          FieldInfo (ifDefinitions argumentsParser) (pType resultParser),
-      fParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
-        unless (null _fSelectionSet) $
-          parseError "unexpected subselection set for non-object field"
-        -- check for extraneous arguments here, since the InputFieldsParser just
-        -- handles parsing the fields it cares about
-        for_ (HashMap.keys _fArguments) \argumentName ->
-          unless (argumentName `S.member` argumentNames) $
-            parseError $
-              toErrorValue name <> " has no argument named " <> toErrorValue argumentName
-        fmap (_fAlias,_fArguments,) $ withKey (Key "args") $ ifParser argumentsParser $ GraphQLValue <$> _fArguments
+    { fDefinition = selectionDefinition name description argumentsParser resultParser,
+      fParser = rawSelectionParse argumentNames name argumentsParser
     }
   where
     -- If  `ifDefinitions` is empty, then not forcing this will lead to
@@ -419,7 +432,45 @@ rawSelection name description argumentsParser resultParser =
     -- Forcing it will lead to the statically allocated empty set.
     -- If it's non-empty then it will be forced the first time the parser
     -- is used so might as well force it when constructing the parser.
-    !argumentNames = S.fromList (dName <$> ifDefinitions argumentsParser)
+    !argumentNames = selectionArgumentNames argumentsParser
+
+-- | The definition of the field that 'selection' makes.
+selectionDefinition ::
+  Name ->
+  Maybe Description ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Both m b ->
+  Definition origin (FieldInfo origin)
+selectionDefinition name description argumentsParser resultParser =
+  Definition name description Nothing [] $
+    FieldInfo (ifDefinitions argumentsParser) (pType resultParser)
+
+-- | The names of the arguments of a 'selection'.
+selectionArgumentNames :: InputFieldsParser origin m a -> S.HashSet Name
+selectionArgumentNames argumentsParser = S.fromList (dName <$> ifDefinitions argumentsParser)
+
+-- | Parse a field the way the parser of @'rawSelection' name _
+-- argumentsParser _@ does, given the names of the arguments
+-- ('selectionArgumentNames'): so that fields of the same type can share
+-- everything but their name.
+rawSelectionParse ::
+  (MonadParse m) =>
+  S.HashSet Name ->
+  Name ->
+  InputFieldsParser origin m a ->
+  Field NoFragments Variable ->
+  m (Maybe Name, HashMap Name (Value Variable), a)
+{-# INLINE rawSelectionParse #-}
+rawSelectionParse argumentNames name argumentsParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
+  unless (null _fSelectionSet) $
+    parseError "unexpected subselection set for non-object field"
+  -- check for extraneous arguments here, since the InputFieldsParser just
+  -- handles parsing the fields it cares about
+  for_ (HashMap.keys _fArguments) \argumentName ->
+    unless (argumentName `S.member` argumentNames) $
+      parseError $
+        toErrorValue name <> " has no argument named " <> toErrorValue argumentName
+  fmap (_fAlias,_fArguments,) $ withKey (Key "args") $ ifParser argumentsParser $ GraphQLValue <$> _fArguments
 
 -- | Builds a 'FieldParser' for a field that takes a subselection set, i.e. a
 -- field that returns an object.
@@ -457,22 +508,45 @@ rawSubselection ::
 {-# INLINE rawSubselection #-}
 rawSubselection name description argumentsParser bodyParser =
   FieldParser
-    { fDefinition =
-        Definition name description Nothing [] $
-          FieldInfo (ifDefinitions argumentsParser) (pType bodyParser),
-      fParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
-        -- check for extraneous arguments here, since the InputFieldsParser just
-        -- handles parsing the fields it cares about
-        for_ (HashMap.keys _fArguments) \argumentName ->
-          unless (argumentName `S.member` argumentNames) $
-            parseError $
-              toErrorValue name <> " has no argument named " <> toErrorValue argumentName
-        (_fAlias,_fArguments,,)
-          <$> withKey (Key "args") (ifParser argumentsParser $ GraphQLValue <$> _fArguments)
-          <*> pParser bodyParser _fSelectionSet
+    { fDefinition = subselectionDefinition name description argumentsParser bodyParser,
+      fParser = rawSubselectionParse argumentNames name argumentsParser bodyParser
     }
   where
-    argumentNames = S.fromList (dName <$> ifDefinitions argumentsParser)
+    argumentNames = selectionArgumentNames argumentsParser
+
+-- | The definition of the field that 'subselection' makes.
+subselectionDefinition ::
+  Name ->
+  Maybe Description ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Output m b ->
+  Definition origin (FieldInfo origin)
+subselectionDefinition name description argumentsParser bodyParser =
+  Definition name description Nothing [] $
+    FieldInfo (ifDefinitions argumentsParser) (pType bodyParser)
+
+-- | Parse a field the way the parser of @'rawSubselection' name _
+-- argumentsParser bodyParser@ does, given the names of the arguments
+-- ('selectionArgumentNames').
+rawSubselectionParse ::
+  (MonadParse m) =>
+  S.HashSet Name ->
+  Name ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Output m b ->
+  Field NoFragments Variable ->
+  m (Maybe Name, HashMap Name (Value Variable), a, b)
+{-# INLINE rawSubselectionParse #-}
+rawSubselectionParse argumentNames name argumentsParser bodyParser = \Field {_fAlias, _fArguments, _fSelectionSet} -> do
+  -- check for extraneous arguments here, since the InputFieldsParser just
+  -- handles parsing the fields it cares about
+  for_ (HashMap.keys _fArguments) \argumentName ->
+    unless (argumentName `S.member` argumentNames) $
+      parseError $
+        toErrorValue name <> " has no argument named " <> toErrorValue argumentName
+  (_fAlias,_fArguments,,)
+    <$> withKey (Key "args") (ifParser argumentsParser $ GraphQLValue <$> _fArguments)
+    <*> pParser bodyParser _fSelectionSet
 
 -- | A shorthand for a 'selection' that takes no arguments.
 selection_ ::

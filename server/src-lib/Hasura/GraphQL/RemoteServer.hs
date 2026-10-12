@@ -128,6 +128,7 @@ stitchRemoteSchema schemaSampledFeatureFlags rawIntrospectionResult rsDef@Valida
         ignoreRemoteRelationship
         adminRoleName
         schemaSampledFeatureFlags
+        mempty
 
 -- | Sends a GraphQL query to the given server.
 execRemoteGQ ::

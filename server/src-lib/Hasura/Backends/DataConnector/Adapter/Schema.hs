@@ -651,7 +651,7 @@ tableArgs' tableInfo = do
     <*> GS.S.tableOffsetArg
 
 countTypeInput' ::
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Maybe (P.Parser 'P.Both n (DC.ColumnName, IR.AnnRedactionExpUnpreparedValue 'DataConnector)) ->
   P.InputFieldsParser n (IR.CountDistinct -> DC.CountAggregate (IR.UnpreparedValue 'DataConnector))
 countTypeInput' = \case

@@ -1,12 +1,20 @@
+-- safety for unsafePerformIO below
+{-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
+
 module Hasura.GC
   ( ourIdleGC,
+    requestHeapShrink,
+    shrinkHeapOnRequest,
   )
 where
 
 import Control.Concurrent.Extended qualified as C
+import Control.Concurrent.STM qualified as STM
+import Data.SerializableBlob qualified as SB
 import GHC.Stats
 import Hasura.Logging
 import Hasura.Prelude
+import System.IO.Unsafe (unsafePerformIO)
 import System.Mem (performMajorGC, performMinorGC)
 
 -- | The RTS's idle GC doesn't work for us:
@@ -84,3 +92,62 @@ ourIdleGC (Logger logger) idleInterval minGCInterval maxNoGCInterval =
         | otherwise -> do
             C.sleep idleInterval
             go gcs major_gcs False timerSinceLastMajorGC
+
+-- | Ask 'shrinkHeapOnRequest' to hand the memory left over from a schema cache
+-- rebuild back to the OS. Cheap and idempotent: requests made while a shrink
+-- is pending or running coalesce into one.
+requestHeapShrink :: IO ()
+requestHeapShrink = STM.atomically $ STM.writeTVar heapShrinkRequested True
+
+heapShrinkRequested :: STM.TVar Bool
+{-# NOINLINE heapShrinkRequested #-}
+heapShrinkRequested = unsafePerformIO $ STM.newTVarIO False
+
+-- | Return the memory a schema cache rebuild leaves behind.
+--
+-- While a rebuild runs, the old and the new schema cache are both live, so the
+-- heap grows to fit both. Once the old one is dropped the RTS should give the
+-- surplus back, but it only does so gradually: the memory it keeps after a
+-- major GC is scaled by @-F@, and that factor decays (at the rate set by
+-- @-Fd@) only across consecutive major GCs that were not triggered by
+-- allocation. Under live traffic most major GCs are allocation-triggered and
+-- reset the decay, so after a metadata apply the heap stays sized for the
+-- rebuild's peak indefinitely: roughly 4x the live data instead of 2x.
+--
+-- So after each schema cache swap, run spaced major GCs ourselves until the
+-- RTS stops returning memory (or 'maxGCs' is reached). Each one is a full
+-- stop-the-world collection, hence the spacing.
+shrinkHeapOnRequest ::
+  Logger Hasura ->
+  -- | Pause between consecutive forced major GCs
+  DiffTime ->
+  -- | Upper bound on forced major GCs per shrink
+  Int ->
+  IO void
+shrinkHeapOnRequest (Logger logger) spacing maxGCs = forever do
+  STM.atomically do
+    STM.readTVar heapShrinkRequested >>= STM.check
+    STM.writeTVar heapShrinkRequested False
+  before <- memInUse
+  after <- go maxGCs before
+  logger
+    $ UnstructuredLog LevelInfo
+    $ SB.fromText
+    $ "Heap shrink after schema cache update: "
+    <> tshow (before `div` mib)
+    <> " MiB -> "
+    <> tshow (after `div` mib)
+    <> " MiB in use"
+  where
+    mib = 1024 * 1024
+    memInUse = gcdetails_mem_in_use_bytes . gc <$> getRTSStats
+    go 0 current = pure current
+    go n current = do
+      C.sleep spacing
+      performMajorGC
+      next <- memInUse
+      -- The RTS returns whole megablocks only; once a GC frees less than a
+      -- couple of them the decay has bottomed out.
+      if next + 2 * mib > current
+        then pure next
+        else go (n - 1) next

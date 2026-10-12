@@ -30,6 +30,8 @@ module Hasura.GraphQL.Schema.Backend
     BackendNativeQuerySelectSchema (..),
     BackendUpdateOperatorsSchema (..),
     MonadBuildSchema,
+    selectTableField,
+    selectTableAggregateField,
 
     -- * Auxiliary Types
     ComparisonExp,
@@ -44,6 +46,7 @@ import Data.Text.Casing (GQLNameIdentifier)
 import Hasura.Function.Cache
 import Hasura.GraphQL.ApolloFederation (ApolloFederationParserFunction)
 import Hasura.GraphQL.Schema.Common
+import Hasura.GraphQL.Schema.NamedField (NamedField, namedFieldParser)
 import Hasura.GraphQL.Schema.Parser hiding (Type)
 import Hasura.LogicalModel.Cache (LogicalModelInfo)
 import Hasura.NativeQuery.Cache (NativeQueryInfo)
@@ -240,7 +243,7 @@ class
 
   -- | Parser for arguments on scalar fields in a selection set
   scalarSelectionArgumentsParser ::
-    (MonadParse n) =>
+    (IsParse n) =>
     ColumnType b ->
     InputFieldsParser n (Maybe (ScalarSelectionArguments b))
 
@@ -257,7 +260,7 @@ class
   -- | The input fields parser, for "count" aggregate field, yielding a function
   -- which generates @'CountType b' from optional "distinct" field value
   countTypeInput ::
-    (MonadParse n) =>
+    (IsParse n) =>
     Maybe (Parser 'Both n (Column b, AnnRedactionExpUnpreparedValue b)) ->
     InputFieldsParser n (CountDistinct -> CountType b (UnpreparedValue b))
 
@@ -293,25 +296,19 @@ class (Backend b) => BackendTableSelectSchema (b :: BackendType) where
     TableInfo b ->
     SchemaT r m (Maybe (Parser 'Output n (AnnotatedFields b)))
 
+  -- | The field that selects from a table, whatever its name: see
+  -- 'selectTableField'.
   selectTable ::
     (MonadBuildSourceSchema b r m n) =>
-    -- | table info
     TableInfo b ->
-    -- | field display name
-    G.Name ->
-    -- | field description, if any
-    Maybe G.Description ->
-    SchemaT r m (Maybe (FieldParser n (SelectExp b)))
+    SchemaT r m (Maybe (NamedField n (SelectExp b)))
 
+  -- | The field that selects aggregates from a table, whatever its name: see
+  -- 'selectTableAggregateField'.
   selectTableAggregate ::
     (MonadBuildSourceSchema b r m n) =>
-    -- | table info
     TableInfo b ->
-    -- | field display name
-    G.Name ->
-    -- | field description, if any
-    Maybe G.Description ->
-    SchemaT r m (Maybe (FieldParser n (AggSelectExp b)))
+    SchemaT r m (Maybe (NamedField n (AggSelectExp b)))
 
 type ComparisonExp b = OpExpG b (UnpreparedValue b)
 
@@ -435,3 +432,22 @@ class (Backend b) => BackendUpdateOperatorsSchema (b :: BackendType) where
 --
 -- In other words, It is still the case that if you don't clean your room
 -- you'll be living in a mess.
+
+-- | The field with the given name and description that selects from a table.
+selectTableField ::
+  (BackendTableSelectSchema b, MonadBuildSourceSchema b r m n) =>
+  TableInfo b ->
+  G.Name ->
+  Maybe G.Description ->
+  SchemaT r m (Maybe (FieldParser n (SelectExp b)))
+selectTableField tableInfo name description = fmap (namedFieldParser name description) <$> selectTable tableInfo
+
+-- | The field with the given name and description that selects aggregates
+-- from a table.
+selectTableAggregateField ::
+  (BackendTableSelectSchema b, MonadBuildSourceSchema b r m n) =>
+  TableInfo b ->
+  G.Name ->
+  Maybe G.Description ->
+  SchemaT r m (Maybe (FieldParser n (AggSelectExp b)))
+selectTableAggregateField tableInfo name description = fmap (namedFieldParser name description) <$> selectTableAggregate tableInfo

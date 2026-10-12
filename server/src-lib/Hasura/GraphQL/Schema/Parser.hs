@@ -18,7 +18,8 @@
 -- now-fixed notion of "origin".  So most modules in the HGE codebase should
 -- import this module rather than 'Hasura.GraphQL.Parser'.
 module Hasura.GraphQL.Schema.Parser
-  ( -- The pattern is as follows:
+  ( IsParse,
+    -- The pattern is as follows:
     -- 1. Export a type synonym which has the origin type parameter set to
     --    'MetadataObjId'
     FieldParser,
@@ -97,6 +98,14 @@ import Hasura.Prelude
 import Hasura.RQL.Types.Metadata.Object
 import Language.Haskell.TH qualified as TH
 
+-- | The parse monad the schema is built for. Schema construction is written
+-- against an abstract @n@, but it is only ever run at 'P.Parse'. Constraining
+-- with @MonadParse n@ makes every parser closure capture the @MonadParse@,
+-- @Monad@, @Applicative@ and @Functor@ dictionaries for @n@ (about 16% of the
+-- schema cache's heap), and the specialiser cannot reach the builders through
+-- 'BackendSchema' dispatch. Fixing @n@ resolves the instances statically.
+type IsParse n = (n ~ P.Parse)
+
 type FieldParser = P.FieldParser MetadataObjId
 
 type Parser = P.Parser MetadataObjId
@@ -149,7 +158,7 @@ toQErr = either (throwError . parseErrorToQErr) pure
     parseErrorCodeToCode P.NotSupported = NotSupported
 
 memoizeOn ::
-  (Memoize.MonadMemoize m, Ord a, Typeable a, Typeable p, MonadParse n, Typeable b) =>
+  (Memoize.MonadMemoize m, Ord a, Typeable a, Typeable p, IsParse n, Typeable b) =>
   -- | A unique name used to identify the function being memoized. There isn’t
   -- really any metaprogramming going on here, we just use a Template Haskell
   -- 'TH.Name' as a convenient source for a static, unique identifier.
@@ -167,7 +176,7 @@ memoizeOn = Memoize.memoizeOn
 -- | A wrapper around 'memoizeOn' that memoizes a function by using its argument
 -- as the key.
 memoize ::
-  (Memoize.MonadMemoize m, Ord a, Typeable a, Typeable p, MonadParse n, Typeable b) =>
+  (Memoize.MonadMemoize m, Ord a, Typeable a, Typeable p, IsParse n, Typeable b) =>
   TH.Name ->
   -- | A function generating something to be memoized. 'p' is intended to be
   -- either 'Parser k' or 'FieldParser'.

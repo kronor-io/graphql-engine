@@ -221,3 +221,21 @@ args:
     role_set:
       - non_paying_user
       - guest
+
+# A role inheriting from a single role, overriding one of its permissions: it
+# shares its parent's parsers of the other tables.
+- type: add_inherited_role
+  args:
+    role_name: author_published_articles
+    role_set:
+      - author
+
+- type: pg_create_select_permission
+  args:
+    table: articles
+    role: author_published_articles
+    permission:
+      columns:
+        - title
+      filter:
+        is_published: true

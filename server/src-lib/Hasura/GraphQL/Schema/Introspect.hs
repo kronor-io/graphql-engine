@@ -7,7 +7,7 @@ module Hasura.GraphQL.Schema.Introspect
   )
 where
 
-import Data.Aeson qualified as Aeson
+import Data.Aeson qualified as J
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.List.NonEmpty qualified as NE
@@ -233,7 +233,7 @@ buildIntrospectionSchema queryRoot' mutationRoot' subscriptionRoot' = do
 -- | Generate a __type introspection parser
 typeIntrospection ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   FieldParser n (Schema -> EncJSON)
 {-# INLINE typeIntrospection #-}
 typeIntrospection = do
@@ -252,7 +252,7 @@ typeIntrospection = do
 -- | Generate a __schema introspection parser.
 schema ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   FieldParser n (Schema -> EncJSON)
 {-# INLINE schema #-}
 schema = P.subselection_ GName.___schema Nothing schemaSet
@@ -287,7 +287,7 @@ data SomeType = forall k. SomeType (P.Type k)
 
 typeField ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Output n (SomeType -> EncJSON)
 typeField =
   let includeDeprecated :: P.InputFieldsParser n Bool
@@ -430,7 +430,7 @@ type __InputValue {
 -}
 inputValue ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Output n (P.Definition P.InputFieldInfo -> EncJSON)
 inputValue =
   let name :: FieldParser n (P.Definition P.InputFieldInfo -> EncJSON)
@@ -474,7 +474,7 @@ type __EnumValue {
 -}
 enumValue ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Output n (P.Definition P.EnumValueInfo -> EncJSON)
 enumValue =
   let name :: FieldParser n (P.Definition P.EnumValueInfo -> EncJSON)
@@ -520,7 +520,7 @@ enum __TypeKind {
 -}
 typeKind ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Both n ()
 typeKind =
   P.enum
@@ -552,7 +552,7 @@ type __Field {
 -}
 fieldField ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Output n (P.Definition P.FieldInfo -> EncJSON)
 fieldField =
   let name :: FieldParser n (P.Definition P.FieldInfo -> EncJSON)
@@ -607,7 +607,7 @@ type __Directive {
 
 directiveSet ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Output n (P.DirectiveInfo -> EncJSON)
 directiveSet =
   let name :: FieldParser n (P.DirectiveInfo -> EncJSON)
@@ -663,7 +663,7 @@ type __Schema {
 -}
 schemaSet ::
   forall n.
-  (MonadParse n) =>
+  (P.IsParse n) =>
   Parser 'Output n (Schema -> EncJSON)
 {-# INLINE schemaSet #-}
 schemaSet =
@@ -732,4 +732,4 @@ nameAsEncJSON :: (P.HasName a) => a -> EncJSON
 nameAsEncJSON = encJFromJValue . G.unName . P.getName
 
 encJNull :: EncJSON
-encJNull = encJFromJValue Aeson.Null
+encJNull = encJFromJValue J.Null
