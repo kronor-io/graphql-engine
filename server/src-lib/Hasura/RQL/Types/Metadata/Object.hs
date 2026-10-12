@@ -266,7 +266,10 @@ moiName objectId =
 
 data MetadataObject = MetadataObject
   { _moId :: MetadataObjId,
-    _moDefinition :: Value
+    -- | Lazy: it is only needed to report the object, if it is inconsistent,
+    -- and computing it eagerly keeps a JSON copy of every object's metadata in
+    -- the schema cache (e.g. each remote schema permission's SDL, printed).
+    _moDefinition :: ~Value
   }
   deriving (Show, Eq, Ord, Generic)
 
