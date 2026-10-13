@@ -4,6 +4,52 @@
 
 ### Added
 
+- The bee artifact client optionally authenticates requests using a projected
+  Kubernetes service-account token. Set `ARTIFACTS_AUTH_TOKEN_FILE` to enable;
+  the token is read eagerly at startup and refreshed before expiry. When unset,
+  requests are unauthenticated and behavior is unchanged.
+
+### Changed
+
+### Fixed
+
+- Expose models with arguments in the default SQL schema as table-valued
+  functions under their model names, and apply model-to-connector argument
+  mappings when executing them through relational query pushdown.
+
+### Security
+
+- Bump dependencies to clear `cargo audit` findings: `h2` 0.4.15 → 0.4.16
+  (RUSTSEC-2026-0258, unbounded empty DATA frames / DoS), `event-listener` 5.4.1
+  → 5.4.2 (RUSTSEC-2026-0221 unsoundness), and `spin` 0.9.8 → 0.9.9 (yanked
+  release). Lockfile-only patch updates; no source or public API changes.
+
+## [v2026.07.15]
+
+- No changes
+
+## [v2026.06.10]
+
+### Added
+
+- Add `docker-env-loader` Nix flake outputs that produce env-loader variants of
+  each Docker image (e.g.
+  `.#targets.x86_64-linux.multitenant-engine.x86_64-linux.docker-env-loader`).
+  The variants reuse the same Rust binary derivation as the regular `docker`
+  output and wrap it with a vendored entrypoint script that reads
+  `/secrets/*.json` into the environment before exec'ing the binary. This
+  replaces the per-service `Dockerfile_EnvLoader` workflow (see #2502) with the
+  Nix-based build pipeline that the rest of the images use. The
+  `cloud-docker-images` workflow now publishes both the regular and
+  `-env-loader` images for every target.
+
+- Publish floating `:main` and `:main-env-loader` tags for the
+  `v3-metadata-build-service` and `v3-engine-multitenant` cloud Docker images
+  when built from the `main` branch. The tags are registry-side manifest aliases
+  (created via `docker buildx imagetools create`) so they do not re-upload image
+  layers; they give self-hosted release automation a stable pointer to the
+  latest `main`-branch build.
+
 ### Changed
 
 ### Fixed
@@ -429,9 +475,7 @@ The plugin receives a request body with the following structure:
       "x-hasura-user-id": "1"
     }
   },
-  "ndcRequest": {
-    /* The NDC request if configured */
-  },
+  "ndcRequest": {/* The NDC request if configured */},
   "dataConnectorName": "qualified.connector.name",
   "operationType": "query|queryExplain|mutation|mutationExplain",
   "ndcVersion": "v0.1.x|v0.2.x"
@@ -489,12 +533,8 @@ The plugin receives a request body with the following structure:
       "x-hasura-user-id": "1"
     }
   },
-  "ndcRequest": {
-    /* The original NDC request if configured */
-  },
-  "ndcResponse": {
-    /* The NDC response if configured */
-  },
+  "ndcRequest": {/* The original NDC request if configured */},
+  "ndcResponse": {/* The NDC response if configured */},
   "dataConnectorName": "qualified.connector.name",
   "operationType": "query|queryExplain|mutation|mutationExplain",
   "ndcVersion": "v0.1.x|v0.2.x"
@@ -2191,7 +2231,9 @@ Initial release.
 
 <!-- end -->
 
-[Unreleased]: https://github.com/hasura/v3-engine/compare/v2026.04.23...HEAD
+[Unreleased]: https://github.com/hasura/v3-engine/compare/v2026.07.15...HEAD
+[v2026.07.15]: https://github.com/hasura/v3-engine/releases/tag/v2026.07.15
+[v2026.06.10]: https://github.com/hasura/v3-engine/releases/tag/v2026.06.10
 [v2026.04.23]: https://github.com/hasura/v3-engine/releases/tag/v2026.04.23
 [v2026.03.25]: https://github.com/hasura/v3-engine/releases/tag/v2026.03.25
 [v2026.03.10]: https://github.com/hasura/v3-engine/releases/tag/v2026.03.10

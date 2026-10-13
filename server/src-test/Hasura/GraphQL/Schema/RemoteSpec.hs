@@ -142,7 +142,6 @@ buildQueryParsers introspection customizer = do
           HasuraSchema
           ignoreRemoteRelationship
           adminRoleName
-          (SchemaSampledFeatureFlags [])
           mempty
   RemoteSchemaParser query _ _ <-
     runError

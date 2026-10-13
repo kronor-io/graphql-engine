@@ -26,6 +26,7 @@ import Control.Arrow.Extended
 import Control.Concurrent.STM qualified as STM
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.Trans.Control (MonadBaseControl)
+import Data.Char (toLower)
 import Data.Environment qualified as E
 import Data.HashSet qualified as Set
 import Data.UUID (UUID)
@@ -38,7 +39,6 @@ import Hasura.Eventing.Common (LockedEventsCtx)
 import Hasura.Eventing.EventTrigger
 import Hasura.GraphQL.Execute.Subscription.Options
 import Hasura.GraphQL.Execute.Subscription.State qualified as ES
-import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags, sampleFeatureFlags)
 import Hasura.Incremental qualified as Inc
 import Hasura.Logging qualified as L
 import Hasura.Prelude
@@ -104,7 +104,7 @@ data RebuildableAppContext impl = RebuildableAppContext
     _racRebuild ::
       Inc.Rule
         (ReaderT (L.Logger L.Hasura, HTTP.Manager) (ExceptT QErr IO))
-        (ServeOptions impl, E.Environment, InvalidationKeys, CheckFeatureFlag)
+        (ServeOptions impl, E.Environment, InvalidationKeys)
         AppContext
   }
 
@@ -122,6 +122,7 @@ data AppEnv = AppEnv
     appEnvEnableMaintenanceMode :: MaintenanceMode (),
     appEnvLoggingSettings :: LoggingSettings,
     appEnvEventingMode :: EventingMode,
+    appEnvEventProcessingMode :: EventProcessingMode,
     appEnvEnableReadOnlyMode :: ReadOnlyMode,
     appEnvServerMetrics :: ServerMetrics,
     appEnvShutdownLatch :: ShutdownLatch,
@@ -134,20 +135,20 @@ data AppEnv = AppEnv
     appEnvTxIso :: PG.TxIsolation,
     appEnvConsoleAssetsDir :: Maybe Text,
     appEnvConsoleSentryDsn :: Maybe Text,
+    appEnvDisableAdminSecret :: Bool,
     appEnvConnectionOptions :: WebSockets.ConnectionOptions,
     appEnvWebSocketKeepAlive :: KeepAliveDelay,
     appEnvWebSocketConnectionInitTimeout :: WSConnectionInitTimeout,
+    appEnvWebSocketQueueSize :: Refined Positive Int,
     appEnvGracefulShutdownTimeout :: Refined NonNegative Seconds,
     -- TODO: Move this to `AppContext`. We are leaving this for now as this cannot be changed directly
     -- by the user on the cloud dashboard and will also require a refactor in HasuraPro/App.hs
     -- as this thread is initialised there before creating the `AppStateRef`. But eventually we need
     -- to do it for the Enterprise version.
     appEnvSchemaPollInterval :: OptionalInterval,
-    appEnvCheckFeatureFlag :: CheckFeatureFlag,
     appEnvLicenseKeyCache :: Maybe (CredentialCache AgentLicenseKey),
     appEnvMaxTotalHeaderLength :: Int,
     appEnvMaxRequestBodyLength :: Int,
-    appEnvTriggersErrorLogLevelStatus :: TriggersErrorLogLevelStatus,
     appEnvAsyncActionsFetchBatchSize :: Int,
     appEnvPersistedQueries :: PersistedQueriesState,
     appEnvPersistedQueriesTtl :: Int,
@@ -157,7 +158,8 @@ data AppEnv = AppEnv
     appEnvInvalidTokens :: STM.TVar (Set.HashSet UUID),
     appEnvTracer :: OpenTelemetry.Tracer,
     appEnvWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
-    appEnvWebSocketMessageRateLimitWindow :: Refined Positive Int
+    appEnvWebSocketMessageRateLimitWindow :: Refined Positive Int,
+    appEnvRemoteSchemaHealingInterval :: OptionalInterval
   }
 
 -- | Represents the Dynamic Hasura State, these field are mutable and can be changed
@@ -183,9 +185,9 @@ data AppContext = AppContext
     acAsyncActionsFetchInterval :: OptionalInterval,
     acApolloFederationStatus :: ApolloFederationStatus,
     acCloseWebsocketsOnMetadataChangeStatus :: CloseWebsocketsOnMetadataChangeStatus,
-    acSchemaSampledFeatureFlags :: SchemaSampledFeatureFlags,
     acRemoteSchemaResponsePriority :: RemoteSchemaResponsePriority,
     acHeaderPrecedence :: HeaderPrecedence,
+    acRedactActionHandlerLogs :: RedactActionHandlerLogsStatus,
     acTraceQueryStatus :: TraceQueryStatus,
     acRelayMode :: RelayModeStatus
   }
@@ -238,11 +240,10 @@ buildRebuildableAppContext ::
     HTTP.Manager
   ) ->
   ServeOptions impl ->
-  CheckFeatureFlag ->
   E.Environment ->
   ExceptT QErr IO (RebuildableAppContext impl)
-buildRebuildableAppContext readerContext serveOptions checkFeatureFlag env = do
-  result <- flip runReaderT readerContext $ Inc.build (buildAppContextRule) (serveOptions, env, initInvalidationKeys, checkFeatureFlag)
+buildRebuildableAppContext readerContext serveOptions env = do
+  result <- flip runReaderT readerContext $ Inc.build (buildAppContextRule) (serveOptions, env, initInvalidationKeys)
   let !appContext = Inc.result result
   let !rebuildableAppContext = RebuildableAppContext appContext initInvalidationKeys (Inc.rebuildRule result)
   pure rebuildableAppContext
@@ -254,17 +255,16 @@ rebuildRebuildableAppContext ::
   (L.Logger L.Hasura, HTTP.Manager) ->
   RebuildableAppContext impl ->
   ServeOptions impl ->
-  CheckFeatureFlag ->
   E.Environment ->
   m (RebuildableAppContext impl)
-rebuildRebuildableAppContext readerCtx (RebuildableAppContext _ _ rule) serveOptions checkFeatureFlag env = do
+rebuildRebuildableAppContext readerCtx (RebuildableAppContext _ _ rule) serveOptions env = do
   let newInvalidationKeys = InvalidationKeys
   result <-
     liftEitherM
       $ liftIO
       $ runExceptT
       $ flip runReaderT readerCtx
-      $ Inc.build rule (serveOptions, env, newInvalidationKeys, checkFeatureFlag)
+      $ Inc.build rule (serveOptions, env, newInvalidationKeys)
   let appContext = Inc.result result
       !newCtx = RebuildableAppContext appContext newInvalidationKeys (Inc.rebuildRule result)
   pure newCtx
@@ -279,11 +279,18 @@ buildAppContextRule ::
     MonadError QErr m,
     MonadReader (L.Logger L.Hasura, HTTP.Manager) m
   ) =>
-  (ServeOptions impl, E.Environment, InvalidationKeys, CheckFeatureFlag) `arr` AppContext
-buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> do
-  schemaSampledFeatureFlags <- arrM (liftIO . sampleFeatureFlags) -< checkFeatureFlag
-  authMode <- buildAuthMode -< (soAdminSecret, soAuthHook, soJwtSecret, soUnAuthRole)
-  let sqlGenCtx = initSQLGenCtx soExperimentalFeatures soStringifyNum soDangerousBooleanCollapse soBackwardsCompatibleNullInNonNullableVariables soRemoteNullForwardingPolicy
+  (ServeOptions impl, E.Environment, InvalidationKeys) `arr` AppContext
+buildAppContextRule = proc (ServeOptions {..}, env, _keys) -> do
+  authMode <- buildAuthMode -< (soAdminSecret, soAuthHook, soJwtSecret, soUnAuthRole, soDisableAdminSecret)
+  let namingConventionSep2023 =
+        -- Read the naming-convention-sep-2023 toggle directly from the
+        -- environment. This preserves the @HASURA_FF_NAMING_CONVENTION_SEP_2023@
+        -- variable that used to be handled by the (now removed) feature-flag
+        -- system, defaulting to disabled to keep pre-existing naming behaviour.
+        if (map toLower <$> E.lookupEnv env "HASURA_FF_NAMING_CONVENTION_SEP_2023") == Just "true"
+          then Options.EnableNamingConventionSep2023
+          else Options.DisableNamingConventionSep2023
+      sqlGenCtx = initSQLGenCtx soExperimentalFeatures soStringifyNum soDangerousBooleanCollapse soBackwardsCompatibleNullInNonNullableVariables soRemoteNullForwardingPolicy namingConventionSep2023
   responseInternalErrorsConfig <- buildResponseInternalErrorsConfig -< (soAdminInternalErrors, soDevMode)
   eventEngineCtx <- buildEventEngineCtx -< (soEventsHttpPoolSize, soEventsFetchInterval, soEventsFetchBatchSize)
   returnA
@@ -309,9 +316,9 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> 
           acAsyncActionsFetchInterval = soAsyncActionsFetchInterval,
           acApolloFederationStatus = soApolloFederationStatus,
           acCloseWebsocketsOnMetadataChangeStatus = soCloseWebsocketsOnMetadataChangeStatus,
-          acSchemaSampledFeatureFlags = schemaSampledFeatureFlags,
           acRemoteSchemaResponsePriority = soRemoteSchemaResponsePriority,
           acHeaderPrecedence = soHeaderPrecedence,
+          acRedactActionHandlerLogs = soRedactActionHandlerLogs,
           acTraceQueryStatus = soTraceQueryStatus,
           acRelayMode = soRelayMode
         }
@@ -320,8 +327,8 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> 
       eventEngineCtx <- bindA -< initEventEngineCtx httpPoolSize fetchInterval fetchBatchSize
       returnA -< eventEngineCtx
 
-    buildAuthMode :: (Set.HashSet AdminSecretHash, Maybe AuthHook, [JWTConfig], Maybe RoleName) `arr` AuthMode
-    buildAuthMode = Inc.cache proc (adminSecretHashSet, webHook, jwtSecrets, unAuthRole) -> do
+    buildAuthMode :: (Set.HashSet AdminSecretHash, Maybe AuthHook, [JWTConfig], Maybe RoleName, Bool) `arr` AuthMode
+    buildAuthMode = Inc.cache proc (adminSecretHashSet, webHook, jwtSecrets, unAuthRole, disableAdminSecret) -> do
       authMode <-
         bindA
           -< do
@@ -333,6 +340,7 @@ buildAppContextRule = proc (ServeOptions {..}, env, _keys, checkFeatureFlag) -> 
                   webHook
                   jwtSecrets
                   unAuthRole
+                  disableAdminSecret
                   logger
                   httpManager
             onLeft authModeRes throw500
@@ -356,8 +364,9 @@ initSQLGenCtx ::
   Options.DangerouslyCollapseBooleans ->
   Options.BackwardsCompatibleNullInNonNullableVariables ->
   Options.RemoteNullForwardingPolicy ->
+  Options.NamingConventionSep2023 ->
   SQLGenCtx
-initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse nullInNonNullableVariables remoteNullForwardingPolicy =
+initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse nullInNonNullableVariables remoteNullForwardingPolicy namingConventionSep2023 =
   let optimizePermissionFilters
         | EFOptimizePermissionFilters `elem` experimentalFeatures = Options.OptimizePermissionFilters
         | otherwise = Options.Don'tOptimizePermissionFilters
@@ -373,7 +382,7 @@ initSQLGenCtx experimentalFeatures stringifyNum dangerousBooleanCollapse nullInN
       removeEmptySubscriptionResponses
         | EFRemoveEmptySubscriptionResponses `elem` experimentalFeatures = Options.RemoveEmptyResponses
         | otherwise = Options.PreserveEmptyResponses
-   in SQLGenCtx stringifyNum dangerousBooleanCollapse nullInNonNullableVariables noNullUnboundVariableDefault removeEmptySubscriptionResponses remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput
+   in SQLGenCtx stringifyNum dangerousBooleanCollapse nullInNonNullableVariables noNullUnboundVariableDefault removeEmptySubscriptionResponses remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput namingConventionSep2023
 
 buildCacheStaticConfig :: AppEnv -> CacheStaticConfig
 buildCacheStaticConfig AppEnv {..} =
@@ -401,6 +410,5 @@ buildCacheDynamicConfig AppContext {..} = do
       _cdcMetadataDefaults = acMetadataDefaults,
       _cdcApolloFederationStatus = acApolloFederationStatus,
       _cdcCloseWebsocketsOnMetadataChangeStatus = acCloseWebsocketsOnMetadataChangeStatus,
-      _cdcSchemaSampledFeatureFlags = acSchemaSampledFeatureFlags,
       _cdcRelayMode = acRelayMode
     }

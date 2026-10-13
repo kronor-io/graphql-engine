@@ -135,9 +135,10 @@ data BoolExpEntry b n
   | -- | a computed field that returns a scalar, with its name and the
     -- comparison expression of the scalar's type
     BEComputedScalar G.Name ~(Parser 'Input n [ComparisonExp b])
-  | -- | a computed field that returns rows of a table, with its name and the
-    -- table's boolean expression
-    BEComputedTable G.Name ~(Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
+  | -- | a computed field that returns rows of a table, with its name, the
+    -- table, whose select permissions filter it, and the table's boolean
+    -- expression
+    BEComputedTable G.Name (TableInfo b) ~(Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
   | -- | a nested object column, with its name and the boolean expression of
     -- its logical model
     BENestedObject G.Name ~(Parser 'Input n (AnnBoolExp b (UnpreparedValue b)))
@@ -206,13 +207,13 @@ boolExpObject name description fieldInfoMap includeField selectPermissions aggre
             BEColumn _ -> columnFieldName fieldInfo
             BERelationship fieldName _ _ -> fieldName
             BEComputedScalar fieldName _ -> fieldName
-            BEComputedTable fieldName _ -> fieldName
+            BEComputedTable fieldName _ _ -> fieldName
             BENestedObject fieldName _ -> fieldName,
           toFieldDefinition = \_ entry fieldName -> case entry of
             BEColumn parser -> optionalFieldDefinition fieldName parser
             BERelationship _ _ parser -> optionalFieldDefinition fieldName parser
             BEComputedScalar _ parser -> optionalFieldDefinition fieldName parser
-            BEComputedTable _ parser -> optionalFieldDefinition fieldName parser
+            BEComputedTable _ _ parser -> optionalFieldDefinition fieldName parser
             BENestedObject _ parser -> optionalFieldDefinition fieldName parser,
           toParseField = \fieldInfo entry fieldName value -> case (entry, fieldInfo) of
             (BEColumn parser, FIColumn (SCIScalarColumn columnInfo)) -> do
@@ -221,7 +222,7 @@ boolExpObject name description fieldInfoMap includeField selectPermissions aggre
             (BERelationship _ target parser, FIRelationship relationshipInfo) -> do
               let permissions =
                     (fmap . fmap) partialSQLExpToUnpreparedValue
-                      $ maybe annBoolExpTrue spiFilter
+                      $ maybe annBoolExpFalse spiFilter
                       $ case target of
                         TargetTable tableInfo -> tableSelectPermissions roleName tableInfo
                         TargetLogicalModel logicalModelInfo -> getSelPermInfoForLogicalModel roleName logicalModelInfo
@@ -229,9 +230,15 @@ boolExpObject name description fieldInfoMap includeField selectPermissions aggre
             (BEComputedScalar _ parser, FIComputedField computedFieldInfo) -> do
               let redactionExp = fromMaybe NoRedaction $ flip getRedactionExprForComputedField (_cfiName computedFieldInfo) =<< selectPermissions
               Just . BoolField . computedFieldBoolExp computedFieldInfo . CFBEScalar redactionExp <$> P.parseOptionalField fieldName parser value
-            (BEComputedTable _ parser, FIComputedField computedFieldInfo@ComputedFieldInfo {_cfiReturnType})
-              | ReturnsTable table <- computedFieldReturnType @b _cfiReturnType ->
-                  Just . BoolField . computedFieldBoolExp computedFieldInfo . CFBETable table <$> P.parseOptionalField fieldName parser value
+            (BEComputedTable _ tableInfo parser, FIComputedField computedFieldInfo@ComputedFieldInfo {_cfiReturnType})
+              | ReturnsTable table <- computedFieldReturnType @b _cfiReturnType -> do
+                  let permissions =
+                        (fmap . fmap) partialSQLExpToUnpreparedValue
+                          -- annBoolExpFalse, not annBoolExpTrue, so that we fail closed: tableBoolExp
+                          -- already returns no parser when there are no permissions.
+                          $ maybe annBoolExpFalse spiFilter
+                          $ tableSelectPermissions roleName tableInfo
+                  Just . BoolField . computedFieldBoolExp computedFieldInfo . CFBETable table . RelationshipFilters permissions <$> P.parseOptionalField fieldName parser value
             (BENestedObject _ parser, FIColumn (SCIObjectColumn nestedObjectInfo)) ->
               Just . BoolField . AVNestedObject nestedObjectInfo <$> P.parseOptionalField fieldName parser value
             _ -> pure Nothing,
@@ -286,7 +293,11 @@ boolExpEntry selectPermissions fieldInfo = runMaybeT do
       logicalModelInfo <-
         HashMap.lookup _noiType _siLogicalModels
           `onNothing` throw500 ("Logical model " <> _noiType <<> " not found in source " <>> _siName)
+      -- NOTE: AVNestedObject omits the RelationshipFilters wrapper that AVRelationship uses to inject spiFilter (see d874b75b02).
+      -- If the nested logical model type ever gains a meaningful row-level spiFilter, AND it in here as RelTargetNativeQuery does.
       Right . BENestedObject fieldName <$> lift (logicalModelBoolExp logicalModelInfo)
+    -- NOTE: When SCIArrayColumn filtering is implemented, it will also need RelationshipFilters wrapping (see d874b75b02).
+    -- Array elements have "rows" with potential per-element permissions; omitting that wrapper would be an oracle bypass.
     FIColumn (SCIArrayColumn _) -> empty -- TODO(dmoverton)
     -- field_name: field_type_bool_exp
     FIRelationship relationshipInfo -> do
@@ -307,7 +318,7 @@ boolExpEntry selectPermissions fieldInfo = runMaybeT do
               Right . BEComputedScalar fieldName <$> lift (sharedComparisonExps @b (ColumnScalar scalarType))
             ReturnsTable table -> do
               info <- askTableInfo table
-              Right . BEComputedTable fieldName <$> lift (tableBoolExp info)
+              Right . BEComputedTable fieldName info <$> lift (tableBoolExp info)
             ReturnsOthers -> hoistMaybe Nothing
         _ -> hoistMaybe Nothing
     -- Using remote relationship fields in boolean expressions is not supported.
