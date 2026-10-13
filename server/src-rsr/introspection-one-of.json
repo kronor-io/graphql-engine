@@ -1,0 +1,5 @@
+{
+  "query": "query IntrospectionOneOf {\n  __schema {\n    types {\n      name\n      isOneOf\n    }\n  }\n}\n",
+  "variables": {},
+  "operationName": "IntrospectionOneOf"
+}

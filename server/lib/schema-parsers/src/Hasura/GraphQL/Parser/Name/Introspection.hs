@@ -87,6 +87,12 @@ _inputFields = [G.name|inputFields|]
 _isRepeatable :: G.Name
 _isRepeatable = [G.name|isRepeatable|]
 
+_isOneOf :: G.Name
+_isOneOf = [G.name|isOneOf|]
+
+_oneOf :: G.Name
+_oneOf = [G.name|oneOf|]
+
 _locations :: G.Name
 _locations = [G.name|locations|]
 

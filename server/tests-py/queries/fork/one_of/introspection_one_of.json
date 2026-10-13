@@ -1,0 +1,76 @@
+{
+ "data": {
+  "__schema": {
+   "types": [
+    {
+     "name": "__Schema",
+     "isOneOf": null
+    },
+    {
+     "name": "__InputValue",
+     "isOneOf": null
+    },
+    {
+     "name": "__Directive",
+     "isOneOf": null
+    },
+    {
+     "name": "ID",
+     "isOneOf": null
+    },
+    {
+     "name": "__TypeKind",
+     "isOneOf": null
+    },
+    {
+     "name": "Int",
+     "isOneOf": null
+    },
+    {
+     "name": "CardInput",
+     "isOneOf": false
+    },
+    {
+     "name": "__DirectiveLocation",
+     "isOneOf": null
+    },
+    {
+     "name": "Query",
+     "isOneOf": null
+    },
+    {
+     "name": "__Type",
+     "isOneOf": null
+    },
+    {
+     "name": "Float",
+     "isOneOf": null
+    },
+    {
+     "name": "String",
+     "isOneOf": null
+    },
+    {
+     "name": "__Field",
+     "isOneOf": null
+    },
+    {
+     "name": "PaymentMethodInput",
+     "isOneOf": true
+    },
+    {
+     "name": "LookupInput",
+     "isOneOf": true
+    },
+    {
+     "name": "Boolean",
+     "isOneOf": null
+    },
+    {
+     "name": "__EnumValue",
+     "isOneOf": null
+    }
+   ]
+  }
+ }
+}

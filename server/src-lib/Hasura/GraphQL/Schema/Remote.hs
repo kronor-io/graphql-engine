@@ -445,7 +445,7 @@ remoteInputObjectParser ::
         (InputFieldsParser n (Altered, G.Value RemoteSchemaVariable))
         (Parser 'Input n (Altered, G.Value RemoteSchemaVariable))
     )
-remoteInputObjectParser schemaDoc defn@(G.InputObjectTypeDefinition desc name _ valueDefns) = do
+remoteInputObjectParser schemaDoc defn@(G.InputObjectTypeDefinition desc name directives valueDefns) = do
   -- NOTE!: prefixed/altered typename must be part of the memo key everywhere in this module,
   -- else types from different remotes may become intermixed (see ENG-1823):
   typename <- asks getter <&> \mkTypename -> runMkTypename mkTypename name
@@ -463,7 +463,10 @@ remoteInputObjectParser schemaDoc defn@(G.InputObjectTypeDefinition desc name _ 
         -- Disallow short-circuit optimisation if the type name has been changed by remote schema customization
         let altered = Altered $ typename /= name
         argsParser <- fmap (first (<> altered)) <$> argumentsParser valueDefns schemaDoc
-        pure $ fmap G.VObject <$> P.object typename desc argsParser
+        -- OneOf Input Objects are checked here too, so that invalid inputs are rejected
+        -- before reaching the remote server, and the type is introspected as such.
+        let objectParser = if P.isOneOfDefinition directives then P.oneOfObject else P.object
+        pure $ fmap G.VObject <$> objectParser typename desc argsParser
 
 -- | Variable expansion optimization.
 -- Since each parser returns a value that indicates whether it was altered, we can detect when no
