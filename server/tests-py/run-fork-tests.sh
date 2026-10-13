@@ -34,6 +34,7 @@ ALL_FORK_TESTS=(
   test_fork_api_limits.py
   test_fork_connection_templates.py
   test_fork_introspection_control.py
+  test_fork_one_of.py
   test_fork_opentelemetry.py
   test_fork_request_body_limit.py
   test_fork_stored_introspection.py

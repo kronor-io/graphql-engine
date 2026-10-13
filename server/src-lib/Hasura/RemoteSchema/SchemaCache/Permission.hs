@@ -47,6 +47,7 @@ import Data.Text.Extended
 import Hasura.Authentication.Role (RoleName, adminRoleName)
 import Hasura.Authentication.Session (isSessionVariable, mkSessionVariable)
 import Hasura.Base.Error
+import Hasura.GraphQL.Parser qualified as P (isOneOfDefinition)
 import Hasura.GraphQL.Parser.Name qualified as GName
 import Hasura.Name qualified as Name
 import Hasura.Prelude
@@ -752,7 +753,11 @@ validateInputObjectTypeDefinition providedInputObj upstreamInputObj = do
   args <- validateArguments providedArgs upstreamArgs $ providedName
   -- Preserve upstream description if not provided in role schema
   let mergedDescription = providedDescription <|> upstreamDescription
-  pure $ providedInputObj {G._iotdValueDefinitions = args, G._iotdDescription = mergedDescription}
+      -- A OneOf Input Object stays one in every role: the remote server enforces it anyway.
+      mergedDirectives =
+        providedDirectives
+          <> [dir | dir <- upstreamDirectives, P.isOneOfDefinition [dir], not (P.isOneOfDefinition providedDirectives)]
+  pure $ providedInputObj {G._iotdValueDefinitions = args, G._iotdDescription = mergedDescription, G._iotdDirectives = mergedDirectives}
   where
     G.InputObjectTypeDefinition providedDescription providedName providedDirectives providedArgs = providedInputObj
 

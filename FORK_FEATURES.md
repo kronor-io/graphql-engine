@@ -492,3 +492,39 @@ Uses `appEnvMetadataDbPool` (the metadata database connection pool) via
 - Catalog migration: `server/src-rsr/migrations/48_to_49.sql`
 - Schema cache pipeline (upstream): `server/src-lib/Hasura/RQL/DDL/Schema/Cache.hs`
   (`loadStoredIntrospection`, `saveSourcesIntrospection`)
+
+---
+
+## 9. OneOf Input Objects from Remote Schemas
+
+Supports [OneOf Input Objects](https://spec.graphql.org/September2025/#sec-OneOf-Input-Objects)
+(`input T @oneOf { ... }`) of remote schemas: exactly one field must be provided,
+and its value must not be `null`.
+
+### Behavior
+
+1. When adding or reloading a remote schema, if the remote's own `__Type` has an
+   `isOneOf` field, a second introspection query (`__schema { types { name isOneOf } }`)
+   fetches which input objects are OneOf. The flags are added to the stored remote
+   introspection result. Remotes without `__Type.isOneOf` only get the standard
+   introspection query, as before.
+2. OneOf input objects are introspected with `__Type.isOneOf: true` (`false` for other
+   input objects, `null` for other kinds). `@oneOf` is listed in `__schema.directives`.
+3. Hasura validates OneOf values before calling the remote: exactly one field, not
+   `null`, and variables used as that field must be non-nullable. This applies to
+   literals and to variable values.
+4. Remote schema permissions: a role's input object keeps `@oneOf` even when the
+   role's SDL doesn't repeat it.
+
+### Code
+
+- Remote introspection: `server/src-lib/Hasura/GraphQL/RemoteServer.hs`
+  (`fetchRemoteSchema`, `supportsIsOneOf`, `addOneOfFlags`), query in
+  `server/src-rsr/introspection-one-of.json`
+- Input parser: `server/lib/schema-parsers/src/Hasura/GraphQL/Parser/Internal/Input.hs`
+  (`oneOfObject`), used by `remoteInputObjectParser` in
+  `server/src-lib/Hasura/GraphQL/Schema/Remote.hs`
+- Introspection: `server/src-lib/Hasura/GraphQL/Schema/Introspect.hs`
+- Role schemas: `validateInputObjectTypeDefinition` in
+  `server/src-lib/Hasura/RemoteSchema/SchemaCache/Permission.hs`
+- Tests: `server/tests-py/test_fork_one_of.py`
