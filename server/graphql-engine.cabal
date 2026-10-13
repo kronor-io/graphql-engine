@@ -659,6 +659,7 @@ library
                      -- GraphQL Data Connector
                      , Hasura.Backends.DataConnector.Adapter.API
                      , Hasura.Backends.DataConnector.Adapter.Backend
+                     , Hasura.Backends.DataConnector.Adapter.ColumnValues
                      , Hasura.Backends.DataConnector.Adapter.Execute
                      , Hasura.Backends.DataConnector.Adapter.ConfigTransform
                      , Hasura.Backends.DataConnector.Adapter.RunSQL
@@ -707,7 +708,6 @@ library
                      , Hasura.Server.Init.Arg.PrettyPrinter
                      , Hasura.Server.Init.Config
                      , Hasura.Server.Init.Env
-                     , Hasura.Server.Init.FeatureFlag
                      , Hasura.Server.Init.Logging
                      , Hasura.Server.Limits
                      , Hasura.Server.Logging
@@ -804,6 +804,7 @@ library
                      , Hasura.Server.CheckUpdates
                      , Hasura.Server.AppStateRef
                      , Hasura.Server.SchemaUpdate
+                     , Hasura.Server.RemoteSchemaHealing
                      , Hasura.Server.Migrate.LatestVersion
                      , Hasura.Server.Migrate.Version
                      , Hasura.Server.Migrate.Internal
@@ -1169,6 +1170,7 @@ test-suite graphql-engine-tests
     , monad-control
     , mtl
     , network-uri
+    , odbc
     , openapi3
     , optparse-applicative
     , pg-client
@@ -1220,6 +1222,7 @@ test-suite graphql-engine-tests
     Hasura.Base.Error.TestInstances
     Hasura.Backends.BigQuery.SourceSpec
     Hasura.Backends.BigQuery.TypesSpec
+    Hasura.Backends.DataConnector.Adapter.MetadataSpec
     Hasura.Backends.DataConnector.Adapter.TypesSpec
     Hasura.Backends.DataConnector.API.V0.AggregateSpec
     Hasura.Backends.DataConnector.API.V0.CapabilitiesSpec
@@ -1235,6 +1238,7 @@ test-suite graphql-engine-tests
     Hasura.Backends.DataConnector.API.V0.SchemaSpec
     Hasura.Backends.DataConnector.API.V0.TableSpec
     Hasura.Backends.DataConnector.API.V0.TargetSpec
+    Hasura.Backends.MSSQL.FromIr.QuerySpec
     Hasura.Backends.Postgres.Connection.VersionCheckSpec
     Hasura.Backends.Postgres.Execute.PrepareSpec
     Hasura.Backends.Postgres.NativeQueries.NativeQueriesSpec
@@ -1249,6 +1253,7 @@ test-suite graphql-engine-tests
     Hasura.Backends.Postgres.SQL.Select.RenameIdentifiersSpec
     Hasura.Backends.Postgres.SQL.SplitSQLSpec
     Hasura.Backends.Postgres.SQL.ValueSpec
+    Hasura.Backends.Postgres.TableMetadataSpec
     Hasura.Backends.Postgres.Translate.DeleteSpec
     Hasura.Backends.Postgres.Translate.InsertSpec
     Hasura.Backends.Postgres.Translate.UpdateSpec
@@ -1280,6 +1285,7 @@ test-suite graphql-engine-tests
     Hasura.Server.InitSpec
     Hasura.Server.Init.ArgSpec
     Hasura.Server.Migrate.VersionSpec
+    Hasura.Server.RemoteSchemaHealingSpec
     Hasura.Server.TelemetrySpec
     Hasura.Server.VersionSpec
     Hasura.Server.InitSpec
@@ -1319,6 +1325,7 @@ test-suite graphql-engine-test-mssql
   other-modules:
     Database.MSSQL.TransactionSpec
     Hasura.Backends.MSSQL.ErrorSpec
+    Hasura.Backends.MSSQL.EventTriggerCleanupSuite
     SpecHook
 
 test-suite graphql-engine-test-postgres

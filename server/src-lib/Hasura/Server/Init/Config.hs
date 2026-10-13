@@ -41,6 +41,7 @@ module Hasura.Server.Init.Config
     isConsoleEnabled,
     AdminInternalErrorsStatus (..),
     isAdminInternalErrorsEnabled,
+    enabledWebSocketCompressionOptions,
     isWebSocketCompressionEnabled,
     AllowListStatus (..),
     isAllowListEnabled,
@@ -291,6 +292,7 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoUnAuthRole :: Maybe RoleName,
     rsoCorsConfig :: Maybe Cors.CorsConfig,
     rsoConsoleStatus :: ConsoleStatus,
+    rsoDisableAdminSecret :: Bool,
     rsoConsoleAssetsDir :: Maybe Text,
     rsoConsoleSentryDsn :: Maybe Text,
     rsoEnableTelemetry :: Maybe TelemetryStatus,
@@ -319,12 +321,14 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoInferFunctionPermissions :: Maybe Schema.Options.InferFunctionPermissions,
     rsoEnableMaintenanceMode :: Server.Types.MaintenanceMode (),
     rsoEventingMode :: Server.Types.EventingMode,
+    rsoEventProcessingMode :: Server.Types.EventProcessingMode,
     rsoSchemaPollInterval :: Maybe OptionalInterval,
     -- | See Note '$experimentalFeatures' at bottom of module
     rsoExperimentalFeatures :: Maybe (HashSet Server.Types.ExperimentalFeature),
     rsoEventsFetchBatchSize :: Maybe (Refined NonNegative Int),
     rsoGracefulShutdownTimeout :: Maybe (Refined NonNegative Seconds),
     rsoWebSocketConnectionInitTimeout :: Maybe WSConnectionInitTimeout,
+    rsoWebSocketQueueSize :: Maybe (Refined Positive Int),
     rsoEnableMetadataQueryLoggingEnv :: Server.Logging.MetadataQueryLoggingMode,
     rsoHttpLogQueryOnlyOnError :: Server.Logging.HttpLogQueryOnlyOnError,
     -- | stores global default naming convention
@@ -337,6 +341,9 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoMaxRequestBodyLength :: Maybe Int,
     rsoTokenPollInterval :: Maybe Int,
     rsoTriggersErrorLogLevelStatus :: Maybe Server.Types.TriggersErrorLogLevelStatus,
+    rsoRedactEventTriggerLogs :: Maybe Server.Types.RedactEventTriggerLogsStatus,
+    rsoRedactScheduledTriggerLogs :: Maybe Server.Types.RedactScheduledTriggerLogsStatus,
+    rsoRedactActionHandlerLogs :: Maybe Server.Types.RedactActionHandlerLogsStatus,
     rsoAsyncActionsFetchBatchSize :: Maybe Int,
     rsoPersistedQueries :: Maybe Server.Types.PersistedQueriesState,
     rsoPersistedQueriesTtl :: Maybe Int,
@@ -351,7 +358,8 @@ data ServeOptionsRaw impl = ServeOptionsRaw
     rsoWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
     rsoWebSocketMessageRateLimitWindow :: Maybe (Refined Positive Int),
     rsoLogMaskedVariables :: Maybe (HashSet Text),
-    rsoRelayMode :: RelayModeStatus
+    rsoRelayMode :: RelayModeStatus,
+    rsoRemoteSchemaHealingInterval :: Maybe OptionalInterval
   }
 
 deriving stock instance (Show (Logging.EngineLogType impl)) => Show (ServeOptionsRaw impl)
@@ -398,6 +406,11 @@ isWebSocketCompressionEnabled :: WebSockets.CompressionOptions -> Bool
 isWebSocketCompressionEnabled = \case
   WebSockets.PermessageDeflateCompression _ -> True
   WebSockets.NoCompression -> False
+
+enabledWebSocketCompressionOptions :: WebSockets.CompressionOptions
+enabledWebSocketCompressionOptions =
+  WebSockets.PermessageDeflateCompression
+    (WebSockets.defaultPermessageDeflate {WebSockets.pdCompressionLevel = 3})
 
 -- | A representation of whether or not to enable the GraphQL Query AllowList.
 --
@@ -650,6 +663,7 @@ data ServeOptions impl = ServeOptions
     soUnAuthRole :: Maybe RoleName,
     soCorsConfig :: Cors.CorsConfig,
     soConsoleStatus :: ConsoleStatus,
+    soDisableAdminSecret :: Bool,
     soConsoleAssetsDir :: Maybe Text,
     soConsoleSentryDsn :: Maybe Text,
     soEnableTelemetry :: TelemetryStatus,
@@ -679,7 +693,9 @@ data ServeOptions impl = ServeOptions
     soAdminInternalErrors :: AdminInternalErrorsStatus,
     soGracefulShutdownTimeout :: Refined NonNegative Seconds,
     soWebSocketConnectionInitTimeout :: WSConnectionInitTimeout,
+    soWebSocketQueueSize :: Refined Positive Int,
     soEventingMode :: Server.Types.EventingMode,
+    soEventProcessingMode :: Server.Types.EventProcessingMode,
     -- | See note '$readOnlyMode'
     soReadOnlyMode :: Server.Types.ReadOnlyMode,
     soEnableMetadataQueryLogging :: Server.Logging.MetadataQueryLoggingMode,
@@ -693,6 +709,9 @@ data ServeOptions impl = ServeOptions
     soMaxRequestBodyLength :: Int,
     soTokenPollInterval :: Int,
     soTriggersErrorLogLevelStatus :: Server.Types.TriggersErrorLogLevelStatus,
+    soRedactEventTriggerLogs :: Server.Types.RedactEventTriggerLogsStatus,
+    soRedactScheduledTriggerLogs :: Server.Types.RedactScheduledTriggerLogsStatus,
+    soRedactActionHandlerLogs :: Server.Types.RedactActionHandlerLogsStatus,
     soAsyncActionsFetchBatchSize :: Int,
     soPersistedQueries :: Server.Types.PersistedQueriesState,
     soPersistedQueriesTtl :: Int,
@@ -707,7 +726,8 @@ data ServeOptions impl = ServeOptions
     soWebSocketMessageRateLimit :: Maybe (Refined Positive Int),
     soWebSocketMessageRateLimitWindow :: Refined Positive Int,
     soLogMaskedVariables :: HashSet Text,
-    soRelayMode :: RelayModeStatus
+    soRelayMode :: RelayModeStatus,
+    soRemoteSchemaHealingInterval :: OptionalInterval
   }
 
 -- | 'ResponseInternalErrorsConfig' represents the encoding of the

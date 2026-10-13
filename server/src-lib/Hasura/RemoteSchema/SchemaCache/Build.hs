@@ -20,7 +20,6 @@ import Hasura.Authentication.Role (ParentRoles (..), Role (..), RoleName)
 import Hasura.Base.Error
 import Hasura.EncJSON (encJFromLBS)
 import Hasura.GraphQL.RemoteServer
-import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags)
 import Hasura.Incremental qualified as Inc
 import Hasura.Logging
 import Hasura.Prelude
@@ -56,7 +55,6 @@ buildRemoteSchemas ::
   ( ( Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey),
       OrderedRoles,
       Maybe (HashMap RemoteSchemaName BL.ByteString),
-      SchemaSampledFeatureFlags,
       -- Introspection results fetched by 'fetchRemoteSchemas'
       Unkeyed (HashMap RemoteSchemaName (Either QErr (IntrospectionResult, BL.ByteString, RemoteSchemaInfo)))
     ),
@@ -69,12 +67,12 @@ buildRemoteSchemas logger env =
     -- We want to cache this call because it fetches the remote schema over
     -- HTTP, and we don’t want to re-run that if the remote schema definition
     -- hasn’t changed.
-    buildRemoteSchema = Inc.cache proc ((invalidationKeys, orderedRoles, storedIntrospection, schemaSampledFeatureFlags, Unkeyed fetched), remoteSchema@(RemoteSchemaMetadata name defn _comment permissions relationships)) -> do
+    buildRemoteSchema = Inc.cache proc ((invalidationKeys, orderedRoles, storedIntrospection, Unkeyed fetched), remoteSchema@(RemoteSchemaMetadata name defn _comment permissions relationships)) -> do
       Inc.dependOn -< Inc.selectKeyD name invalidationKeys
       let metadataObj = mkRemoteSchemaMetadataObject remoteSchema
       upstreamResponse <- case HashMap.lookup name fetched of
         Just response -> returnA -< response
-        Nothing -> bindA -< runExceptT (noopTrace $ addRemoteSchemaP2Setup name env schemaSampledFeatureFlags defn)
+        Nothing -> bindA -< runExceptT (noopTrace $ addRemoteSchemaP2Setup name env defn)
       remoteSchemaContextParts <-
         case upstreamResponse of
           Right upstream@(_, byteString, _) -> do
@@ -92,7 +90,7 @@ buildRemoteSchemas logger env =
                   bindA
                     -< runExceptT do
                       rsDef <- validateRemoteSchemaDef name env defn
-                      (ir, rsi) <- stitchRemoteSchema schemaSampledFeatureFlags storedRawIntrospection rsDef
+                      (ir, rsi) <- stitchRemoteSchema storedRawIntrospection rsDef
                       pure (ir, storedRawIntrospection, rsi)
                 case processedIntrospection of
                   Right processed -> do
@@ -151,20 +149,20 @@ fetchRemoteSchemas ::
     ProvidesNetwork m
   ) =>
   Env.Environment ->
-  (Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey), SchemaSampledFeatureFlags, HashMap RemoteSchemaName RemoteSchemaDef)
+  (Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey), HashMap RemoteSchemaName RemoteSchemaDef)
     `arr` HashMap RemoteSchemaName (Either QErr (IntrospectionResult, BL.ByteString, RemoteSchemaInfo))
-fetchRemoteSchemas env = proc (invalidationKeys, schemaSampledFeatureFlags, definitions) ->
+fetchRemoteSchemas env = proc (invalidationKeys, definitions) ->
   (|
     Inc.keyed
       ( \name definition ->
-          fetchRemoteSchema' -< (invalidationKeys, schemaSampledFeatureFlags, name, definition)
+          fetchRemoteSchema' -< (invalidationKeys, name, definition)
       )
     |)
     definitions
   where
-    fetchRemoteSchema' = Inc.cache proc (invalidationKeys, schemaSampledFeatureFlags, name, definition) -> do
+    fetchRemoteSchema' = Inc.cache proc (invalidationKeys, name, definition) -> do
       Inc.dependOn -< Inc.selectKeyD name invalidationKeys
-      bindA -< runExceptT (Tracing.ignoreTraceT $ addRemoteSchemaP2Setup name env schemaSampledFeatureFlags definition)
+      bindA -< runExceptT (Tracing.ignoreTraceT $ addRemoteSchemaP2Setup name env definition)
 
 -- | Resolves a RemoteSchemaPermission metadata object into a 'GraphQL schema'.
 buildRemoteSchemaPermissions ::
@@ -243,9 +241,9 @@ addRemoteSchemaP2Setup ::
   (QErrM m, MonadIO m, ProvidesNetwork m, Tracing.MonadTrace m) =>
   RemoteSchemaName ->
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
   RemoteSchemaDef ->
   m (IntrospectionResult, BL.ByteString, RemoteSchemaInfo)
-addRemoteSchemaP2Setup name env schemaSampledFeatureFlags def = do
+addRemoteSchemaP2Setup name env def = do
   rsi <- validateRemoteSchemaDef name env def
-  fetchRemoteSchema env schemaSampledFeatureFlags rsi
+  let introspectionHeaders = fromMaybe (_vrsdHeaders rsi) (_rsdIntrospectionHeaders def)
+  fetchRemoteSchema env introspectionHeaders rsi

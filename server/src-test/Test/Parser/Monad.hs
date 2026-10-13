@@ -74,7 +74,8 @@ defaultSchemaOptions =
       soIncludeGroupByAggregateFields = Options.IncludeGroupByAggregateFields,
       soPostgresArrays = Options.UsePostgresArrays,
       soNoNullUnboundVariableDefault = Options.DefaultUnboundNullableVariablesToNull,
-      soRemoveEmptySubscriptionResponses = Options.PreserveEmptyResponses
+      soRemoveEmptySubscriptionResponses = Options.PreserveEmptyResponses,
+      soNamingConventionSep2023 = Options.DisableNamingConventionSep2023
     }
 
 instance Has NamingCase SchemaEnvironment where
@@ -106,7 +107,6 @@ instance Has SchemaContext SchemaEnvironment where
         { scSchemaKind = HasuraSchema,
           scRemoteRelationshipParserBuilder = ignoreRemoteRelationship,
           scRole = adminRoleName,
-          scSampledFeatureFlags = SchemaSampledFeatureFlags [],
           scSharedComparisons = mempty
         }
 

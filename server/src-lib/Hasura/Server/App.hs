@@ -158,7 +158,6 @@ newtype Handler m a = Handler (ReaderT HandlerCtx (ExceptT QErr m) a)
       MonadTrace,
       HasAppEnv,
       HasCacheStaticConfig,
-      HasFeatureFlagChecker,
       HasResourceLimits,
       MonadResolveSource,
       E.MonadGQLExecutionCheck,
@@ -251,7 +250,18 @@ isDeveloperAPIEnabled ac = S.member DEVELOPER $ acEnabledAPIs ac
 -- {-# SCC parseBody #-}
 parseBody :: (FromJSON a, MonadError QErr m) => BL.ByteString -> m (Value, a)
 parseBody reqBody =
-  case eitherDecode' reqBody of
+  -- Sanitize illegal unescaped ASCII control characters (0x00–0x1F) that some
+  -- clients embed literally inside JSON strings. Prior to aeson 2.2.4.0 these
+  -- were sometimes passed through into parsed 'String's.
+  --
+  -- In valid JSON these can only appear as insignificant whitespace between
+  -- tokens, so stripping them never semantically alters or corrupts a
+  -- well-formed payload. But some customers seem to have been relying on the
+  -- old behavior to inject newlines as white-space delimiter for their
+  -- graphql (e.g. in selection sets, in lieu of a comma or space), so rather
+  -- than just stripping, with great sadness we map control characters to space
+  -- so that these malformed queries continue to lex to equivalent graphql.
+  case eitherDecode' (BL.map (\w -> if w < 0x20 then 0x20 else w) reqBody) of
     Left e -> throw400 InvalidJSON (T.pack e)
     Right jVal -> (jVal,) <$> decodeValue jVal
 
@@ -477,8 +487,9 @@ mkSpockAction appStateRef qErrEncoder qErrModifier apiHandler = do
       AppEnv {..} <- lift askAppEnv
       let httpLogMetadata = buildHttpLogMetadata @m emptyHttpLogGraphQLInfo extraUserInfo
           jsonResponse = J.encodingToLazyByteString $ qErrEncoder includeInternal qErr
+          reqIdHeader = (requestIdHeader, txtToBs $ unRequestId reqId)
           contentLength = ("Content-Length", B8.toStrict $ BB.toLazyByteString $ BB.int64Dec $ BL.length jsonResponse)
-          allHeaders = [contentLength, jsonHeader]
+          allHeaders = [reqIdHeader, contentLength, jsonHeader]
       -- https://opentelemetry.io/docs/reference/specification/trace/semantic_conventions/http/#common-attributes
       lift $ Tracing.attachMetadata [("http.response_content_length", bsToTxt $ snd contentLength)]
       lift $ Tracing.setSpanError (qeError qErr)
@@ -639,7 +650,7 @@ v1Alpha1GQHandler queryType query = do
   reqHeaders <- asks hcReqHeaders
   ipAddress <- asks hcSourceIpAddress
   requestId <- asks hcRequestId
-  GH.runGQBatched acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId acResponseInternalErrorsConfig acRemoteSchemaResponsePriority acHeaderPrecedence acTraceQueryStatus userInfo ipAddress reqHeaders queryType query
+  GH.runGQBatched acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId acResponseInternalErrorsConfig acRemoteSchemaResponsePriority acHeaderPrecedence acRedactActionHandlerLogs acTraceQueryStatus userInfo ipAddress reqHeaders queryType query
 
 v1GQHandler ::
   ( MonadIO m,
@@ -760,6 +771,7 @@ class (Monad m) => ConsoleRenderer m where
     TelemetryStatus ->
     Maybe Text ->
     Maybe Text ->
+    Bool ->
     ConsoleType m ->
     m (Either String Text)
 
@@ -775,7 +787,7 @@ ceConsoleTypeIdentifier = \case
 
 instance (ConsoleRenderer m) => ConsoleRenderer (Tracing.TraceT m) where
   type ConsoleType (Tracing.TraceT m) = ConsoleType m
-  renderConsole a b c d e f = lift $ renderConsole a b c d e f
+  renderConsole a b c d e f g = lift $ renderConsole a b c d e f g
 
 -- Type class to get any extra [Pair] for the version API
 class (Monad m) => MonadVersionAPIWithExtraData m where
@@ -807,10 +819,6 @@ configApiGetHandler appStateRef = do
     $ do
       AppEnv {..} <- lift askAppEnv
       AppContext {..} <- liftIO $ getAppContext appStateRef
-      featureFlagSettings <-
-        traverse
-          (\(ff, desc) -> (ff,desc,) <$> liftIO (runCheckFeatureFlag appEnvCheckFeatureFlag ff))
-          (listKnownFeatureFlags appEnvCheckFeatureFlag)
       mkSpockAction appStateRef encodeQErr id
         $ mkGetHandler
         $ do
@@ -827,7 +835,6 @@ configApiGetHandler appStateRef = do
                   acExperimentalFeatures
                   acEnabledAPIs
                   acDefaultNamingConvention
-                  featureFlagSettings
                   acApolloFederationStatus
           return (emptyHttpLogGraphQLInfo, JSONResp $ HttpResponse (encJFromJValue res) [])
 
@@ -882,7 +889,7 @@ mkWaiApp setupHook appStateRef consoleType ekgStore wsServerEnv = do
       $ WS.mkCloseWebsocketsOnMetadataChangeAction (WS._wseServer wsServerEnv)
 
   let wsRateLimitConfig = fmap (\maxMsgs -> RateLimit.RateLimitConfig (unrefine maxMsgs) (unrefine appEnvWebSocketMessageRateLimitWindow)) appEnvWebSocketMessageRateLimit
-      wsServerApp = WS.createWSServerApp (_lsEnabledLogTypes appEnvLoggingSettings) wsServerEnv appEnvWebSocketConnectionInitTimeout appEnvLicenseKeyCache wsRateLimitConfig
+      wsServerApp = WS.createWSServerApp (_lsEnabledLogTypes appEnvLoggingSettings) wsServerEnv appEnvWebSocketConnectionInitTimeout appEnvWebSocketQueueSize appEnvLicenseKeyCache wsRateLimitConfig
       stopWSServer = WS.stopWSServerApp wsServerEnv
 
   waiApp <- liftWithStateless $ \lowerIO ->
@@ -1009,8 +1016,6 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
     setHeader jsonHeader
     Spock.lazyBytes $ encode $ object $ ["version" .= currentVersion] <> extraData
 
-  responseErrorsConfig <- liftIO $ acResponseInternalErrorsConfig <$> getAppContext appStateRef
-
   let customEndpointHandler ::
         RestRequest Spock.SpockMethod ->
         Handler m (HttpLogGraphQLInfo, APIResp)
@@ -1033,7 +1038,7 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
               Spock.PATCH -> pure EP.PATCH
               other -> throw400 BadRequest $ "Method " <> tshow other <> " not supported."
             _ -> throw400 BadRequest $ "Nonstandard method not allowed for REST endpoints"
-        fmap JSONResp <$> runCustomEndpoint acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode acRemoteSchemaResponsePriority acHeaderPrecedence acTraceQueryStatus appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId userInfo reqHeaders ipAddress req endpoints responseErrorsConfig
+        fmap JSONResp <$> runCustomEndpoint acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode acRemoteSchemaResponsePriority acHeaderPrecedence acRedactActionHandlerLogs acTraceQueryStatus appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId userInfo reqHeaders ipAddress req endpoints acResponseInternalErrorsConfig
 
   -- See Issue #291 for discussion around restified feature
   Spock.hookRouteAll ("api" <//> "rest" <//> Spock.wildcard) $ \wildcard -> do
@@ -1120,7 +1125,7 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
       $ apiHandler
 
   Spock.post "v1/relay" serveV1Relay
-  
+
   Spock.post "v1beta1/relay" serveV1Relay
 
   -- This exposes some simple RTS stats when we run with `+RTS -T`. We want
@@ -1241,7 +1246,7 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
           AppContext {..} <- liftIO $ getAppContext appStateRef
           req <- Spock.request
           let headers = Wai.requestHeaders req
-          consoleHtml <- lift $ renderConsole path acAuthMode acEnableTelemetry appEnvConsoleAssetsDir appEnvConsoleSentryDsn consoleType
+          consoleHtml <- lift $ renderConsole path acAuthMode acEnableTelemetry appEnvConsoleAssetsDir appEnvConsoleSentryDsn appEnvDisableAdminSecret consoleType
           either (raiseGenericApiError logger appEnvLoggingSettings headers . internalError . T.pack) Spock.html consoleHtml
 
     serveApiConsoleAssets = do

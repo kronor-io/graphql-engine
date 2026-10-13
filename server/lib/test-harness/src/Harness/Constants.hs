@@ -58,6 +58,7 @@ import Hasura.Server.Init qualified as Init
 import Hasura.Server.Logging (HttpLogQueryOnlyOnError (HttpLogQueryOnlyOnErrorDisabled), MetadataQueryLoggingMode (MetadataQueryLoggingDisabled))
 import Hasura.Server.Types
   ( ApolloFederationStatus (ApolloFederationDisabled),
+    EventProcessingMode (EventProcessingEnabled),
     EventingMode (EventingEnabled),
     ExperimentalFeature (..),
     MaintenanceMode (MaintenanceModeDisabled),
@@ -289,6 +290,7 @@ serveOptions =
       soUnAuthRole = Nothing,
       soCorsConfig = CCAllowAll,
       soConsoleStatus = Init.ConsoleEnabled,
+      soDisableAdminSecret = False,
       soConsoleAssetsDir = Just "frontend/dist/apps/server-assets-console-ce",
       soConsoleSentryDsn = Nothing,
       soEnableTelemetry = Init.TelemetryDisabled,
@@ -320,7 +322,9 @@ serveOptions =
       soAdminInternalErrors = Init.AdminInternalErrorsEnabled,
       soGracefulShutdownTimeout = $$(refineTH 0), -- Don't wait to shutdown.
       soWebSocketConnectionInitTimeout = Init._default Init.webSocketConnectionInitTimeoutOption,
+      soWebSocketQueueSize = Init._default Init.webSocketQueueSizeOption,
       soEventingMode = EventingEnabled,
+      soEventProcessingMode = EventProcessingEnabled,
       soReadOnlyMode = ReadOnlyModeDisabled,
       soEnableMetadataQueryLogging = MetadataQueryLoggingDisabled,
       soHttpLogQueryOnlyOnError = HttpLogQueryOnlyOnErrorDisabled,
@@ -331,6 +335,9 @@ serveOptions =
       soCloseWebsocketsOnMetadataChangeStatus = Init._default Init.closeWebsocketsOnMetadataChangeOption,
       soMaxTotalHeaderLength = Init._default Init.maxTotalHeaderLengthOption,
       soTriggersErrorLogLevelStatus = Init._default Init.triggersErrorLogLevelStatusOption,
+      soRedactEventTriggerLogs = Init._default Init.redactEventTriggerLogsOption,
+      soRedactScheduledTriggerLogs = Init._default Init.redactScheduledTriggerLogsOption,
+      soRedactActionHandlerLogs = Init._default Init.redactActionHandlerLogsOption,
       soAsyncActionsFetchBatchSize = Init._default Init.asyncActionsFetchBatchSizeOption,
       soPersistedQueries = Init._default Init.persistedQueriesOption,
       soPersistedQueriesTtl = Init._default Init.persistedQueriesTtlOption,
@@ -341,7 +348,8 @@ serveOptions =
       soPreserve401Errors = Init.MapEverythingTo200,
       soServerTimeout = Init._default Init.serverTimeoutOption,
       soLogMaskedVariables = Set.empty,
-      soRelayMode = Init.RelayModeEnabled
+      soRelayMode = Init.RelayModeEnabled,
+      soRemoteSchemaHealingInterval = Init._default Init.remoteSchemaHealingIntervalOption
     }
 
 -- | What log level should be used by the engine; this is not exported, and

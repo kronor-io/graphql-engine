@@ -26,7 +26,7 @@ import Hasura.Authentication.Header (mkSetCookieHeaders)
 import Hasura.Authentication.Headers (commonClientHeadersIgnored)
 import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Authentication.Session (mkClientHeadersForward, sessionVariablesToHeaders)
-import Hasura.Authentication.User (UserInfo, adminUserInfo, _uiSession)
+import Hasura.Authentication.User (UserInfo, _uiSession)
 import Hasura.Base.Error
 import Hasura.GraphQL.Parser.Monad (Parse)
 import Hasura.GraphQL.Parser.Name qualified as GName
@@ -38,6 +38,7 @@ import Hasura.HTTP
 import Hasura.Prelude
 import Hasura.RQL.DDL.Headers (makeHeadersFromConf)
 import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.Headers (HeaderConf)
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RemoteSchema.Metadata
 import Hasura.RemoteSchema.SchemaCache.Types
@@ -60,13 +61,13 @@ fetchRemoteSchema ::
   forall m.
   (MonadIO m, MonadError QErr m, Tracing.MonadTrace m, ProvidesNetwork m) =>
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
+  [HeaderConf] ->
   ValidatedRemoteSchemaDef ->
   m (IntrospectionResult, BL.ByteString, RemoteSchemaInfo)
-fetchRemoteSchema env schemaSampledFeatureFlags rsDef = do
+fetchRemoteSchema env introspectionHeaderConf rsDef = do
   (_, _, rawIntrospectionResult) <-
-    execRemoteGQ env Tracing.b3TraceContextPropagator adminUserInfo [] rsDef introspectionQuery
-  (ir, rsi) <- stitchRemoteSchema schemaSampledFeatureFlags rawIntrospectionResult rsDef
+    execRemoteGQForIntrospection env Tracing.b3TraceContextPropagator introspectionHeaderConf rsDef introspectionQuery
+  (ir, rsi) <- stitchRemoteSchema rawIntrospectionResult rsDef
   -- The 'rawIntrospectionResult' contains the 'Bytestring' response of
   -- the introspection result of the remote server. We store this in the
   -- 'RemoteSchemaCtx' because we can use this when the 'introspect_remote_schema'
@@ -77,11 +78,10 @@ fetchRemoteSchema env schemaSampledFeatureFlags rsDef = do
 -- like it's a valid GraphQL endpoint even under the configured customization.
 stitchRemoteSchema ::
   (MonadIO m, MonadError QErr m) =>
-  SchemaSampledFeatureFlags ->
   BL.ByteString ->
   ValidatedRemoteSchemaDef ->
   m (IntrospectionResult, RemoteSchemaInfo)
-stitchRemoteSchema schemaSampledFeatureFlags rawIntrospectionResult rsDef@ValidatedRemoteSchemaDef {..} = do
+stitchRemoteSchema rawIntrospectionResult rsDef@ValidatedRemoteSchemaDef {..} = do
   -- Parse the JSON into flat GraphQL type AST.
   FromIntrospection _rscIntroOriginal <-
     J.eitherDecode rawIntrospectionResult `onLeft` (throwRemoteSchema . T.pack)
@@ -127,7 +127,6 @@ stitchRemoteSchema schemaSampledFeatureFlags rawIntrospectionResult rsDef@Valida
         HasuraSchema
         ignoreRemoteRelationship
         adminRoleName
-        schemaSampledFeatureFlags
         mempty
 
 -- | Sends a GraphQL query to the given server.
@@ -146,11 +145,7 @@ execRemoteGQ ::
   -- | Returns the response body and headers, along with the time taken for the
   -- HTTP request to complete
   m (DiffTime, [HTTP.Header], BL.ByteString)
-execRemoteGQ env tracesPropagator userInfo reqHdrs rsdef gqlReq@GQLReq {..} = do
-  let gqlReqUnparsed = renderGQLReqOutgoing gqlReq
-
-  when (G._todType _grQuery == G.OperationTypeSubscription)
-    $ throwRemoteSchema "subscription to remote server is not supported"
+execRemoteGQ env tracesPropagator userInfo reqHdrs rsdef gqlReq = do
   confHdrs <- makeHeadersFromConf env hdrConf
   let clientHdrs = bool [] (mkClientHeadersForward commonClientHeadersIgnored reqHdrs) fwdClientHdrs
       -- filter out duplicate headers
@@ -161,7 +156,39 @@ execRemoteGQ env tracesPropagator userInfo reqHdrs rsdef gqlReq@GQLReq {..} = do
           HashMap.fromList clientHdrs
         ]
       headers = HashMap.toList $ foldr HashMap.union HashMap.empty hdrMaps
-      finalHeaders = addDefaultHeaders headers
+  execRemoteGQWithHeaders tracesPropagator headers rsdef gqlReq
+  where
+    ValidatedRemoteSchemaDef _name _webhookEnvRecord hdrConf fwdClientHdrs _timeout _mPrefix = rsdef
+    userInfoToHdrs = sessionVariablesToHeaders $ _uiSession userInfo
+
+-- | Executes an introspection query with only its configured headers. In
+-- particular, this deliberately does not add runtime session variables or
+-- forwarded client headers.
+execRemoteGQForIntrospection ::
+  (MonadIO m, MonadError QErr m, Tracing.MonadTrace m, ProvidesNetwork m) =>
+  Env.Environment ->
+  Tracing.HttpPropagator ->
+  [HeaderConf] ->
+  ValidatedRemoteSchemaDef ->
+  GQLReqOutgoing ->
+  m (DiffTime, [HTTP.Header], BL.ByteString)
+execRemoteGQForIntrospection env tracesPropagator headerConf rsdef gqlReq = do
+  headers <- makeHeadersFromConf env headerConf
+  execRemoteGQWithHeaders tracesPropagator headers rsdef gqlReq
+
+execRemoteGQWithHeaders ::
+  (MonadIO m, MonadError QErr m, Tracing.MonadTrace m, ProvidesNetwork m) =>
+  Tracing.HttpPropagator ->
+  [HTTP.Header] ->
+  ValidatedRemoteSchemaDef ->
+  GQLReqOutgoing ->
+  m (DiffTime, [HTTP.Header], BL.ByteString)
+execRemoteGQWithHeaders tracesPropagator headers rsdef gqlReq@GQLReq {..} = do
+  let gqlReqUnparsed = renderGQLReqOutgoing gqlReq
+
+  when (G._todType _grQuery == G.OperationTypeSubscription)
+    $ throwRemoteSchema "subscription to remote server is not supported"
+  let finalHeaders = addDefaultHeaders headers
   initReq <- onLeft (HTTP.mkRequestEither $ tshow url) (throwRemoteSchemaHttp webhookEnvRecord)
   let req =
         initReq
@@ -176,9 +203,8 @@ execRemoteGQ env tracesPropagator userInfo reqHdrs rsdef gqlReq@GQLReq {..} = do
     resp <- onLeft res (throwRemoteSchemaHttp webhookEnvRecord)
     pure (time, mkSetCookieHeaders resp, resp ^. Wreq.responseBody)
   where
-    ValidatedRemoteSchemaDef _name webhookEnvRecord hdrConf fwdClientHdrs timeout _mPrefix = rsdef
+    ValidatedRemoteSchemaDef _name webhookEnvRecord _hdrConf _fwdClientHdrs timeout _mPrefix = rsdef
     url = _envVarValue webhookEnvRecord
-    userInfoToHdrs = sessionVariablesToHeaders $ _uiSession userInfo
 
 -------------------------------------------------------------------------------
 -- Validation

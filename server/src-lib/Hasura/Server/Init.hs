@@ -20,7 +20,6 @@ module Hasura.Server.Init
     module Hasura.Server.Init.Env,
     module Hasura.Server.Init.Arg,
     module Hasura.Server.Init.Logging,
-    module Hasura.Server.Init.FeatureFlag,
   )
 where
 
@@ -43,7 +42,6 @@ import Hasura.Server.Cors qualified as Cors
 import Hasura.Server.Init.Arg
 import Hasura.Server.Init.Config
 import Hasura.Server.Init.Env
-import Hasura.Server.Init.FeatureFlag
 import Hasura.Server.Init.Logging
 import Hasura.Server.Logging qualified as Server.Logging
 import Hasura.Server.Types qualified as Types
@@ -162,6 +160,7 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soUnAuthRole <- withOption rsoUnAuthRole unAuthRoleOption
   soCorsConfig <- mkCorsConfig sor rsoCorsConfig
   soConsoleStatus <- withOptionSwitch' rsoConsoleStatus (isConsoleEnabled, bool ConsoleDisabled ConsoleEnabled) enableConsoleOption
+  soDisableAdminSecret <- withOptionSwitch rsoDisableAdminSecret disableAdminSecretOption
   soConsoleAssetsDir <- withOption rsoConsoleAssetsDir consoleAssetsDirOption
   soConsoleSentryDsn <- withOption rsoConsoleSentryDsn consoleSentryDsnOption
   soEnableTelemetry <- withOptionDefault rsoEnableTelemetry enableTelemetryOption
@@ -194,7 +193,7 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
       Options.DisableRemoteSchemaPermissions -> withOptionDefault Nothing enableRemoteSchemaPermsOption
       enableRemoteSchemaPermissions -> pure enableRemoteSchemaPermissions
   webSocketCompressionFromEnv <-
-    withOptionSwitch' rsoWebSocketCompression (isWebSocketCompressionEnabled, bool WebSockets.NoCompression (WebSockets.PermessageDeflateCompression WebSockets.defaultPermessageDeflate)) webSocketCompressionOption
+    withOptionSwitch' rsoWebSocketCompression (isWebSocketCompressionEnabled, bool WebSockets.NoCompression enabledWebSocketCompressionOptions) webSocketCompressionOption
   soWebSocketFramePayloadSizeLimit <- withOptionDefault rsoWebSocketFramePayloadSizeLimit webSocketFramePayloadSizeLimitOption
   soWebSocketMessageDataSizeLimit <- withOptionDefault rsoWebSocketMessageDataSizeLimit webSocketMessageDataSizeLimitOption
   soWebSocketMessageRateLimit <- withOption rsoWebSocketMessageRateLimit webSocketMessageRateLimitOption
@@ -215,9 +214,13 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soEventsFetchBatchSize <- withOptionDefault rsoEventsFetchBatchSize eventsFetchBatchSizeOption
   soGracefulShutdownTimeout <- withOptionDefault rsoGracefulShutdownTimeout gracefulShutdownOption
   soWebSocketConnectionInitTimeout <- withOptionDefault rsoWebSocketConnectionInitTimeout webSocketConnectionInitTimeoutOption
+  soWebSocketQueueSize <- withOptionDefault rsoWebSocketQueueSize webSocketQueueSizeOption
   soEventingMode <- case rsoEventingMode of
     Types.EventingEnabled -> withOptionDefault Nothing disableEventingOption
     eventingDisabled -> pure eventingDisabled
+  soEventProcessingMode <- case rsoEventProcessingMode of
+    Types.EventProcessingEnabled -> withOptionDefault Nothing disableEventProcessingOption
+    eventProcessingDisabled -> pure eventProcessingDisabled
   let soReadOnlyMode = Types.ReadOnlyModeDisabled
   soEnableMetadataQueryLogging <- case rsoEnableMetadataQueryLoggingEnv of
     Server.Logging.MetadataQueryLoggingDisabled -> withOptionDefault Nothing enableMetadataQueryLoggingOption
@@ -237,6 +240,9 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soMaxRequestBodyLength <- withOptionDefault rsoMaxRequestBodyLength maxRequestBodyLengthOption
   soTokenPollInterval <- withOptionDefault rsoTokenPollInterval tokenPollIntervalOption
   soTriggersErrorLogLevelStatus <- withOptionDefault rsoTriggersErrorLogLevelStatus triggersErrorLogLevelStatusOption
+  soRedactEventTriggerLogs <- withOptionDefault rsoRedactEventTriggerLogs redactEventTriggerLogsOption
+  soRedactScheduledTriggerLogs <- withOptionDefault rsoRedactScheduledTriggerLogs redactScheduledTriggerLogsOption
+  soRedactActionHandlerLogs <- withOptionDefault rsoRedactActionHandlerLogs redactActionHandlerLogsOption
   soAsyncActionsFetchBatchSize <- withOptionDefault rsoAsyncActionsFetchBatchSize asyncActionsFetchBatchSizeOption
   soPersistedQueries <- withOptionDefault rsoPersistedQueries persistedQueriesOption
   soPersistedQueriesTtl <- withOptionDefault rsoPersistedQueriesTtl persistedQueriesTtlOption
@@ -251,6 +257,7 @@ mkServeOptions sor@ServeOptionsRaw {..} = do
   soServerTimeout <- withOptionDefault rsoServerTimeout serverTimeoutOption
   soLogMaskedVariables <- withOptionDefault rsoLogMaskedVariables logMaskedVariablesOption
   soRelayMode <- withOptionSwitch' rsoRelayMode (isRelayEnabled, bool RelayModeDisabled RelayModeEnabled) enableRelayOption
+  soRemoteSchemaHealingInterval <- withOptionDefault rsoRemoteSchemaHealingInterval remoteSchemaHealingIntervalOption
   pure ServeOptions {..}
 
 -- | Fetch Postgres 'Query.ConnParams' components from the environment

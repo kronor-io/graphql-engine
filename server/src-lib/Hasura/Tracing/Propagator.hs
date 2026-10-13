@@ -4,6 +4,7 @@ module Hasura.Tracing.Propagator
   ( Propagator (..),
     HttpPropagator,
     inject,
+    isTraceHeader,
   )
 where
 
@@ -11,6 +12,7 @@ import Hasura.Prelude
 import Hasura.Tracing.Context
 import Hasura.Tracing.TraceId
 import Network.HTTP.Types (RequestHeaders, ResponseHeaders)
+import Network.HTTP.Client.Transformable qualified as HTTP
 
 -- | A carrier is the medium used by Propagators to read values from and write values to.
 -- Each specific Propagator type defines its expected carrier type, such as a string map or a byte array.
@@ -58,3 +60,22 @@ inject ::
   o ->
   o
 inject (Propagator _ injector) c = injector c
+
+
+-- | Recognises the request-header names emitted by 'Tracing.composedPropagator'
+-- (W3C TraceContext + ZipKin B3). Used by the async actions processor to drop
+-- the trace headers we stored at queue time before forwarding the action's
+-- original request headers to the webhook, so 'traceHTTPRequest' can inject
+-- a fresh 'traceparent' / B3 set tied to the new client span.
+isTraceHeader :: HTTP.HeaderName -> Bool
+isTraceHeader name =
+  name
+    `elem` [ "traceparent",
+             "tracestate",
+             "b3",
+             "X-B3-TraceId",
+             "X-B3-SpanId",
+             "X-B3-ParentSpanId",
+             "X-B3-Sampled",
+             "X-B3-Flags"
+           ]
