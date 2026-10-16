@@ -162,9 +162,9 @@ fetchRemoteSchemas env = proc (invalidationKeys, remoteSchemas) ->
     remoteSchemas
   where
     -- Cached on the whole remote schema metadata, not just its definition, as
-    -- 'buildRemoteSchema' is: an apply that changes a remote schema's
-    -- permissions or relationships fetches it again, so they are checked
-    -- against what the remote schema serves now.
+    -- before #23: an apply that changes a remote schema's permissions or
+    -- relationships fetches it again, so they are checked against what the
+    -- remote schema serves now.
     fetchRemoteSchema' = Inc.cache proc (invalidationKeys, name, remoteSchema) -> do
       Inc.dependOn -< Inc.selectKeyD name invalidationKeys
       bindA -< runExceptT (Tracing.ignoreTraceT $ addRemoteSchemaP2Setup name env (_rsmDefinition remoteSchema))

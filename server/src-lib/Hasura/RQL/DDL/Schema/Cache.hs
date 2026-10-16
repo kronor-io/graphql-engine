@@ -404,13 +404,16 @@ So the build is split in two. 'fetchExternalInputs' runs on every build and
 fetches everything that comes from outside the metadata, with the same
 invalidation-based caching as before: each source's configuration and
 introspection, the values of its enum tables, and each remote schema's
-introspection. A remote schema is also fetched again when its permissions or
-remote relationships change, as before the split: an apply that grants a role
-a field the remote schema has just started serving must be checked against
-that field, not against the introspection from before. The rest, the catalog
-and the GraphQL schema, is built by 'buildCatalogAndSchema' from the metadata
-and those fetched inputs, and is cached on the dynamic config and
-'schemaInputsFingerprint', which summarises:
+introspection. A remote schema is also fetched again when its own metadata
+changes (its permissions or relationships), as before #23: an apply that grants
+a role a field the remote schema has just started serving must be checked
+against that field, not against the introspection from before. Only that
+remote schema's own metadata counts: a source's remote relationship to a field
+it has just started serving is still checked against the last fetch until the
+remote schema is reloaded. The rest, the catalog and the GraphQL schema, is
+built by 'buildCatalogAndSchema' from the metadata and those fetched inputs,
+and is cached on the dynamic config and 'schemaInputsFingerprint', which
+summarises:
 
 - the metadata, as the JSON it is stored as. Comparing 'Metadata' values with
   '==' is not enough: after `replace_metadata` some parts (e.g. remote schema

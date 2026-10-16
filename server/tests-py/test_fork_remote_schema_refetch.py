@@ -1,5 +1,5 @@
 """
-Black-box test: a metadata apply that changes a remote schema's permissions
+Black-box tests: a metadata apply that changes a remote schema's permissions
 fetches the remote schema again.
 
 A deploy rolls out a remote schema server that serves a new field, then applies
@@ -9,12 +9,12 @@ permissions against what the server serves now, not against the introspection
 fetched before the server was rolled out.
 """
 
+import copy
 import http.server
 import json
 import threading
 
 import pytest
-import requests
 from graphql import build_ast_schema, graphql, parse
 from graphql.error import format_error
 
@@ -33,15 +33,21 @@ NEW_SDL = 'type Query { hello: String greet(name: String!): String }'
 
 
 class SwappableGraphQLServer:
-    """A GraphQL server whose schema can be replaced while it runs."""
+    """A GraphQL server whose schema can be replaced, or taken down, while it runs."""
 
     def __init__(self, worker_id, sdl):
         self.serve(sdl)
+        self.down = False
         self.port = ports.find_free_port(worker_id)
         server = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                if server.down:
+                    self.send_response(503)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
                 length = int(self.headers['Content-Length'])
                 request = json.loads(self.rfile.read(length))
                 result = graphql(
@@ -63,16 +69,20 @@ class SwappableGraphQLServer:
             def log_message(self, *args):
                 pass
 
-        self.httpd = http.server.ThreadingHTTPServer(('localhost', self.port), Handler)
+        self.httpd = http.server.ThreadingHTTPServer(('127.0.0.1', self.port), Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
     def serve(self, sdl):
         # graphql-core 2 needs the schema definition spelled out.
-        self.schema = build_ast_schema(parse(sdl + ' schema { query: Query }'))
+        schema = build_ast_schema(parse(sdl + ' schema { query: Query }'))
+        greet = schema.get_query_type().fields.get('greet')
+        if greet:
+            greet.resolver = lambda root, info, name: f'hello {name}'
+        self.schema = schema
 
     @property
     def url(self):
-        return f'http://localhost:{self.port}'
+        return f'http://127.0.0.1:{self.port}'
 
 
 @pytest.fixture
@@ -84,56 +94,57 @@ def remote_server(worker_id):
     server.httpd.server_close()
 
 
-def metadata_api(hge_ctx, body):
-    return requests.post(
-        f'{hge_ctx.hge_url}/v1/metadata',
-        json=body,
-        headers={'X-Hasura-Admin-Secret': hge_ctx.hge_key},
-        timeout=30,
-    )
+@pytest.fixture
+def remote_schema(hge_ctx, remote_server):
+    """Adds the remote server as a remote schema that grants ROLE the old schema.
+    Yields the metadata and its remote schema entry, to edit and apply."""
+    original_metadata = hge_ctx.v1metadataq({'type': 'export_metadata', 'args': {}})
+    metadata = copy.deepcopy(original_metadata)
+    remote_schema = {
+        'name': REMOTE_SCHEMA_NAME,
+        'definition': {'url': remote_server.url, 'timeout_seconds': 10},
+        'permissions': [{'role': ROLE, 'definition': {'schema': OLD_SDL}}],
+    }
+    metadata.setdefault('remote_schemas', []).append(remote_schema)
+    hge_ctx.v1metadataq({'type': 'replace_metadata', 'args': metadata})
+    yield metadata, remote_schema
+    hge_ctx.v1metadataq({'type': 'replace_metadata', 'args': original_metadata})
 
 
-def permissions_metadata(sdl):
-    return [{'role': ROLE, 'definition': {'schema': sdl}}]
+def grant_new_field(remote_schema):
+    remote_schema['permissions'] = [{'role': ROLE, 'definition': {'schema': NEW_SDL}}]
+
+
+def assert_role_can_query_new_field(hge_ctx):
+    resp = hge_ctx.v1graphqlq({'query': '{ greet(name: "x") }'}, headers={'X-Hasura-Role': ROLE})
+    assert resp == {'data': {'greet': 'hello x'}}, resp
 
 
 class TestRemoteSchemaRefetch:
 
-    def test_apply_with_changed_permissions_fetches_remote_schema_again(self, hge_ctx, remote_server):
-        original_metadata = metadata_api(hge_ctx, {'type': 'export_metadata', 'args': {}}).json()
+    def test_apply_with_changed_permissions_fetches_remote_schema_again(self, hge_ctx, remote_server, remote_schema):
+        metadata, remote_schema_entry = remote_schema
 
-        try:
-            metadata = json.loads(json.dumps(original_metadata))
-            metadata.setdefault('remote_schemas', []).append({
-                'name': REMOTE_SCHEMA_NAME,
-                'definition': {'url': remote_server.url, 'timeout_seconds': 10},
-                'permissions': permissions_metadata(OLD_SDL),
-            })
-            resp = metadata_api(hge_ctx, {'type': 'replace_metadata', 'args': metadata})
-            assert resp.status_code == 200, resp.text
+        # The server starts serving a new field; nothing reloads the remote schema.
+        remote_server.serve(NEW_SDL)
+        grant_new_field(remote_schema_entry)
+        hge_ctx.v1metadataq({'type': 'replace_metadata', 'args': metadata})
 
-            # The server starts serving a new field; nothing reloads the remote schema.
-            remote_server.serve(NEW_SDL)
+        assert_role_can_query_new_field(hge_ctx)
 
-            for remote_schema in metadata['remote_schemas']:
-                if remote_schema['name'] == REMOTE_SCHEMA_NAME:
-                    remote_schema['permissions'] = permissions_metadata(NEW_SDL)
-            resp = metadata_api(hge_ctx, {'type': 'replace_metadata', 'args': metadata})
-            assert resp.status_code == 200, (
-                f'apply granting the new field was checked against the old introspection: {resp.text}'
-            )
+    def test_retried_apply_fetches_remote_schema_again(self, hge_ctx, remote_server, remote_schema):
+        metadata, remote_schema_entry = remote_schema
 
-            resp = requests.post(
-                f'{hge_ctx.hge_url}/v1/graphql',
-                json={'query': '{ greet(name: "x") }'},
-                headers={
-                    'X-Hasura-Admin-Secret': hge_ctx.hge_key,
-                    'X-Hasura-Role': ROLE,
-                },
-                timeout=30,
-            )
-            body = resp.json()
-            assert 'errors' not in body, body
-        finally:
-            resp = metadata_api(hge_ctx, {'type': 'replace_metadata', 'args': original_metadata})
-            assert resp.status_code == 200, resp.text
+        # The apply runs while the server is down, so it falls back to the
+        # stored introspection, which lacks the new field, and fails.
+        remote_server.serve(NEW_SDL)
+        remote_server.down = True
+        grant_new_field(remote_schema_entry)
+        hge_ctx.v1metadataq({'type': 'replace_metadata', 'args': metadata}, expected_status_code=400)
+
+        # Retrying the same apply once the server is back must fetch it again,
+        # not reuse what the failed apply fetched.
+        remote_server.down = False
+        hge_ctx.v1metadataq({'type': 'replace_metadata', 'args': metadata})
+
+        assert_role_can_query_new_field(hge_ctx)
