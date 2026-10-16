@@ -146,23 +146,28 @@ fetchRemoteSchemas ::
     Inc.ArrowCache m arr,
     MonadIO m,
     MonadBaseControl IO m,
+    Eq remoteRelationshipDefinition,
     ProvidesNetwork m
   ) =>
   Env.Environment ->
-  (Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey), HashMap RemoteSchemaName RemoteSchemaDef)
+  (Inc.Dependency (HashMap RemoteSchemaName Inc.InvalidationKey), HashMap RemoteSchemaName (RemoteSchemaMetadataG remoteRelationshipDefinition))
     `arr` HashMap RemoteSchemaName (Either QErr (IntrospectionResult, BL.ByteString, RemoteSchemaInfo))
-fetchRemoteSchemas env = proc (invalidationKeys, definitions) ->
+fetchRemoteSchemas env = proc (invalidationKeys, remoteSchemas) ->
   (|
     Inc.keyed
-      ( \name definition ->
-          fetchRemoteSchema' -< (invalidationKeys, name, definition)
+      ( \name remoteSchema ->
+          fetchRemoteSchema' -< (invalidationKeys, name, remoteSchema)
       )
     |)
-    definitions
+    remoteSchemas
   where
-    fetchRemoteSchema' = Inc.cache proc (invalidationKeys, name, definition) -> do
+    -- Cached on the whole remote schema metadata, not just its definition, as
+    -- 'buildRemoteSchema' is: an apply that changes a remote schema's
+    -- permissions or relationships fetches it again, so they are checked
+    -- against what the remote schema serves now.
+    fetchRemoteSchema' = Inc.cache proc (invalidationKeys, name, remoteSchema) -> do
       Inc.dependOn -< Inc.selectKeyD name invalidationKeys
-      bindA -< runExceptT (Tracing.ignoreTraceT $ addRemoteSchemaP2Setup name env definition)
+      bindA -< runExceptT (Tracing.ignoreTraceT $ addRemoteSchemaP2Setup name env (_rsmDefinition remoteSchema))
 
 -- | Resolves a RemoteSchemaPermission metadata object into a 'GraphQL schema'.
 buildRemoteSchemaPermissions ::
