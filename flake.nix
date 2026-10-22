@@ -1,45 +1,65 @@
-# This Nix flake defines the dependencies of the Hasura GraphQL Engine.
-# Currently, we do not use it for building anything, just for providing a shell.
+# This Nix flake builds the Hasura GraphQL Engine with haskell.nix and provides
+# a development shell.
 #
-# The shell provides tooling for the Server, CLI, Console, and other components.
-# You can start it with `nix develop`, or by using `direnv` (see .envrc).
+# It uses the same haskell.nix, nixpkgs and hackage.nix as kronor-io/kronor,
+# whose CI builds the engine and pushes it to the Kronor binary cache, so most
+# of the Haskell closure (GHC included) is downloaded rather than built. Keep
+# the pins in flake.lock in step with kronor's.
 #
-# If you are using macOS, note that we apply a patch to GHC, and therefore all
-# tooling needs to be built from scratch. If you're averse to waiting several
-# hours for your environment to become usable, you can add @SamirTalwar's Cachix
-# repository to save yourself the trouble:
-#
-#     https://app.cachix.org/cache/hasura-samirtalwar#pull
+# Start the shell with `nix develop`, or by using `direnv` (see .envrc).
 {
   description = "Hasura GraphQL Engine";
 
-  inputs = {
-    flake-utils = {
-      url = github:numtide/flake-utils;
-    };
+  nixConfig = {
+    extra-substituters = "https://niks3-staging.kronor.io?tls-certificate=/etc/kronor/niks3-read.pem&tls-private-key=/etc/kronor/niks3-read-key.pem";
+    extra-trusted-public-keys = "niks3.staging.kronor.io-1:eBIwkSq2ZbTcW8YfV4aOM1vCvk6pgseZwnSVP5kcwRs=";
+  };
 
-    nixpkgs = {
-      url = github:NixOS/nixpkgs;
-    };
+  inputs = {
+    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:NixOS/nixpkgs/release-26.05";
+    haskell-nix.url = "github:kronor-io/haskell.nix/nixpkgs-ghc-601a4d19";
+    haskell-nix.inputs.hackage.follows = "hackage-nix";
+    haskell-nix.inputs.nixpkgs.follows = "nixpkgs";
+    hackage-nix.url = "github:kronor-io/hackage.nix";
+    hackage-nix.flake = false;
   };
 
   outputs =
     { self
     , flake-utils
     , nixpkgs
+    , haskell-nix
+    , hackage-nix
     }:
     flake-utils.lib.eachDefaultSystem (system:
     let
-      pkgs = import ./nix/nixpkgs.nix { inherit nixpkgs system; };
+      haskellNix = import haskell-nix {
+        inherit system;
+        sourcesOverride.hackage = hackage-nix;
+      };
+
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [
+          # As in kronor-io/kronor: libpq comes from here, so this keeps the
+          # engine's dependencies identical to the ones in the cache.
+          (final: _: { postgresql = final.postgresql_18; })
+          haskellNix.overlay
+        ];
+        config.allowUnfreePredicate = pkg: builtins.elem (pkgs.lib.getName pkg) [
+          "msodbcsql18"
+        ];
+      };
+
+      project = import ./nix/project.nix { inherit pkgs; src = ./.; };
     in
     {
-      packages = {
-        graphql-parser = pkgs.haskell.packages.${pkgs.ghcName}.graphql-parser;
-      };
+      packages.graphql-engine = project.hsPkgs.graphql-engine.components.exes.graphql-engine;
 
       formatter = pkgs.nixpkgs-fmt;
 
-      devShells.default = import ./nix/shell.nix { inherit pkgs system; };
+      devShells.default = import ./nix/shell.nix { inherit pkgs project; };
     }
     );
 }
