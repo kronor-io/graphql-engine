@@ -312,10 +312,7 @@ selectionSetObjectWith name description fieldDefinitions lookupParser implements
         -- TODO(PDV) This probably accepts invalid queries, namely queries that use
         -- type names that do not exist.
         fields <- collectFields (getName name : parsedInterfaceNames) input
-        -- 'InsOrdHashMap.traverseWithKey' (which 'for' uses) restores the
-        -- insertion order with an insertion sort, quadratic in the number of
-        -- fields. Traverse the sorted list instead.
-        parsedFields <- for (InsOrdHashMap.toList fields) \(alias, selectionField@Field {_fName, _fAlias, _fDirectives}) -> do
+        for fields \selectionField@Field {_fName, _fAlias, _fDirectives} -> do
           parsedValue <-
             if
               | _fName == $$(litName "__typename") ->
@@ -329,8 +326,7 @@ selectionSetObjectWith name description fieldDefinitions lookupParser implements
                       "field " <> toErrorValue _fName <> " not found in type: " <> toErrorValue name
           _dirMap <- parseDirectives customDirectives (DLExecutable EDLFIELD) _fDirectives
           -- insert processing of custom directives here
-          pure (alias, parsedValue)
-        pure $ InsOrdHashMap.fromList parsedFields
+          pure parsedValue
     }
   where
     interfaces = mapMaybe (getInterfaceInfo . pType) implementsInterfaces
