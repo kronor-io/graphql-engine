@@ -70,6 +70,7 @@ pkgs.haskell-nix.project {
     "https://github.com/hasura/ekg-core.git"."df610859603b504494ad770bdbb7053a7f0b9a6c" = "0a2v7v84r2r3amc9mbzhs69risr0zlbsbyb8kchi93n23w58x09l";
     "https://github.com/hasura/libdeflate-hs.git"."0715562e5393acfa5dde66b79c2bfbd05c1828b7" = "1il2jmrxdawm0hpr6kwqx84fs36qif57hxh0m1z97z862x7f1rhn";
     "https://github.com/testcontainers/testcontainers-hs"."fe0d6bbce6ce74d5843a964ac231929ea37025e8" = "1y521m6hbbdnn1qmkx3qyy91gyd8pi65k6gknlsgr9lglxj5smiz";
+    "https://github.com/hasura/insert-ordered-containers.git"."cdf4f82bc74b9950cb7e69ef2d0add9a8f397a71" = "0qrglqyja617znvfd3i537j0z2gniil3fmd18pzfg1i5isbf13dy";
   };
   supportHpack = false;
 }
