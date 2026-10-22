@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Flex } from '@radix-ui/themes';
 import KeyValueInput from './KeyValueInput';
 import { editorDebounceTime } from '../utils';
@@ -19,6 +19,7 @@ type RequestUrlEditorProps = {
   requestQueryParams: QueryParams;
   requestUrlOnChange: (requestUrl: string) => void;
   requestQueryParamsOnChange: (requestQueryParams: QueryParams) => void;
+  disabled?: boolean;
 };
 
 type QueryParmsOptions = {
@@ -44,6 +45,7 @@ const RequestUrlEditor: React.FC<RequestUrlEditorProps> = ({
   requestQueryParams,
   requestUrlOnChange,
   requestQueryParamsOnChange,
+  disabled,
 }) => {
   const [localUrl, setLocalUrl] = useState<string>(requestUrl);
   const [queryParamsType, setQueryParamstype] = useState<
@@ -62,40 +64,43 @@ const RequestUrlEditor: React.FC<RequestUrlEditorProps> = ({
   const [localQueryParams, setLocalQueryParams] =
     useState<QueryParams>(requestQueryParams);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  // Re-sync the local editing buffers whenever the upstream props change. These
+  // are done during render (the React "adjust state when a prop changes"
+  // pattern) rather than in effects, so the resets land in the same commit with
+  // no extra render pass. The guards (`prop !== prevProp`) make them run exactly
+  // once per upstream change, exactly like the previous dependency-array effects.
+  const [prevRequestQueryParams, setPrevRequestQueryParams] =
+    useState(requestQueryParams);
+  if (requestQueryParams !== prevRequestQueryParams) {
+    setPrevRequestQueryParams(requestQueryParams);
     setQueryParamstype(
       typeof requestQueryParams === 'string' ? 'url-string' : 'key-value',
     );
-
     setKeyValueQueryParams(
       typeof requestQueryParams !== 'string'
         ? requestQueryParams
         : keyValueQueryParams,
     );
-
     setStringQueryParams(
       typeof requestQueryParams === 'string'
         ? requestQueryParams
         : stringQueryParams,
     );
-  }, [requestQueryParams]);
-
-  useEffect(() => {
-    setLocalUrl(requestUrl);
-  }, [requestUrl]);
-
-  useEffect(() => {
-    if (requestUrlError) {
-      setLocalError(requestUrlError);
-    } else {
-      setLocalError(null);
-    }
-  }, [requestUrlError]);
-
-  useEffect(() => {
     setLocalQueryParams(requestQueryParams);
-  }, [requestQueryParams]);
+  }
+
+  const [prevRequestUrl, setPrevRequestUrl] = useState(requestUrl);
+  if (requestUrl !== prevRequestUrl) {
+    setPrevRequestUrl(requestUrl);
+    setLocalUrl(requestUrl);
+  }
+
+  const [prevRequestUrlError, setPrevRequestUrlError] =
+    useState(requestUrlError);
+  if (requestUrlError !== prevRequestUrlError) {
+    setPrevRequestUrlError(requestUrlError);
+    setLocalError(requestUrlError ? requestUrlError : null);
+  }
 
   useDebouncedEffect(
     () => {
@@ -126,6 +131,7 @@ const RequestUrlEditor: React.FC<RequestUrlEditorProps> = ({
     maxLines: 10,
     showLineNumbers: true,
     useSoftTabs: true,
+    readOnly: disabled,
   };
 
   return (
@@ -139,6 +145,7 @@ const RequestUrlEditor: React.FC<RequestUrlEditorProps> = ({
         value={localUrl}
         onChange={(e) => urlOnChangeHandler(e.target.value)}
         data-test="transform-requestUrl"
+        disabled={disabled}
         full
       />
       <Flex direction="column" gap="2">
@@ -147,6 +154,7 @@ const RequestUrlEditor: React.FC<RequestUrlEditorProps> = ({
           orientation="horizontal"
           options={executionOptions}
           value={queryParamsType}
+          disabled={disabled}
           onChange={(value) => {
             setQueryParamstype(value as 'key-value' | 'url-string');
             queryParamsOnChangeHandler(
@@ -164,6 +172,7 @@ const RequestUrlEditor: React.FC<RequestUrlEditorProps> = ({
               setKeyValueQueryParams(pairs);
             }}
             testId="query-params"
+            disabled={disabled}
           />
         ) : (
           <AceEditor
@@ -191,9 +200,10 @@ e.g. {{concat(["userId=", $session_variables["x-hasura-user-id"]])}}`}
           type="text"
           name="request_url_preview"
           id="request_url_preview"
-          className="w-full block cursor-not-allowed rounded border-gray-200 bg-gray-200"
+          className="block cursor-not-allowed"
           data-test="transform-requestUrl-preview"
           value={requestUrlPreview}
+          full
         />
       </Flex>
       {localError ? (

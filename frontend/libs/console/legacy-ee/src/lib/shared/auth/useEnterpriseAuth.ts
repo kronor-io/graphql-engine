@@ -129,10 +129,37 @@ const useEnterpriseAuth = (): EnterpriseAuthService => {
   };
 
   const initialize = async () => {
-    // Admin secret is set globally by the CLI.
-    let authState = loadConsoleAuthState<EnterpriseAuthState>();
+    // Cloud and CLI consoles can inject an admin secret through window.__env.
+    // Prefer it over a credential saved in local storage (e.g. from an earlier
+    // session on the same origin).
+    const injectedAdminSecret =
+      envVars.consoleMode === CLI_CONSOLE_MODE ||
+      envVars.consoleType === 'cloud'
+        ? envVars.adminSecret
+        : '';
+    let authState: EnterpriseAuthState | null = injectedAdminSecret
+      ? {
+          type: 'admin-secret',
+          adminSecret: injectedAdminSecret,
+          shouldPersist: false,
+        }
+      : loadConsoleAuthState<EnterpriseAuthState>();
+    // Without an injected secret, a saved admin secret, PAT, or third-party
+    // SSO session must not bypass Hasura OAuth in a cloud console.
+    if (
+      !injectedAdminSecret &&
+      envVars.consoleType === 'cloud' &&
+      authState?.type !== 'hasura-sso'
+    ) {
+      clearConsoleAuthState();
+      navigateAuth(null);
+      return;
+    }
+
     if (!authState) {
-      if (globals.isAdminSecretSet || !globals.adminSecret) {
+      // An injected secret also sets isAdminSecretSet. Only prompt for
+      // credentials when the engine requires a secret and none is available.
+      if (globals.isAdminSecretSet && !globals.adminSecret) {
         navigateAuth(null);
         return;
       }
@@ -162,9 +189,15 @@ const useEnterpriseAuth = (): EnterpriseAuthService => {
       }
     }
 
-    await authenticate(authState).then((isAuthenticated) =>
-      navigateAuth(isAuthenticated ? authState : null),
-    );
+    await authenticate(authState)
+      .then((isAuthenticated) =>
+        navigateAuth(isAuthenticated ? authState : null),
+      )
+      .catch(() => {
+        clearConsoleAuthState();
+        setAuthState(null);
+        navigateAuth(null);
+      });
   };
 
   const logout = () => {

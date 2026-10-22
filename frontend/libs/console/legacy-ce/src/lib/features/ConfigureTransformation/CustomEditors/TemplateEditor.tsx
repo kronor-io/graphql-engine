@@ -11,6 +11,7 @@ type TemplateEditorProps = {
   requestBodyOnChange: (requestBody: RequestTransformStateBody) => void;
   height?: string;
   width?: string;
+  disabled?: boolean;
 };
 
 const TemplateEditor: React.FC<TemplateEditorProps> = ({
@@ -20,6 +21,7 @@ const TemplateEditor: React.FC<TemplateEditorProps> = ({
   requestBodyOnChange,
   height,
   width,
+  disabled,
 }) => {
   const editorRef = useRef<AceEditorRef>(undefined);
   const [localValue, setLocalValue] = useState<string>(
@@ -29,17 +31,21 @@ const TemplateEditor: React.FC<TemplateEditorProps> = ({
     requestBodyError,
   );
 
-  useEffect(() => {
+  // Reset the local editing buffer / error whenever the upstream props change.
+  // Done during render (the React "adjust state when a prop changes" pattern)
+  // instead of in an effect, so no extra render pass is committed.
+  const [prevRequestBody, setPrevRequestBody] = useState(requestBody);
+  if (requestBody !== prevRequestBody) {
+    setPrevRequestBody(requestBody);
     setLocalValue(requestBody.template ?? '');
-  }, [requestBody]);
+  }
 
-  useEffect(() => {
-    if (requestBodyError) {
-      setLocalError(requestBodyError);
-    } else {
-      setLocalError(null);
-    }
-  }, [requestBodyError]);
+  const [prevRequestBodyError, setPrevRequestBodyError] =
+    useState(requestBodyError);
+  if (requestBodyError !== prevRequestBodyError) {
+    setPrevRequestBodyError(requestBodyError);
+    setLocalError(requestBodyError ? requestBodyError : null);
+  }
 
   useEffect(() => {
     const sampleInputWordCompleter = getAceCompleterFromString(
@@ -87,11 +93,11 @@ const TemplateEditor: React.FC<TemplateEditorProps> = ({
         showPrintMargin={false}
         height={height || '200px'}
         width={width || '100%'}
-        fontSize="12px"
         setOptions={{
           enableBasicAutocompletion: true,
           enableLiveAutocompletion: true,
           useWorker: false,
+          readOnly: disabled,
         }}
       />
     </>

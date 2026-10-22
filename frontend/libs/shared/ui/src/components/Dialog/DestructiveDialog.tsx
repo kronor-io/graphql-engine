@@ -76,11 +76,14 @@ export const DestructiveDialog = ({
 export const DestructiveDialogCascade = ({
   onConfirm,
   children,
+  defaultCascade = false,
   ...props
 }: Omit<DestructiveDialogArgs, 'onConfirm'> & {
   onConfirm: (cascade: boolean) => void;
+  // Initial state of the cascade checkbox.
+  defaultCascade?: boolean;
 }) => {
-  const [cascade, setCascade] = useState(false);
+  const [cascade, setCascade] = useState(defaultCascade);
 
   return (
     <DestructiveDialog {...props} onConfirm={() => onConfirm(cascade)}>
@@ -88,7 +91,7 @@ export const DestructiveDialogCascade = ({
       <div className="mt-4">
         <Checkbox
           value={cascade}
-          onChange={(value) => setCascade!(value === true)}
+          onChange={(value) => setCascade(value === true)}
         >
           Enable cascade?{' '}
           <IconTooltip message="When set to true, the effect (if possible) is cascaded to any Metadata dependent objects (relationships, permissions, templates)." />
