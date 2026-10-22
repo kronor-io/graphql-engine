@@ -1,8 +1,9 @@
 // GraphiQL 5 uses the Monaco editor, which needs its web workers wired up before
 // any editor is created, hence this top import. GraphiQL's official webpack
 // setup spawns them as classic workers; the console's webpack build strips the
-// `import.meta` token from worker chunks (MonacoWorkerPublicPathPlugin) so those
-// classic workers parse and run — see that plugin for the full rationale.
+// `import.meta` token from worker chunks (MonacoWorkerPublicPathPlugin) and
+// bootstraps CDN-hosted workers through a same-origin blob. This keeps Monaco's
+// language services off the UI thread, including on custom console domains.
 import 'graphiql/setup-workers/webpack';
 import { useMemo, useState } from 'react';
 import { Flex } from '@radix-ui/themes';
@@ -100,7 +101,20 @@ const GraphiQLWrapper = ({
             : (await resp.clone().bytes()).length;
 
           const isResponseCached = resp.headers.has('Cache-Control');
-          const trimmedQuery = query.trim();
+          // Derive "is this request cachable" from the query actually being
+          // sent (init.body is the serialized GraphQL request — the same editor
+          // document as the `query` prop) rather than closing over the `query`
+          // prop. This keeps the check correct without rebuilding the fetcher on
+          // every keystroke.
+          let requestQuery: string;
+          try {
+            const parsedBody = JSON.parse(init.body);
+            requestQuery =
+              typeof parsedBody?.query === 'string' ? parsedBody.query : '';
+          } catch {
+            requestQuery = '';
+          }
+          const trimmedQuery = requestQuery.trim();
           const isRequestCachable =
             trimmedQuery.startsWith('{') || trimmedQuery.startsWith('query ');
           const cacheWarning = getCacheRequestWarning(

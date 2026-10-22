@@ -1,6 +1,5 @@
 import { Analytics, REDACT_EVERYTHING } from '@hasura/shared/analytics';
-import { getConfirmation } from '@hasura/shared/utils';
-import { Switch } from '@hasura/shared/ui';
+import { Switch, useHasuraAlert } from '@hasura/shared/ui';
 import { useDocumentTitle } from '@hasura/shared/hooks';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router';
@@ -15,18 +14,30 @@ const Migrations = () => {
     useMigrationStatus();
   const { envVars } = useAppContext();
   const navigate = useNavigate();
+  const { hasuraConfirm } = useHasuraAlert();
 
   useEffect(() => {
     if (envVars.consoleMode === 'server') {
       navigate('/data', { replace: true });
     }
-  }, [envVars]);
+  }, [envVars, navigate]);
 
   const handleMigrationModeToggle = () => {
-    const isOk = getConfirmation();
-    if (isOk) {
-      updateMigrationModeStatus();
-    }
+    const enabling = migrationStatus !== 'healthy';
+    hasuraConfirm({
+      title: enabling
+        ? 'Allow Postgres schema changes via console'
+        : 'Disable Postgres schema changes via console',
+      message: `Are you sure you want to ${
+        enabling ? 'allow' : 'disable'
+      } Postgres schema changes via the console?`,
+      confirmText: 'Continue',
+      onClose: ({ confirmed }) => {
+        if (confirmed) {
+          updateMigrationModeStatus();
+        }
+      },
+    });
   };
 
   const getNotesSection = () => {

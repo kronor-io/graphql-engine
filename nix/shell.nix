@@ -1,26 +1,42 @@
-{ pkgs, system }:
+{ pkgs, project }:
 let
-  versions = import ./versions.nix { inherit pkgs; };
+  versions = pkgs.lib.importJSON ../server/VERSIONS.json;
 
-  # empty package, for shenanigans
-  empty = builtins.derivation {
-    inherit system;
-    name = "empty";
-    builder = pkgs.writeShellScript "null.sh" "${pkgs.coreutils}/bin/mkdir $out";
+  # cabal, hlint and ormolu need not be built with the engine's GHC: build them
+  # with the GHC and index-state kronor-io/kronor uses, which are in the Kronor
+  # binary cache.
+  toolCompiler = "ghc9124";
+  index-state = "2026-09-17T08:24:16Z";
+
+  # The same hlint kronor-io/kronor builds. CI uses the prebuilt 3.6.1 binary
+  # from server/VERSIONS.json, but 3.6.1 does not build with GHC >= 9.8 and has
+  # no aarch64-linux binary.
+  hlint = pkgs.haskell-nix.tool toolCompiler "hlint" {
+    version = "3.10";
+    inherit index-state;
+  };
+
+  cabal = pkgs.haskell-nix.tool toolCompiler "cabal" {
+    version = versions.cabal-install;
+    inherit index-state;
+  };
+
+  ormolu = pkgs.haskell-nix.tool toolCompiler "ormolu" {
+    version = versions.ormolu;
+    inherit index-state;
   };
 
   # Unix ODBC Support
   freetdsWithODBC = pkgs.freetds.override {
     odbcSupport = true;
-    inherit unixODBC;
+    unixodbc = unixODBC;
   };
 
-  msodbcsql = pkgs.unixODBCDrivers.msodbcsql18;
+  msodbcsql = pkgs.unixodbcDrivers.msodbcsql18;
 
   # Verify this works by running `odbcinst -q -d`.
   # The output should be the headings from the odbcinst.ini file.
   # (You can easily see the generated file by running `cat $ODBCINSTINI`.)
-  # If you see any errors, please contact your friendly MSSQL and/or Nix expert.
   odbcConfiguration = pkgs.writeTextFile {
     name = "odbc-configuration";
     text = ''
@@ -31,137 +47,37 @@ let
     destination = "/odbcinst.ini";
   };
 
-  unixODBC = pkgs.unixODBC.overrideAttrs (oldAttrs: {
-    configureFlags = (if oldAttrs ? configureFlags then oldAttrs.configureFlags else [ ]) ++ [ "--disable-gui" "--sysconfdir=${odbcConfiguration}" ];
+  unixODBC = pkgs.unixodbc.overrideAttrs (oldAttrs: {
+    configureFlags = (oldAttrs.configureFlags or [ ]) ++ [ "--disable-gui" "--sysconfdir=${odbcConfiguration}" ];
   });
+in
+project.shellFor {
+  # Hoogle would build documentation for every dependency.
+  withHoogle = false;
 
-  # Ensure that GHC and HLS have access to all the dynamic libraries we have kicking around.
-  ghc =
-    let original = pkgs.haskell.compiler.${pkgs.ghcName};
-    in pkgs.stdenv.mkDerivation
-      {
-        name = original.name;
-        src = empty;
-        buildInputs = [ original pkgs.makeWrapper ];
-        installPhase = ''
-          mkdir -p "$out/bin"
-          for bin in ${original}/bin/*; do
-            if [[ -x "$bin" ]]; then
-              makeWrapper "$bin" "$out/bin/$(basename "$bin")" \
-                --set LD_LIBRARY_PATH ${dynamicLibraryPath} \
-                --set DYLD_LIBRARY_PATH ${dynamicLibraryPath}
-            fi
-          done
-        '';
-      };
+  buildInputs = [
+    cabal
+    hlint
+    ormolu
 
-  hls =
-    let original = pkgs.haskell.packages.${pkgs.ghcName}.haskell-language-server;
-    in pkgs.stdenv.mkDerivation
-      {
-        name = original.name;
-        src = empty;
-        buildInputs = [ original pkgs.makeWrapper ];
-        installPhase = ''
-          mkdir -p "$out/bin"
-          makeWrapper ${original}/bin/haskell-language-server "$out/bin/haskell-language-server" \
-            --set LD_LIBRARY_PATH ${dynamicLibraryPath} \
-            --set DYLD_LIBRARY_PATH ${dynamicLibraryPath}
-          makeWrapper ${original}/bin/haskell-language-server-wrapper "$out/bin/haskell-language-server-wrapper" \
-            --set LD_LIBRARY_PATH ${dynamicLibraryPath} \
-            --set DYLD_LIBRARY_PATH ${dynamicLibraryPath}
-        '';
-      };
-
-  baseInputs = [
-    pkgs.stdenv
     pkgs.jq
-  ];
-
-  docsInputs = [
-    pkgs.yarn
-  ];
-
-  integrationTestInputs = [
-    pkgs.nodejs
-    pkgs.python3
-    pkgs.pyright # Python type checker
-  ];
-
-  # The version of GHC in `ghcName` is set in nix/overlays/ghc.nix.
-  haskellInputs = [
-    pkgs.cabal2nix
     pkgs.ghciwatch
 
-    ghc
-    hls
+    # Integration tests.
+    pkgs.nodejs
+    pkgs.python3
+    pkgs.pyright
 
-    pkgs.haskell.packages.${pkgs.ghcName}.alex
-    pkgs.haskell.packages.${pkgs.ghcName}.apply-refact
-    (versions.ensureVersion pkgs.haskell.packages.${pkgs.ghcName}.cabal-install)
-    (pkgs.haskell.lib.dontCheck (pkgs.haskell.packages.${pkgs.ghcName}.ghcid))
-    pkgs.haskell.packages.${pkgs.ghcName}.happy
-    (versions.ensureVersion pkgs.haskell.packages.${pkgs.ghcName}.hlint)
-    pkgs.haskell.packages.${pkgs.ghcName}.hoogle
-    pkgs.haskell.packages.${pkgs.ghcName}.hspec-discover
-    (versions.ensureVersion pkgs.haskell.packages.${pkgs.ghcName}.ormolu)
-  ];
-
-  devInputs = [
-    pkgs.nixpkgs-fmt
-    pkgs.shellcheck
-    pkgs.terraform
-    pkgs.gopls
-  ];
-
-  ciInputs = [
-    pkgs.go
-    pkgs.gox
-  ];
-
-  dynamicLibraries = [
-    pkgs.gmp
-    pkgs.libkrb5 # Includes required `gssapi` headers.
-    pkgs.libiconv
-    pkgs.ncurses
-    pkgs.openssl_3
-    pkgs.pcre
-    pkgs.zlib
-    pkgs.zstd
-
-    # PostgreSQL, Microsoft SQL Server, & MySQL dependencies.
+    # PostgreSQL, Microsoft SQL Server, & MySQL clients.
     freetdsWithODBC
     pkgs.libmysqlclient
     pkgs.mariadb
-    pkgs.postgresql_16
+    pkgs.postgresql
     unixODBC
     msodbcsql
-  ]
-  # Linux-specific libraries.
-  ++ pkgs.lib.optionals pkgs.stdenv.targetPlatform.isLinux [
-    pkgs.stdenv.cc.cc.lib
+
+    pkgs.nixpkgs-fmt
+    pkgs.shellcheck
+    pkgs.go
   ];
-
-  dynamicLibraryPath = pkgs.lib.strings.makeLibraryPath dynamicLibraries;
-
-  includeLibraries = [
-    pkgs.libkrb5.dev
-    pkgs.ncurses.dev
-    pkgs.openssl_3.dev
-    pkgs.pcre.dev
-    pkgs.zlib.dev
-  ];
-
-  serverDeps =
-    haskellInputs
-    ++ dynamicLibraries
-    ++ includeLibraries
-    ++ integrationTestInputs;
-in
-pkgs.mkShell ({
-  buildInputs = baseInputs ++ docsInputs ++ serverDeps ++ devInputs ++ ciInputs;
-} // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-  shellHook = ''
-    export DYLD_LIBRARY_PATH='${dynamicLibraryPath}'
-  '';
-})
+}

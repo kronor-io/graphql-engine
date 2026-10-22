@@ -20,11 +20,15 @@ type DefinitionState = {
   ast: Record<string, any> | null | undefined;
 };
 
+// Sentinel that `allTypes` can never equal, so the render-phase seeding always
+// runs on the first render (mirroring the original mount effect).
+const NOT_SEEDED = Symbol('types-manage-not-seeded');
+
 const TypesManage = () => {
   const { readOnlyMode } = useAppContext();
   const { data: allTypes } = useMetadata((m) => m.metadata.custom_types);
-  const setCustomGraphQLTypes = useSetCustomGraphQLTypes();
-  const [isFetching, setIsFetching] = useState(false);
+  const { setCustomGraphQLTypes, isPending: isSettingCustomTypes } =
+    useSetCustomGraphQLTypes();
   const [definition, setDefinition] = useState<DefinitionState>({
     sdl: '',
     error: null,
@@ -55,7 +59,17 @@ const TypesManage = () => {
     sdlOnChange(existingTypeDefSdl);
   };
 
-  React.useEffect(init, [allTypes]);
+  // Seed the editor from metadata during render (guarded by a previous-value
+  // check) instead of in an effect. This adjusts state when the `allTypes`
+  // metadata changes without an extra setState-in-effect commit, and preserves
+  // the original reset-on-metadata-change behaviour (including the initial seed
+  // on mount, hence the NOT_SEEDED sentinel so the first render always runs
+  // `init`). `init` remains available for the explicit "Reset" button below.
+  const [prevAllTypes, setPrevAllTypes] = React.useState<unknown>(NOT_SEEDED);
+  if (allTypes !== prevAllTypes) {
+    setPrevAllTypes(allTypes);
+    init();
+  }
 
   const onSave = () => {
     if (!allTypes) {
@@ -74,14 +88,11 @@ const TypesManage = () => {
       return;
     }
 
-    setIsFetching(true);
-    setCustomGraphQLTypes({ existingTypes: allTypes, newTypes }).finally(() => {
-      setIsFetching(false);
-    });
+    setCustomGraphQLTypes({ existingTypes: allTypes, newTypes });
   };
 
   // TODO handling error elegantly
-  const allowSave = !isFetching && !definition.error && !readOnlyMode;
+  const allowSave = !isSettingCustomTypes && !definition.error && !readOnlyMode;
   const editorTooltip = 'All GraphQL types used in actions';
   const editorLabel = 'All custom types';
 
@@ -108,7 +119,11 @@ const TypesManage = () => {
               Save
             </Button>
           </div>
-          <Button onClick={init} mode="default" disabled={readOnlyMode}>
+          <Button
+            onClick={init}
+            mode="default"
+            disabled={readOnlyMode || isSettingCustomTypes}
+          >
             Reset
           </Button>
         </Flex>

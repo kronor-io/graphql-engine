@@ -11,21 +11,28 @@ import { Code } from '@radix-ui/themes';
 type PayloadOptionsTransformsProps = {
   responseBody: ResponseTransformStateBody;
   responseBodyOnChange: (responseBody: ResponseTransformStateBody) => void;
+  disabled?: boolean;
 };
 
 const ResponseTransforms: React.FC<PayloadOptionsTransformsProps> = ({
   responseBody,
   responseBodyOnChange,
+  disabled,
 }) => {
   const [localFormElements, setLocalFormElements] = React.useState<NameValue[]>(
     responseBody.form_template ?? [{ name: '', value: '' }],
   );
 
-  React.useEffect(() => {
+  // Reset the local form buffer when the upstream responseBody changes. Done
+  // during render (the React "adjust state when a prop changes" pattern) rather
+  // than in an effect, avoiding an extra render pass.
+  const [prevResponseBody, setPrevResponseBody] = React.useState(responseBody);
+  if (responseBody !== prevResponseBody) {
+    setPrevResponseBody(responseBody);
     setLocalFormElements(
       responseBody.form_template ?? [{ name: '', value: '' }],
     );
-  }, [responseBody]);
+  }
 
   useDebouncedEffect(
     () => {
@@ -61,6 +68,7 @@ const ResponseTransforms: React.FC<PayloadOptionsTransformsProps> = ({
           <TemplateEditor
             requestBody={responseBody}
             requestBodyOnChange={responseBodyOnChange}
+            disabled={disabled}
           />
         ) : null}
       </div>
