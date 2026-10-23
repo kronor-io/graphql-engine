@@ -32,6 +32,7 @@ extra-source-files:
   src-rsr/initialise.sql
   src-rsr/init_pg_source.sql
   src-rsr/introspection.json
+  src-rsr/introspection-one-of.json
   src-rsr/migrations/08_to_1.sql
   src-rsr/migrations/10_to_11.sql
   src-rsr/migrations/11_to_12.sql

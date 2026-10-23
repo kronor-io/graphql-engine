@@ -13,6 +13,9 @@ module Hasura.GraphQL.Parser.Internal.Input
     inputParserInput,
     list,
     object,
+    oneOfObject,
+    oneOfDirective,
+    isOneOfDefinition,
     objectWith,
     checkInputObjectFields,
     parseOptionalField,
@@ -23,7 +26,7 @@ where
 import Control.Applicative (Alternative ((<|>)))
 import Control.Arrow ((>>>))
 import Control.Lens hiding (enum, index)
-import Control.Monad (join, unless, (<=<), (>=>))
+import Control.Monad (join, unless, when, (<=<), (>=>))
 import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
@@ -44,6 +47,8 @@ import Hasura.Base.ToErrorValue
 import Hasura.GraphQL.Parser.Class
 import Hasura.GraphQL.Parser.Internal.TypeChecking
 import Hasura.GraphQL.Parser.Internal.Types
+import Hasura.GraphQL.Parser.Name.Introspection qualified as Name
+import Hasura.GraphQL.Parser.Names (HasName (..))
 import Hasura.GraphQL.Parser.Schema
 import Hasura.GraphQL.Parser.Variable
 import Language.GraphQL.Draft.Syntax hiding (Definition)
@@ -446,7 +451,36 @@ object ::
   InputFieldsParser origin m a ->
   Parser origin 'Input m a
 {-# INLINE object #-}
-object name description (InputFieldsParser fieldDefinitions fieldsParser) =
+object = objectImpl False
+
+-- | A OneOf Input Object (@\@oneOf@): exactly one field must be provided, and
+-- its value must not be null. Variables used as the value of that field must be
+-- non-nullable. See <https://spec.graphql.org/September2025/#sec-OneOf-Input-Objects>.
+oneOfObject ::
+  (MonadParse m) =>
+  Name ->
+  Maybe Description ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Input m a
+{-# INLINE oneOfObject #-}
+oneOfObject = objectImpl True
+
+-- | The @\@oneOf@ directive, as attached to the definition of a OneOf Input Object.
+oneOfDirective :: Directive Void
+oneOfDirective = Directive Name._oneOf mempty
+
+isOneOfDefinition :: [Directive var] -> Bool
+isOneOfDefinition = any ((== Name._oneOf) . _dName)
+
+objectImpl ::
+  (MonadParse m) =>
+  Bool ->
+  Name ->
+  Maybe Description ->
+  InputFieldsParser origin m a ->
+  Parser origin 'Input m a
+{-# INLINE objectImpl #-}
+objectImpl isOneOf name description (InputFieldsParser fieldDefinitions fieldsParser) =
   Parser
     { pType = schemaType,
       pParser =
@@ -472,10 +506,11 @@ object name description (InputFieldsParser fieldDefinitions fieldsParser) =
     inputObjectInfo@(InputObjectInfo sortedFieldDefinitions) = InputObjectInfo fieldDefinitions
     schemaType =
       TNamed NonNullable $
-        Definition name description Nothing [] $
+        Definition name description Nothing [oneOfDirective | isOneOf] $
           TIInputObject inputObjectInfo
     fieldNames = S.fromList (dName <$> sortedFieldDefinitions)
     parseFields fields = do
+      when isOneOf $ checkOneOf fields
       -- check for extraneous fields here, since the InputFieldsParser just
       -- handles parsing the fields it cares about
       for_ (HashMap.keys fields) \fieldName ->
@@ -485,6 +520,21 @@ object name description (InputFieldsParser fieldDefinitions fieldsParser) =
               "field " <> toErrorValue fieldName <> " not found in type: " <> toErrorValue name
       fieldsParser fields
     invalidName key = parseError $ "variable value contains object with key " <> ErrorValue.dquote key <> ", which is not a legal GraphQL name"
+    checkOneOf fields = case HashMap.toList fields of
+      [(fieldName, value)] ->
+        withKey (J.Key (K.fromText (unName fieldName))) case value of
+          GraphQLValue VNull -> nullMember fieldName
+          JSONValue J.Null -> nullMember fieldName
+          GraphQLValue (VVariable Variable {vInfo, vType})
+            | isNullable vType ->
+                parseError $
+                  "variable "
+                    <> toErrorValue (getName vInfo)
+                    <> " must be non-nullable to be used for the OneOf input object field "
+                    <> toErrorValue fieldName
+          _ -> pure ()
+      _ -> parseError $ "exactly one field must be specified for the OneOf input object " <> toErrorValue name
+    nullMember fieldName = parseError $ "the value of the OneOf input object field " <> toErrorValue fieldName <> " must not be null"
 
 -- | An input object whose fields are parsed by a function of the whole
 -- object, rather than by an 'InputFieldsParser'. This lets a schema parse an

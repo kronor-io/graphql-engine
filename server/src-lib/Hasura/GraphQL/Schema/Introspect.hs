@@ -201,7 +201,7 @@ buildIntrospectionSchema queryRoot' mutationRoot' subscriptionRoot' = do
   let -- The only directives that we currently expose over introspection are our
       -- statically defined ones.  So, for instance, we don't correctly expose
       -- directives from remote schemas.
-      directives :: [DirectiveInfo] = directivesInfo @P.Parse
+      directives :: [DirectiveInfo] = directivesInfo @P.Parse <> [oneOfDirectiveInfo]
 
   -- Collect type information of all fields
   --
@@ -229,6 +229,17 @@ buildIntrospectionSchema queryRoot' mutationRoot' subscriptionRoot' = do
         sSubscriptionType = subscriptionRoot',
         sDirectives = directives
       }
+
+-- | @\@oneOf@ marks OneOf Input Objects; it is only used in the type system.
+oneOfDirectiveInfo :: DirectiveInfo
+oneOfDirectiveInfo =
+  P.DirectiveInfo
+    { P.diName = GName._oneOf,
+      P.diDescription = Just "Indicates exactly one field must be supplied and this field must not be `null`.",
+      P.diArguments = [],
+      P.diLocations = [G.DLTypeSystem G.TSDLINPUT_OBJECT],
+      P.diIsRepeatable = False
+    }
 
 -- | Generate a __type introspection parser
 typeIntrospection ::
@@ -280,6 +291,9 @@ type __Type {
 
   # should be non-null for NON_NULL and LIST only, must be null for the others
   ofType: __Type
+
+  # should be non-null for INPUT_OBJECT only, must be null for the others
+  isOneOf: Boolean
 }
 -}
 
@@ -405,6 +419,13 @@ typeField =
           SomeType (P.TList P.Nullable x) ->
             printer $ SomeType x
           _ -> encJNull
+      isOneOf :: FieldParser n (SomeType -> EncJSON)
+      isOneOf =
+        P.selection_ GName._isOneOf Nothing P.boolean
+          $> \case
+            SomeType (P.TNamed P.Nullable (P.Definition _ _ _ directives (P.TIInputObject _))) ->
+              encJFromJValue (P.isOneOfDefinition directives)
+            _ -> encJNull
    in applyPrinter
         <$> P.selectionSet
           GName.___Type
@@ -417,7 +438,8 @@ typeField =
             possibleTypes,
             enumValues,
             inputFields,
-            ofType
+            ofType,
+            isOneOf
           ]
 
 {-

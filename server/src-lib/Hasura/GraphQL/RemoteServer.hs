@@ -14,6 +14,8 @@ import Control.Lens (set, (^.))
 import Control.Monad.Memoize
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson qualified as J
+import Data.Aeson.KeyMap qualified as KM
+import Data.Aeson.Types qualified as J (parseMaybe)
 import Data.ByteString.Lazy qualified as BL
 import Data.Environment qualified as Env
 import Data.FileEmbed (makeRelativeToProject)
@@ -28,6 +30,7 @@ import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Authentication.Session (mkClientHeadersForward, sessionVariablesToHeaders)
 import Hasura.Authentication.User (UserInfo, _uiSession)
 import Hasura.Base.Error
+import Hasura.GraphQL.Parser qualified as P (oneOfDirective)
 import Hasura.GraphQL.Parser.Monad (Parse)
 import Hasura.GraphQL.Parser.Name qualified as GName
 import Hasura.GraphQL.Schema.Common
@@ -65,14 +68,62 @@ fetchRemoteSchema ::
   ValidatedRemoteSchemaDef ->
   m (IntrospectionResult, BL.ByteString, RemoteSchemaInfo)
 fetchRemoteSchema env introspectionHeaderConf rsDef = do
-  (_, _, rawIntrospectionResult) <-
+  (_, _, rawIntrospectionResult') <-
     execRemoteGQForIntrospection env Tracing.b3TraceContextPropagator introspectionHeaderConf rsDef introspectionQuery
+  rawIntrospectionResult <- withOneOfFlags rawIntrospectionResult'
   (ir, rsi) <- stitchRemoteSchema rawIntrospectionResult rsDef
   -- The 'rawIntrospectionResult' contains the 'Bytestring' response of
   -- the introspection result of the remote server. We store this in the
   -- 'RemoteSchemaCtx' because we can use this when the 'introspect_remote_schema'
   -- is called by simple encoding the result to JSON.
   pure (ir, rawIntrospectionResult, rsi)
+  where
+    -- `__Type.isOneOf` (OneOf Input Objects) is not part of the standard introspection
+    -- query, as older servers reject it. It is only requested from servers that define
+    -- it, and added to the introspection result, which is what gets stored.
+    withOneOfFlags raw
+      | supportsIsOneOf raw =
+          ( do
+              (_, _, rawFlags) <-
+                execRemoteGQForIntrospection env Tracing.b3TraceContextPropagator introspectionHeaderConf rsDef introspectionOneOfQuery
+              pure $ fromMaybe raw $ addOneOfFlags raw rawFlags
+          )
+            `catchError` \_ -> pure raw
+      | otherwise = pure raw
+
+-- | Does the remote server's own @__Type@ have the @isOneOf@ field?
+supportsIsOneOf :: BL.ByteString -> Bool
+supportsIsOneOf raw = isJust do
+  types <- introspectionTypes =<< J.decode raw
+  guard $ flip any types \t -> J.parseMaybe (.: "name") t == Just ("__Type" :: Text) && hasIsOneOfField t
+  where
+    hasIsOneOfField t = maybe False (any \f -> J.parseMaybe (.: "name") f == Just ("isOneOf" :: Text)) (J.parseMaybe (.: "fields") t :: Maybe [J.Object])
+
+-- | Set @isOneOf: true@ on the types of the introspection result that are OneOf Input Objects.
+addOneOfFlags :: BL.ByteString -> BL.ByteString -> Maybe BL.ByteString
+addOneOfFlags raw rawFlags = do
+  flags <- introspectionTypes =<< J.decode rawFlags
+  let oneOfTypes = Set.fromList [name | t <- flags, Just True <- [J.parseMaybe (.: "isOneOf") t], Just name <- [J.parseMaybe (.: "name") t :: Maybe Text]]
+  result <- J.decode raw
+  pure $ J.encode $ overIntrospectionTypes (map (markOneOf oneOfTypes)) result
+  where
+    markOneOf oneOfTypes t
+      | Just name <- J.parseMaybe (.: "name") t,
+        name `Set.member` oneOfTypes =
+          KM.insert "isOneOf" (J.Bool True) t
+      | otherwise = t
+
+introspectionTypes :: J.Object -> Maybe [J.Object]
+introspectionTypes = J.parseMaybe \o -> o .: "data" >>= (.: "__schema") >>= (.: "types")
+
+overIntrospectionTypes :: ([J.Object] -> [J.Object]) -> J.Object -> J.Object
+overIntrospectionTypes f = adjust "data" (onObject (adjust "__schema" (onObject (adjust "types" onTypes))))
+  where
+    adjust key g o = maybe o (\v -> KM.insert key (g v) o) (KM.lookup key o)
+    onObject g = \case
+      J.Object o -> J.Object (g o)
+      v -> v
+    onTypes v = maybe v (J.toJSON . f) (J.parseMaybe J.parseJSON v)
 
 -- | Parses the remote schema introspection result, and check whether it looks
 -- like it's a valid GraphQL endpoint even under the configured customization.
@@ -296,6 +347,18 @@ validateSchemaCustomizationsDistinct remoteSchemaCustomizer (RemoteSchemaIntrosp
 -------------------------------------------------------------------------------
 -- Introspection
 
+introspectionOneOfQuery :: GQLReqOutgoing
+introspectionOneOfQuery =
+  $( do
+       fp <- makeRelativeToProject "src-rsr/introspection-one-of.json"
+       TH.qAddDependentFile fp
+       eitherResult <- TH.runIO $ J.eitherDecodeFileStrict fp
+       either fail TH.lift $ do
+         r@GQLReq {..} <- eitherResult
+         op <- left (T.unpack . showQErr) $ getSingleOperation r
+         pure GQLReq {_grQuery = op, ..}
+   )
+
 introspectionQuery :: GQLReqOutgoing
 introspectionQuery =
   $( do
@@ -407,7 +470,9 @@ instance J.FromJSON (FromIntrospection (G.TypeDefinition [G.Name] G.InputValueDe
         pure $ G.TypeDefinitionEnum $ G.EnumTypeDefinition desc name [] vals
       "INPUT_OBJECT" -> do
         inputFields <- foldMap (fmap fromIntrospection) <$> o .:? "inputFields"
-        pure $ G.TypeDefinitionInputObject $ G.InputObjectTypeDefinition desc name [] inputFields
+        isOneOf <- o .:? "isOneOf"
+        let directives = [P.oneOfDirective | isOneOf == Just True]
+        pure $ G.TypeDefinitionInputObject $ G.InputObjectTypeDefinition desc name directives inputFields
       _ -> pErr $ "unknown kind: " <> kind
     return $ FromIntrospection r
 
